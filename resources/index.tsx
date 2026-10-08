@@ -2,7 +2,7 @@ import { dispatch } from '@wordpress/data';
 import domReady from '@wordpress/dom-ready';
 import { createRoot } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
-import { batchProducts, batchVariations, newBatchId, toRow } from './api/client';
+import { batchProducts, batchVariationsAcross, newBatchId, toRow } from './api/client';
 import { App } from './app';
 import { createExtensionApi } from './extensions/api';
 import { ACTIONS } from './extensions/hooks';
@@ -63,13 +63,14 @@ async function batchUpdate( update: BatchUpdate, options: { source?: string } = 
 	};
 
 	try {
-		for ( const [ parentId, rows ] of Object.entries( update.variations ?? {} ) ) {
-			if ( ! rows.length ) {
-				continue;
-			}
+		// Every variation of every parent in one cross-parent request per 100 rows.
+		const variationRows = Object.entries( update.variations ?? {} ).flatMap( ( [ parentId, rows ] ) => rows.map( ( row ) => ( { ...row, parent_id: Number( parentId ) } ) ) );
 
-			const response = await batchVariations( Number( parentId ), rows, { batchId, source } );
-			collect( ( response.update ?? [] ).map( ( row ) => ( isBatchItemError( row ) ? row : toRow( row, Number( parentId ) ) ) ) );
+		if ( variationRows.length ) {
+			const parentOf = new Map( variationRows.map( ( row ) => [ row.id, row.parent_id ] ) );
+			const response = await batchVariationsAcross( variationRows, { batchId, source } );
+
+			collect( ( response.update ?? [] ).map( ( row ) => ( isBatchItemError( row ) ? row : toRow( row, parentOf.get( row.id ) ) ) ) );
 		}
 
 		if ( update.products?.length ) {

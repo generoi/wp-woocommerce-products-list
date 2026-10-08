@@ -8,6 +8,7 @@
  */
 import { __ } from '@wordpress/i18n';
 import type { ProductField, ProductListItem } from '../types';
+import { hasArrayOp } from './bulk-array';
 import { isEmptyValue, isPlainObject, normalizeForCompare, readFieldValue } from './field-value';
 
 export interface MixedState {
@@ -98,7 +99,10 @@ export function mergeItems( items: ProductListItem[], fields: ProductField[] ): 
 		const values = rows.map( ( item ) => readFieldValue( field, item ) );
 		const { value, isMixed } = mergeValues( values );
 
-		data[ field.id ] = isMixed && hasOptionList( field ) ? MIXED_VALUE : value;
+		// A list field with a bulk op starts empty: the picked terms are added to / removed from each row's own list.
+		const withOp = field.type === 'array' && hasArrayOp( fields, field.id );
+
+		data[ field.id ] = withOp ? [] : isMixed && hasOptionList( field ) ? MIXED_VALUE : value;
 		mixed[ field.id ] = {
 			isMixed,
 			isEmpty: ! isMixed && isEmptyValue( value ),

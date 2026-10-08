@@ -75,8 +75,11 @@ describe( 'batch scope', () => {
 		const rows = [ row( { id: 1, object_id: 206 } ), row( { id: 2, object_id: 210 } ), row( { id: 3, object_id: 210, field: 'stock_status' } ), row( { id: 4, object_id: 255, action: 'trash', field: '' } ) ];
 		const scope = summarizeBatch( rows, 4 );
 
-		expect( scope ).toEqual( { changes: 4, objects: 2, fields: [ 'stock_quantity', 'stock_status' ], partial: false } );
-		expect( describeBatchScope( scope ) ).toBe( 'This will put back 4 changes on 2 items: stock_quantity, stock_status.' );
+		// The trash row put nothing in place: three changes, not four.
+		expect( scope ).toEqual( { changes: 3, objects: 2, fields: [ 'stock_quantity', 'stock_status' ], partial: false } );
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 3 changes on 2 items: stock_quantity, stock_status.' );
+		// An error row recorded no change either.
+		expect( summarizeBatch( [ ...rows, row( { id: 5, object_id: 300, status: 'error', message: 'Invalid ID.' } ) ], 5 ).changes ).toBe( 3 );
 		expect( describeBatchScope( summarizeBatch( rows.slice( 0, 1 ), 120 ) ) ).toMatch( /120 changes on 1 item\+: stock_quantity\./ );
 	} );
 } );

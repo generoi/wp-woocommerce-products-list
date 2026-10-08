@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { referenceText, toFormFields, VARIATION_STATUS_ELEMENTS } from '../../resources/edit/form-fields';
+import { referenceText, toFormFields, VARIATION_STATUS_ELEMENTS, variationShippingClassElements } from '../../resources/edit/form-fields';
 import { mergeItems, MIXED_VALUE } from '../../resources/edit/merge';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
@@ -120,5 +120,28 @@ describe( 'reference help text', () => {
 		const item = simple( 1, { i18n: { se: { name: { value: '', source: '<b>Saga</b>' } } } } );
 
 		expect( formFor( fields, [ item ] ).get( 'i18n:se.name' ).description ).toBe( 'Default: Saga' );
+	} );
+} );
+
+describe( 'variation shipping class', () => {
+	const shipping = field( 'shipping_class', { elements: [ { value: '', label: 'No shipping class' }, { value: 'bulky', label: 'Bulky' } ], rest: { fields: [ 'shipping_class' ], applies: { product: true, variation: true } } } );
+	const withClasses = editSettings( { shippingClasses: [ { id: 7, value: 'bulky', label: 'Bulky' } ] } );
+
+	it( 'offers "Same as parent" plus the store classes for variations, the product list otherwise', () => {
+		const merged = mergeItems( [ variation( 11, 1 ) ], [ shipping ] );
+		const forVariation = toFormFields( [ shipping ], { bulk: false, items: [ variation( 11, 1 ) ], base: merged.data, mixed: merged.mixed, settings: withClasses } )[ 0 ]!;
+
+		expect( forVariation.elements ).toEqual( [ { value: '', label: 'Same as parent' }, { value: 'bulky', label: 'Bulky' } ] );
+		expect( variationShippingClassElements( withClasses ) ).toHaveLength( 2 );
+		expect( formFor( [ shipping ], [ simple( 1 ) ] ).get( 'shipping_class' ).elements?.[ 0 ] ).toEqual( { value: '', label: 'No shipping class' } );
+	} );
+} );
+
+describe( 'reference entities', () => {
+	it( 'decodes HTML entities and non-breaking spaces in the Default: help text', () => {
+		const text = field( 'i18n:se.short_description', { edit: { group: 'i18n:se', bulk: false } } );
+
+		expect( referenceText( text, '<b>Knitido Cotton &amp; Merino Tabi</b>&nbsp;on suosittu varvassukka', settings ) ).toBe( 'Knitido Cotton & Merino Tabi on suosittu varvassukka' );
+		expect( referenceText( text, 'Tom &amp; Jerry', settings ) ).toBe( 'Tom & Jerry' );
 	} );
 } );

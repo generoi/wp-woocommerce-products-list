@@ -14,7 +14,10 @@ import { __, sprintf } from '@wordpress/i18n';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { splitParentEdits } from './apply-to-variations';
+import { applyArrayOp, arrayOpFieldId, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
 import { isVariableParent, readFieldValue, readReference } from './field-value';
+import { resolveRowEdits } from './row-rules';
+import type { RowEditOptions } from './row-rules';
 import { leafOf } from './visibility';
 
 export type NumericOperation = 'dont_change' | 'set' | 'increase' | 'decrease' | 'regular_minus';
@@ -95,26 +98,30 @@ export function parseNumeric( input: unknown, settings?: Settings ): number | un
 		return undefined;
 	}
 
-	let text = input.trim();
+	let text = input.trim().replace( /\s+/g, '' );
 
 	if ( text === '' ) {
 		return undefined;
 	}
 
-	const thousand = settings?.currency.thousandSeparator ?? '';
+	const thousand = settings?.currency.thousandSeparator?.trim() ?? '';
 	const decimal = settings?.currency.decimalSeparator ?? '.';
 
-	if ( thousand && thousand !== '.' && thousand !== ',' ) {
+	// The store's own notation first: thousands out, then its decimal mark to a dot.
+	// A lone "." or "," on a store that groups thousands with it is a thousands
+	// mark only when it groups three digits ("1.234"); "12.5" / "12,5" are decimals.
+	const grouped = thousand === '.' || thousand === ',' ? new RegExp( `^-?\\d{1,3}(\\${ thousand }\\d{3})+$` ) : null;
+
+	if ( thousand && thousand !== decimal && text.includes( thousand ) && ( ! grouped || text.includes( decimal ) || grouped.test( text ) ) ) {
 		text = text.split( thousand ).join( '' );
 	}
 
-	if ( decimal !== '.' && text.includes( decimal ) && ! text.includes( '.' ) ) {
+	if ( decimal !== '.' && text.includes( decimal ) ) {
 		text = text.replace( decimal, '.' );
-	} else if ( decimal !== '.' && thousand && text.includes( thousand ) ) {
-		text = text.split( thousand ).join( '' );
+	} else if ( decimal === '.' && text.includes( ',' ) && ! text.includes( '.' ) ) {
+		// A comma typed on a dot-decimal store: a decimal mark, not a thousands group.
+		text = text.replace( ',', '.' );
 	}
-
-	text = text.replace( /\s+/g, '' );
 
 	if ( ! /^-?\d*(\.\d*)?$/.test( text ) || text === '-' || text === '.' ) {
 		return undefined;
@@ -314,10 +321,14 @@ function contextFor( item: ProductListItem, id: string, edits: Record< string, u
 /**
  * The edits that apply to a row. A variable parent never takes sellable
  * edits itself: with "apply to variations" they go to its variations, and
- * without it the form does not offer them.
+ * without it the form does not offer them. Then the per-row rules: stock
+ * edits only for rows that (will) manage stock, sale edits unless the row
+ * is skipped for already having a sale.
  */
-export function editsForItem( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[] ): Record< string, unknown > {
-	return isVariableParent( item ) ? splitParentEdits( edits, fields ).parent : edits;
+export function editsForItem( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], options: RowEditOptions = {} ): Record< string, unknown > {
+	const own = isVariableParent( item ) ? splitParentEdits( edits, fields ).parent : edits;
+
+	return resolveRowEdits( item, own, options );
 }
 
 /**
@@ -329,7 +340,7 @@ export function projectEdits( item: ProductListItem, edits: Record< string, unkn
 	const projected: Record< string, unknown > = {};
 
 	for ( const [ id, value ] of Object.entries( edits ) ) {
-		if ( value === undefined ) {
+		if ( value === undefined || isArrayOpFieldId( id ) ) {
 			continue;
 		}
 
@@ -351,11 +362,25 @@ export function projectEdits( item: ProductListItem, edits: Record< string, unkn
 			continue;
 		}
 
+		// A list edit with a bulk op is resolved against the row's own list; rows it leaves as they are are dropped.
+		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
+			const field = byId.get( id );
+			const chosen = edits[ arrayOpFieldId( id ) ];
+			const { next, changed } = applyArrayOp( field ? readFieldValue( field, item ) : undefined, isArrayOperation( chosen ) ? chosen : 'add', value );
+
+			if ( changed ) {
+				projected[ id ] = next;
+			}
+
+			continue;
+		}
+
 		projected[ id ] = value;
 	}
 
 	return projected;
 }
+
 
 export interface ProjectedError {
 	id: number;
@@ -373,7 +398,7 @@ function hasText( value: unknown ): boolean {
  * regular price, and a scheduled sale has a sale price to run with. Empty
  * errors means the save can go ahead.
  */
-export function validateBulkNumericEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings ): ProjectedError[] {
+export function validateBulkNumericEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): ProjectedError[] {
 	const errors: ProjectedError[] = [];
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 
@@ -382,7 +407,7 @@ export function validateBulkNumericEdits( items: ProductListItem[], edits: Recor
 			continue;
 		}
 
-		const own = editsForItem( item, edits, fields );
+		const own = editsForItem( item, edits, fields, options );
 		const projected = projectEdits( item, own, fields, settings );
 		const valueOf = ( id: string ): unknown => {
 			if ( id in projected ) {
@@ -475,6 +500,15 @@ export function validateBulkNumericEdits( items: ProductListItem[], edits: Recor
 			}
 
 			if ( ! hasText( valueOf( `${ prefix }date_on_sale_from` ) ) && ! hasText( valueOf( `${ prefix }date_on_sale_to` ) ) ) {
+				// "Schedule sale" ticked with both dates empty would start the sale right away.
+				if ( own[ `${ prefix }schedule_sale` ] === true ) {
+					errors.push( {
+						id: item.id,
+						field: `${ prefix }schedule_sale`,
+						message: __( 'Schedule sale is on but no start or end date is set: the sale would start immediately. Set a date or untick Schedule sale.', 'wp-woocommerce-products-list' ),
+					} );
+				}
+
 				continue;
 			}
 
@@ -503,7 +537,7 @@ export interface ProjectedWarning {
  * Rows a relative op pushes below zero: the save clamps them to 0 (a stock
  * of 0 means Out of stock), so the user confirms first.
  */
-export function projectWarnings( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings ): ProjectedWarning[] {
+export function projectWarnings( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): ProjectedWarning[] {
 	const warnings: ProjectedWarning[] = [];
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 
@@ -512,7 +546,7 @@ export function projectWarnings( items: ProductListItem[], edits: Record< string
 			continue;
 		}
 
-		const own = editsForItem( item, edits, fields );
+		const own = editsForItem( item, edits, fields, options );
 
 		for ( const [ id, value ] of Object.entries( own ) ) {
 			if ( ! isNumericOp( value ) ) {

@@ -9,8 +9,11 @@ import { dateI18n } from '@wordpress/date';
 import { applyFilters } from '@wordpress/hooks';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, Settings } from '../types';
+import { isArrayOpFieldId } from './bulk-array';
 import { isPlainObject, mergeFragments, readFieldValue } from './field-value';
 import { isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
+import { resolveRowEdits } from './row-rules';
+import type { RowEditOptions } from './row-rules';
 import { leafOf } from './visibility';
 
 /** The virtual "schedule sale" toggle: not a wc/v3 key, it only clears the dates when turned off. */
@@ -57,12 +60,17 @@ function sameAsCurrent( field: ProductField, item: ProductListItem, value: unkno
 	return JSON.stringify( current ) === JSON.stringify( value );
 }
 
-export function buildPayload( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], settings: Settings ): Record< string, unknown > {
+export function buildPayload( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): Record< string, unknown > {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
-	const projected = projectEdits( item, edits, fields, settings );
+	const own = resolveRowEdits( item, edits, options );
+	const projected = projectEdits( item, own, fields, settings );
 	let payload: Record< string, unknown > = {};
 
 	for ( const [ id, value ] of Object.entries( projected ) ) {
+		if ( isArrayOpFieldId( id ) ) {
+			continue;
+		}
+
 		if ( id === SCHEDULE_SALE_FIELD_ID || leafOf( id ) === SCHEDULE_SALE_FIELD_ID ) {
 			if ( value === false ) {
 				const prefix = id.slice( 0, id.length - SCHEDULE_SALE_FIELD_ID.length );
@@ -90,7 +98,7 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 
 		// A numeric op always changes something or was dropped by projectEdits;
 		// a plain value equal to the row's is a no-op the server would log nothing for.
-		if ( ! isNumericOp( edits[ id ] ) && sameAsCurrent( field, item, next ) ) {
+		if ( ! isNumericOp( own[ id ] ) && sameAsCurrent( field, item, next ) ) {
 			continue;
 		}
 
@@ -105,7 +113,7 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 		}
 	}
 
-	const filtered = applyFilters( FILTERS.savePayload, payload, item, edits );
+	const filtered = applyFilters( FILTERS.savePayload, payload, item, own );
 
 	return isPlainObject( filtered ) ? filtered : payload;
 }

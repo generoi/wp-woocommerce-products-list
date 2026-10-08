@@ -171,7 +171,7 @@ describe( 'numericKindOf', () => {
 
 describe( 'projectWarnings', () => {
 	it( 'lists rows a decrease pushes below zero, naming the clamp', () => {
-		const items = [ simple( 1, { stock_quantity: 9 } ), simple( 2, { stock_quantity: 124 } ), simple( 3, { stock_quantity: 2 } ), variable( 4, { stock_quantity: 1 } ) ];
+		const items = [ simple( 1, { stock_quantity: 9 } ), simple( 2, { stock_quantity: 124 } ), simple( 3, { stock_quantity: 2 } ), variable( 4, { stock_quantity: 1, manage_stock: true } ) ];
 		const warnings = projectWarnings( items, { stock_quantity: op( 'decrease', '10' ) }, fields, settings );
 
 		expect( warnings.map( ( warning ) => [ warning.id, warning.value ] ) ).toEqual( [ [ 1, -1 ], [ 3, -8 ], [ 4, -9 ] ] );
@@ -233,7 +233,7 @@ describe( 'validateBulkNumericEdits', () => {
 
 		expect( tooHigh.map( ( error ) => error.id ) ).toEqual( [ 12 ] );
 		// A parent-owned edit is still checked on the parent.
-		expect( validateBulkNumericEdits( [ variable( 1, { stock_quantity: 3 } ) ], { stock_quantity: '1.5' }, fields, settings ) ).toHaveLength( 1 );
+		expect( validateBulkNumericEdits( [ variable( 1, { stock_quantity: 3, manage_stock: true } ) ], { stock_quantity: '1.5' }, fields, settings ) ).toHaveLength( 1 );
 	} );
 
 	it( 'refuses a schedule that would run without a sale price', () => {
@@ -336,5 +336,23 @@ describe( 'validateBulkNumericEdits', () => {
 		expect( validateNumericOps( { regular_price: op( 'set', '' ), stock_quantity: op( 'increase', '2' ), name: 'x' }, fields, settings ) ).toEqual( [
 			{ field: 'regular_price', message: expect.stringMatching( /number/ ) },
 		] );
+	} );
+} );
+
+describe( 'parseNumeric with every separator pairing', () => {
+	it( 'accepts the store notation for dot-thousands/comma-decimal and comma-thousands/dot-decimal', () => {
+		const de = editSettings( { currency: { ...settings.currency, thousandSeparator: '.', decimalSeparator: ',' } } );
+		const us = editSettings( { currency: { ...settings.currency, thousandSeparator: ',', decimalSeparator: '.' } } );
+
+		expect( parseNumeric( '1.234,50', de ) ).toBe( 1234.5 );
+		expect( parseNumeric( '12,5', de ) ).toBe( 12.5 );
+		expect( parseNumeric( '1.234', de ) ).toBe( 1234 );
+		expect( parseNumeric( '12.5', de ) ).toBe( 12.5 );
+		expect( parseNumeric( '1,234.50', us ) ).toBe( 1234.5 );
+		expect( parseNumeric( '12.5', us ) ).toBe( 12.5 );
+		expect( parseNumeric( '12,5', us ) ).toBe( 12.5 );
+		expect( parseNumeric( '1 234,50', settings ) ).toBe( 1234.5 );
+		expect( parseNumeric( '1,0049', settings ) ).toBe( 1.0049 );
+		expect( parseNumeric( 'abc', de ) ).toBeUndefined();
 	} );
 } );

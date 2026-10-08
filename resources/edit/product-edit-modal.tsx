@@ -1,35 +1,48 @@
 /**
  * Quick edit (one row) and bulk edit (many rows) in one DataViews action
- * modal. Edits stay local until Save; Cancel discards (after a confirm when
- * something was typed). Save goes variations first then parents, with
- * progress; a partial failure keeps the modal open with the failed rows
- * listed and the next Save retries only those.
+ * modal. Edits stay local until Save; Cancel (or Escape) discards after a
+ * confirm when something was typed. Save goes variations first then
+ * parents, with progress; a partial failure keeps the modal open, in the
+ * mode it opened in, with the failed rows listed and the next Save
+ * retrying only those.
+ *
+ * The rows the modal works on are the ones it opened with: the list trims
+ * saved rows from the selection while the modal is still up, and following
+ * that would turn a bulk edit of three into a quick edit of the one that
+ * failed.
  */
 import { Button, CheckboxControl, Notice, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
-import { useCallback, useEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { KeyboardEvent } from 'react';
 import { getVariations } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import type { RenderModalProps } from '../dataviews';
 import { getSettings } from '../settings';
-import { patchItems } from '../store/products';
+import { patchItems, removeItems } from '../store/products';
 import type { ProductField, ProductListItem, QuickEditTab } from '../types';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, variationFetchFields } from './apply-to-variations';
-import { editFetchFields, hydrateItems } from './hydrate';
+import { withArrayOps } from './bulk-array';
+import { editFetchFields, hydrateSelection } from './hydrate';
 import { projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary } from './change-summary';
+import { isGoneCode } from './errors';
 import { isVariableParent, isVariation } from './field-value';
 import { buildForm, buildTabs, fieldsOfTab, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
 import { labelsOf, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
+import { canEnableStock, rowsWithExistingSale, stockGatedRows } from './row-rules';
+import type { RowEditOptions } from './row-rules';
 import { saveEdits } from './save';
+import type { SaveResult } from './save';
+import { planSave } from './save-runner';
+import type { SavePlan } from './save-runner';
 import { undoBatch } from './undo';
 import { useEditState } from './use-edit-state';
-import { collectInvalidFields, revealInvalidControls } from './validity';
+import { collectInvalidFields, focusFirstInvalidControl, revealInvalidControls } from './validity';
 import { isSellableField, visibleEditFields } from './visibility';
 
 export interface ProductEditModalProps extends RenderModalProps< ProductListItem > {
@@ -43,8 +56,28 @@ const IDLE_LOAD: VariationLoad = { status: 'idle', byParent: new Map(), count: 0
 
 const PANEL_ID = 'wc-pl-edit-panel';
 
+/** How many item names a notice lists before "and N more". */
+const NAMES_SHOWN = 5;
+
 function pick( edits: Record< string, unknown >, ids: Set< string > ): Record< string, unknown > {
 	return Object.fromEntries( Object.entries( edits ).filter( ( [ id ] ) => ids.has( id ) ) );
+}
+
+function nameOf( item: ProductListItem ): string {
+	return ( item as { name?: string } ).name || `#${ item.id }`;
+}
+
+/** "A, B, C and 4 more" for a notice. */
+export function listNames( items: ProductListItem[] ): string {
+	const names = items.slice( 0, NAMES_SHOWN ).map( nameOf );
+	const rest = items.length - names.length;
+
+	if ( rest > 0 ) {
+		/* translators: 1: a comma-separated list of names, 2: how many more there are */
+		return sprintf( __( '%1$s and %2$d more', 'wp-woocommerce-products-list' ), names.join( ', ' ), rest );
+	}
+
+	return names.join( ', ' );
 }
 
 function summary( items: ProductListItem[] ): string {
@@ -52,7 +85,7 @@ function summary( items: ProductListItem[] ): string {
 	const variations = items.length - products;
 
 	if ( items.length === 1 ) {
-		return ( items[ 0 ] as { name?: string } ).name ?? '';
+		return nameOf( items[ 0 ]! );
 	}
 
 	const parts: string[] = [];
@@ -77,34 +110,115 @@ function focusFirstControl( root: HTMLElement | null ): void {
 	first?.focus();
 }
 
-type Hydration = { status: 'loading' | 'ready'; items: ProductListItem[] };
+/** The Save button text for a plan: what will actually be written. */
+export function saveLabelFor( plan: SavePlan ): string {
+	const { products, variations } = plan;
+
+	if ( products === 0 && variations === 0 ) {
+		return __( 'Nothing to save', 'wp-woocommerce-products-list' );
+	}
+
+	if ( products > 0 && variations > 0 ) {
+		/* translators: 1: number of products, 2: number of variations */
+		return sprintf( __( 'Save %1$d products, %2$d variations', 'wp-woocommerce-products-list' ), products, variations );
+	}
+
+	if ( variations > 0 ) {
+		/* translators: %d: number of variations */
+		return sprintf( _n( 'Save %d variation', 'Save %d variations', variations, 'wp-woocommerce-products-list' ), variations );
+	}
+
+	/* translators: %d: number of products */
+	return sprintf( _n( 'Save %d product', 'Save %d products', products, 'wp-woocommerce-products-list' ), products );
+}
+
+/** The snackbar after a save without errors: what was written, and what the plan left out. */
+export function successMessage( result: SaveResult ): string {
+	const updated = result.updated.length;
+	const extras: string[] = [];
+
+	if ( result.unchanged > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d unchanged', '%d unchanged', result.unchanged, 'wp-woocommerce-products-list' ), result.unchanged ) );
+	}
+
+	if ( result.stockSkipped > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d skipped (no stock management)', '%d skipped (no stock management)', result.stockSkipped, 'wp-woocommerce-products-list' ), result.stockSkipped ) );
+	}
+
+	if ( result.saleSkipped > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d skipped (already on sale)', '%d skipped (already on sale)', result.saleSkipped, 'wp-woocommerce-products-list' ), result.saleSkipped ) );
+	}
+
+	if ( result.replacedSales > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d existing sale replaced', '%d existing sales replaced', result.replacedSales, 'wp-woocommerce-products-list' ), result.replacedSales ) );
+	}
+
+	if ( updated === 0 ) {
+		return extras.length
+			? /* translators: %s: e.g. "10 unchanged, 3 skipped (no stock management)" */
+			  sprintf( __( 'Nothing changed: %s.', 'wp-woocommerce-products-list' ), extras.join( ', ' ) )
+			: __( 'Nothing to change.', 'wp-woocommerce-products-list' );
+	}
+
+	/* translators: %d: number of rows saved */
+	const base = sprintf( _n( '%d item updated', '%d items updated', updated, 'wp-woocommerce-products-list' ), updated );
+
+	return `${ [ base, ...extras ].join( ', ' ) }.`;
+}
+
+type Hydration = { status: 'loading' | 'ready'; items: ProductListItem[]; missing: ProductListItem[] };
+
+function isTextEntry( target: EventTarget | null ): target is HTMLInputElement {
+	if ( ! ( target instanceof HTMLInputElement ) ) {
+		return false;
+	}
+
+	if ( [ 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color' ].includes( target.type ) ) {
+		return false;
+	}
+
+	// Token and combobox inputs use Enter to pick a suggestion.
+	return ! target.getAttribute( 'aria-autocomplete' ) && ! target.closest( '[role="combobox"], .components-form-token-field, [aria-haspopup="listbox"]' );
+}
 
 export function ProductEditModal( { items: selected, closeModal, onActionPerformed, fields: allFields }: ProductEditModalProps ) {
 	const settings = getSettings();
-	// The selection as DataViews hands it over, then the same rows reloaded
-	// with every editable field (the list only carries the visible columns).
-	// Keyed by the ids: DataViews passes a fresh array on every render.
-	const selectedRows = useMemo( () => selected.filter( ( item ) => ! item._placeholder ), [ selected ] );
+	// The rows the modal opened with (DataViews re-renders it with the live
+	// selection, which the list trims while a save is still being looked at).
+	const [ selectedRows ] = useState( () => selected.filter( ( item ) => ! item._placeholder ) );
 	const selectionKey = selectedRows.map( ( item ) => item.id ).join( ',' );
-	const [ hydration, setHydration ] = useState< Hydration >( { status: 'loading', items: selectedRows } );
+	// The same rows reloaded with every editable field (the list only carries the visible columns).
+	const [ hydration, setHydration ] = useState< Hydration >( { status: 'loading', items: selectedRows, missing: [] } );
 	const items = hydration.items;
-	const bulk = items.length > 1;
+	const bulk = selectedRows.length > 1;
 	const mode = bulk ? 'bulk' : 'quick';
 
 	useEffect( () => {
 		let cancelled = false;
 		const rows = selectedRows;
 
-		setHydration( { status: 'loading', items: rows } );
+		setHydration( { status: 'loading', items: rows, missing: [] } );
 
-		hydrateItems( rows, editFetchFields( allFields, rows, rows.length > 1 ? 'bulk' : 'quick' ) )
-			.then( ( full ) => {
+		hydrateSelection( rows, editFetchFields( allFields, rows, rows.length > 1 ? 'bulk' : 'quick' ) )
+			.then( ( { items: full, missing } ) => {
 				if ( cancelled ) {
 					return;
 				}
 
-				patchItems( full );
-				setHydration( { status: 'ready', items: full } );
+				const gone = new Set( missing );
+
+				patchItems( full.filter( ( row ) => ! gone.has( row.id ) ) );
+
+				// Rows deleted since the list loaded leave the list and the edit alike.
+				if ( missing.length ) {
+					removeItems( missing );
+				}
+
+				setHydration( { status: 'ready', items: full.filter( ( row ) => ! gone.has( row.id ) ), missing: full.filter( ( row ) => gone.has( row.id ) ) } );
 			} )
 			.catch( ( error: unknown ) => {
 				if ( cancelled ) {
@@ -112,7 +226,7 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 				}
 
 				notify.error( error instanceof Error ? error.message : __( 'The current values could not be loaded.', 'wp-woocommerce-products-list' ) );
-				setHydration( { status: 'ready', items: rows } );
+				setHydration( { status: 'ready', items: rows, missing: [] } );
 			} );
 
 		return () => {
@@ -123,9 +237,11 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 
 	const loading = hydration.status === 'loading';
 	const variableParents = useMemo( () => items.filter( isVariableParent ), [ items ] );
-	const trashed = useMemo( () => items.filter( ( item ) => item.status === 'trash' ).length, [ items ] );
+	const trashedRows = useMemo( () => items.filter( ( item ) => item.status === 'trash' ), [ items ] );
 
 	const [ applyToVariations, setApplyToVariations ] = useState( false );
+	const [ enableManageStock, setEnableManageStock ] = useState( false );
+	const [ skipExistingSales, setSkipExistingSales ] = useState( false );
 	const [ tabId, setTabId ] = useState( GENERAL_TAB_ID );
 	const [ errors, setErrors ] = useState< EditError[] >( [] );
 	const [ warnings, setWarnings ] = useState< EditError[] >( [] );
@@ -133,12 +249,14 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 	const [ failedIds, setFailedIds ] = useState< Set< number > | null >( null );
 	const [ confirmClose, setConfirmClose ] = useState( false );
 	const [ saving, setSaving ] = useState( false );
+	const [ submitRequested, setSubmitRequested ] = useState( false );
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
 	const [ variations, setVariations ] = useState< VariationLoad >( IDLE_LOAD );
 	const mountedRef = useRef( true );
 	const rootRef = useRef< HTMLFormElement >( null );
 	const formRef = useRef< HTMLDivElement >( null );
 	const focusedForRef = useRef< string | null >( null );
+	const saveRef = useRef< () => Promise< void > >( async () => {} );
 
 	useEffect( () => {
 		mountedRef.current = true;
@@ -148,18 +266,12 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		};
 	}, [] );
 
-	// Another selection in the same modal instance starts clean.
-	useEffect( () => {
-		setErrors( [] );
-		setWarnings( [] );
-		setAcknowledged( null );
-		setFailedIds( null );
-		setTabId( GENERAL_TAB_ID );
-	}, [ selectionKey ] );
-
+	const rowOptions = useMemo< RowEditOptions >( () => ( { enableManageStock, skipExistingSales } ), [ enableManageStock, skipExistingSales ] );
 	const fieldsWithToggle = useMemo( () => withScheduleSale( allFields ), [ allFields ] );
-	const visibleFields = useMemo( () => visibleEditFields( fieldsWithToggle, items, { mode, applyToVariations } ), [ fieldsWithToggle, items, mode, applyToVariations ] );
-	const state = useEditState( items, fieldsWithToggle, selectionKey );
+	// Bulk mode adds the add/remove/replace select in front of the list fields.
+	const editFields = useMemo( () => ( bulk ? withArrayOps( fieldsWithToggle ) : fieldsWithToggle ), [ fieldsWithToggle, bulk ] );
+	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
+	const state = useEditState( items, editFields, selectionKey );
 
 	const tabs = useMemo( () => buildTabs( visibleFields, items, settings ), [ visibleFields, items, settings ] );
 	const tab = useMemo< QuickEditTab >( () => tabs.find( ( entry ) => entry.id === tabId ) ?? tabs[ 0 ] ?? { id: GENERAL_TAB_ID, label: __( 'General', 'wp-woocommerce-products-list' ) }, [ tabs, tabId ] );
@@ -188,7 +300,7 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 	}, [ loading, selectionKey ] );
 
 	// Load the variations of the selected variable parents once the option is on,
-	// so relative price ops and the sale < regular check see their current values.
+	// so relative price ops, the sale < regular check and the plan see their current values.
 	useEffect( () => {
 		if ( ! applyToVariations || variableParents.length === 0 ) {
 			setVariations( IDLE_LOAD );
@@ -241,9 +353,9 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 	const visibleIds = useMemo( () => new Set( visibleFields.map( ( field ) => field.id ) ), [ visibleFields ] );
 	const pendingEdits = useMemo( () => pick( state.edits, visibleIds ), [ state.edits, visibleIds ] );
 	const pendingCount = Object.keys( pendingEdits ).length;
-	const fieldLabels = useMemo( () => labelsOf( fieldsWithToggle ), [ fieldsWithToggle ] );
+	const fieldLabels = useMemo( () => labelsOf( editFields ), [ editFields ] );
 	const tabLabels = useMemo( () => Object.fromEntries( tabs.map( ( entry ) => [ entry.id, entry.label ] ) ), [ tabs ] );
-	const fieldTab = useCallback( ( fieldId: string ) => fieldsWithToggle.find( ( field ) => field.id === fieldId ), [ fieldsWithToggle ] );
+	const fieldTab = useCallback( ( fieldId: string ) => editFields.find( ( field ) => field.id === fieldId ), [ editFields ] );
 
 	const onChange = useCallback(
 		( changes: Record< string, unknown > ) => {
@@ -255,6 +367,8 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		[ state ]
 	);
 
+	const variationsReady = ! applyToVariations || variableParents.length === 0 || variations.status === 'loaded';
+
 	const targetsForValidation = useMemo( () => {
 		if ( ! applyToVariations ) {
 			return items;
@@ -262,6 +376,26 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 
 		return [ ...items, ...Array.from( variations.byParent.values() ).flat() ];
 	}, [ applyToVariations, items, variations ] );
+
+	// The plan and the warnings walk every target row; on a large selection they
+	// follow the keystroke a frame later rather than slowing the input down.
+	const plannedEdits = useDeferredValue( pendingEdits );
+	const plannedCount = Object.keys( plannedEdits ).length;
+
+	/** What the save will write, skip and leave alone, for the labels and the summary. */
+	const plan = useMemo< SavePlan | null >( () => {
+		if ( loading || plannedCount === 0 || ! variationsReady ) {
+			return null;
+		}
+
+		return planSave( items, plannedEdits, editFields, settings, { applyToVariations, variationsByParent: variations.byParent, ...rowOptions } );
+	}, [ loading, plannedCount, variationsReady, items, plannedEdits, editFields, settings, applyToVariations, variations.byParent, rowOptions ] );
+
+	// Rows a stock edit would be dropped for, before the "turn on Manage stock" option is applied.
+	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( targetsForValidation, plannedEdits ) : [] ), [ plannedCount, targetsForValidation, plannedEdits ] );
+	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
+	// Rows whose current sale the edits replace (bulk only: quick edit shows the field itself).
+	const existingSales = useMemo( () => ( bulk && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ bulk, plannedCount, targetsForValidation, plannedEdits ] );
 
 	/** After a partial failure only the failed rows (and the parents whose variations failed) are sent again. */
 	const retryTargets = useMemo( () => {
@@ -310,8 +444,21 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		}
 
 		revealInvalidControls( formRef.current );
+		// After the tab (and the error state) rendered: the first invalid control gets the keyboard focus.
+		setTimeout( () => {
+			if ( mountedRef.current ) {
+				focusFirstInvalidControl( formRef.current );
+			}
+		}, 0 );
 
 		return true;
+	};
+
+	const finish = () => {
+		if ( mountedRef.current ) {
+			onActionPerformed?.( items );
+			closeModal?.();
+		}
 	};
 
 	const save = async () => {
@@ -341,13 +488,13 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 			return;
 		}
 
-		if ( applyToVariations && variableParents.length && variations.status !== 'loaded' ) {
+		if ( ! variationsReady ) {
 			setErrors( [ { id: 0, message: variations.error ?? __( 'The variations are still loading.', 'wp-woocommerce-products-list' ) } ] );
 
 			return;
 		}
 
-		const projected = validateBulkNumericEdits( targetsForValidation, pendingEdits, fieldsWithToggle, settings );
+		const projected = validateBulkNumericEdits( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
 
 		if ( projected.length ) {
 			setErrors( projected );
@@ -356,7 +503,7 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		}
 
 		// Rows a decrease would push below zero are clamped; say so and ask once.
-		const clamped = projectWarnings( targetsForValidation, pendingEdits, fieldsWithToggle, settings );
+		const clamped = projectWarnings( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
 		const warningKey = clamped.map( ( warning ) => `${ warning.id }:${ warning.field }` ).join( '|' );
 
 		if ( clamped.length && acknowledged !== warningKey ) {
@@ -372,10 +519,11 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		setProgress( { done: 0, total: 0 } );
 
 		try {
-			const result = await saveEdits( retryTargets.items, pendingEdits, fieldsWithToggle, {
+			const result = await saveEdits( retryTargets.items, pendingEdits, editFields, {
 				applyToVariations,
 				source: bulk ? 'bulk' : 'quick',
 				prefetchedVariations: retryTargets.prefetched,
+				...rowOptions,
 				onProgress: ( done, total ) => {
 					if ( mountedRef.current ) {
 						setProgress( { done, total } );
@@ -384,24 +532,17 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 			} );
 
 			const updated = result.updated.length;
+			// Rows that no longer exist cannot be retried; they leave the list.
+			const gone = result.errors.filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id );
+
+			if ( gone.length ) {
+				removeItems( gone );
+			}
 
 			// The outcome is reported even when the modal was dismissed mid-save.
 			if ( result.errors.length === 0 ) {
-				notify.success(
-					updated === 0
-						? __( 'Nothing to change.', 'wp-woocommerce-products-list' )
-						: sprintf(
-								/* translators: %d: number of rows saved */
-								_n( '%d item updated.', '%d items updated.', updated, 'wp-woocommerce-products-list' ),
-								updated
-						  ),
-					updated > 0 ? { actions: [ { label: __( 'Undo', 'wp-woocommerce-products-list' ), onClick: () => void undoBatch( result.batchId ) } ] } : undefined
-				);
-
-				if ( mountedRef.current ) {
-					onActionPerformed?.( items );
-					closeModal?.();
-				}
+				notify.success( successMessage( result ), updated > 0 ? { actions: [ { label: __( 'Undo', 'wp-woocommerce-products-list' ), onClick: () => void undoBatch( result.batchId ) } ] } : undefined );
+				finish();
 
 				return;
 			}
@@ -416,8 +557,15 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 			);
 
 			if ( mountedRef.current ) {
-				setErrors( result.errors.map( ( error ) => ( { id: error.id, message: error.message } ) ) );
-				setFailedIds( new Set( result.errors.map( ( error ) => error.id ) ) );
+				const goneSet = new Set( gone );
+
+				setErrors(
+					result.errors.map( ( error ) => ( {
+						id: error.id,
+						message: goneSet.has( error.id ) ? `${ error.message } ${ __( 'It was removed from the list.', 'wp-woocommerce-products-list' ) }` : error.message,
+					} ) )
+				);
+				setFailedIds( new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) ) );
 			}
 		} catch ( error ) {
 			notify.error( error instanceof Error ? error.message : String( error ) );
@@ -432,6 +580,18 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		}
 	};
 
+	useEffect( () => {
+		saveRef.current = save;
+	} );
+
+	// Enter / Cmd+Enter asks for a save; it runs after the keystroke's own value change has rendered.
+	useEffect( () => {
+		if ( submitRequested ) {
+			setSubmitRequested( false );
+			void saveRef.current();
+		}
+	}, [ submitRequested ] );
+
 	const requestClose = () => {
 		if ( saving ) {
 			return;
@@ -444,6 +604,36 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 		}
 
 		closeModal?.();
+	};
+
+	const onKeyDown = ( event: KeyboardEvent< HTMLFormElement > ) => {
+		if ( event.key === 'Escape' ) {
+			// The dialog closes on Escape unless the event was handled: a dirty form asks first, a save in progress cannot be left.
+			if ( saving || ( state.hasInput && pendingCount > 0 ) ) {
+				event.preventDefault();
+				event.stopPropagation();
+
+				if ( ! saving ) {
+					setConfirmClose( true );
+				}
+			}
+
+			return;
+		}
+
+		if ( event.key !== 'Enter' || event.shiftKey || event.altKey ) {
+			return;
+		}
+
+		const modifier = event.metaKey || event.ctrlKey;
+
+		// Plain Enter in a single-line field saves, as in the classic quick edit; Cmd/Ctrl+Enter from anywhere (a textarea too).
+		if ( ! modifier && ! isTextEntry( event.target ) ) {
+			return;
+		}
+
+		event.preventDefault();
+		setSubmitRequested( true );
 	};
 
 	const onTabKeyDown = ( event: KeyboardEvent< HTMLDivElement > ) => {
@@ -513,23 +703,34 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 	// wc/v3's batch routes need edit_others_products (woocommerce_rest_cannot_batch);
 	// one row goes through POST products/{id} instead (api/client.ts), several cannot.
 	const needsEditOthers = ! settings.caps.editOthers && ( items.length > 1 || applyToVariations );
+	const retryable = failedIds ? failedIds.size : 0;
+	const failedButNothingToRetry = failedIds !== null && retryable === 0;
+	const nothingToWrite = plan !== null && plan.writes.length === 0;
 
 	const saveLabel = ( () => {
+		if ( failedButNothingToRetry ) {
+			return __( 'Close', 'wp-woocommerce-products-list' );
+		}
+
 		if ( failedIds ) {
 			/* translators: %d: number of rows that failed */
-			return sprintf( _n( 'Retry %d failed', 'Retry %d failed', failedIds.size, 'wp-woocommerce-products-list' ), failedIds.size );
+			return sprintf( _n( 'Retry %d failed', 'Retry %d failed', retryable, 'wp-woocommerce-products-list' ), retryable );
 		}
 
 		if ( warnings.length ) {
 			return __( 'Save anyway', 'wp-woocommerce-products-list' );
 		}
 
-		if ( bulk ) {
-			/* translators: %d: number of rows */
-			return sprintf( _n( 'Save %d item', 'Save %d items', items.length, 'wp-woocommerce-products-list' ), items.length );
+		if ( ! bulk ) {
+			return __( 'Save', 'wp-woocommerce-products-list' );
 		}
 
-		return __( 'Save', 'wp-woocommerce-products-list' );
+		if ( plan ) {
+			return saveLabelFor( plan );
+		}
+
+		/* translators: %d: number of rows */
+		return sprintf( _n( 'Save %d item', 'Save %d items', items.length, 'wp-woocommerce-products-list' ), items.length );
 	} )();
 
 	return (
@@ -537,25 +738,45 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 			ref={ rootRef }
 			className="wc-pl-edit"
 			aria-busy={ saving }
+			onKeyDown={ onKeyDown }
 			onSubmit={ ( event ) => {
 				event.preventDefault();
+
+				if ( failedButNothingToRetry ) {
+					finish();
+
+					return;
+				}
+
 				void save();
 			} }
 		>
 			<p className="wc-pl-edit__summary">{ summary( items ) }</p>
 
 			{ needsEditOthers ? (
-				<Notice status="warning" isDismissible={ false }>
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice">
 					{ __( 'Saving several items at once needs the "edit others\' products" capability. Edit one item at a time, or ask an administrator.', 'wp-woocommerce-products-list' ) }
 				</Notice>
 			) : null }
 
-			{ trashed > 0 ? (
-				<Notice status="warning" isDismissible={ false }>
+			{ hydration.missing.length > 0 ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice">
 					{ sprintf(
-						/* translators: %d: number of rows in the trash */
-						_n( '%d of the selected items is in the trash; it will be updated too.', '%d of the selected items are in the trash; they will be updated too.', trashed, 'wp-woocommerce-products-list' ),
-						trashed
+						/* translators: 1: number of rows, 2: their names */
+						_n( '%1$d of the selected items no longer exists and was left out: %2$s', '%1$d of the selected items no longer exist and were left out: %2$s', hydration.missing.length, 'wp-woocommerce-products-list' ),
+						hydration.missing.length,
+						listNames( hydration.missing )
+					) }
+				</Notice>
+			) : null }
+
+			{ trashedRows.length > 0 ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice">
+					{ sprintf(
+						/* translators: 1: number of rows in the trash, 2: their names */
+						_n( '%1$d of the selected items is in the trash and will be updated too: %2$s', '%1$d of the selected items are in the trash and will be updated too: %2$s', trashedRows.length, 'wp-woocommerce-products-list' ),
+						trashedRows.length,
+						listNames( trashedRows )
 					) }
 				</Notice>
 			) : null }
@@ -581,7 +802,7 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 			{ tabs.length > 1 ? (
 				<div className="wc-pl-edit__tabs" role="tablist" aria-label={ __( 'Edit sections', 'wp-woocommerce-products-list' ) } onKeyDown={ onTabKeyDown }>
 					{ tabs.map( ( entry ) => {
-						const selected = entry.id === tab.id;
+						const selectedTab = entry.id === tab.id;
 
 						return (
 							<button
@@ -590,10 +811,10 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 								role="tab"
 								id={ `wc-pl-edit-tab-${ entry.id }` }
 								data-tab={ entry.id }
-								aria-selected={ selected }
+								aria-selected={ selectedTab }
 								aria-controls={ PANEL_ID }
-								tabIndex={ selected ? 0 : -1 }
-								className={ `components-button is-tertiary wc-pl-edit__tab${ selected ? ' is-active' : '' }` }
+								tabIndex={ selectedTab ? 0 : -1 }
+								className={ `components-button is-tertiary wc-pl-edit__tab${ selectedTab ? ' is-active' : '' }` }
 								onClick={ () => setTabId( entry.id ) }
 							>
 								{ entry.label }
@@ -623,7 +844,85 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 				) }
 			</div>
 
-			{ bulk && pendingCount > 0 && ! loading ? <ChangeSummary edits={ pendingEdits } fields={ fieldsWithToggle } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } /> : null }
+			{ stockGated.length > 0 && ! loading ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__stock-warning">
+					{ sprintf(
+						/* translators: 1: number of rows, 2: number of rows in total, 3: their names */
+						_n(
+							'%1$d of the %2$d rows does not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for it; it will be skipped: %3$s',
+							'%1$d of the %2$d rows do not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for them; they will be skipped: %3$s',
+							stockGated.length,
+							'wp-woocommerce-products-list'
+						),
+						stockGated.length,
+						targetsForValidation.filter( ( item ) => ! item._placeholder ).length,
+						listNames( stockGated )
+					) }
+					{ stockEnableable.length > 0 ? (
+						<CheckboxControl
+							__nextHasNoMarginBottom
+							label={
+								stockEnableable.length === stockGated.length
+									? sprintf(
+											/* translators: %d: number of rows */
+											_n( 'Turn on "Manage stock" for that row and write the values', 'Turn on "Manage stock" for those %d rows and write the values', stockEnableable.length, 'wp-woocommerce-products-list' ),
+											stockEnableable.length
+									  )
+									: sprintf(
+											/* translators: %d: number of rows */
+											_n( 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', stockEnableable.length, 'wp-woocommerce-products-list' ),
+											stockEnableable.length
+									  )
+							}
+							checked={ enableManageStock }
+							disabled={ saving }
+							onChange={ ( checked ) => {
+								setEnableManageStock( checked );
+								setErrors( [] );
+								setWarnings( [] );
+								setAcknowledged( null );
+							} }
+						/>
+					) : null }
+				</Notice>
+			) : null }
+
+			{ existingSales.rows.length > 0 && ! loading ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning">
+					{ sprintf(
+						/* translators: 1: number of rows with a sale, 2: number of rows in total, 3: how many of those sales run right now */
+						_n(
+							'%1$d of the %2$d rows already has a sale price (%3$d active now). The new sale replaces it; a running discount stops until the new sale starts.',
+							'%1$d of the %2$d rows already have a sale price (%3$d active now). The new sale replaces them; running discounts stop until the new sale starts.',
+							existingSales.rows.length,
+							'wp-woocommerce-products-list'
+						),
+						existingSales.rows.length,
+						targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length,
+						existingSales.active
+					) }
+					<CheckboxControl
+						__nextHasNoMarginBottom
+						label={ sprintf(
+							/* translators: %d: number of rows */
+							_n( 'Skip the %d row that already has a sale', 'Skip the %d rows that already have a sale', existingSales.rows.length, 'wp-woocommerce-products-list' ),
+							existingSales.rows.length
+						) }
+						checked={ skipExistingSales }
+						disabled={ saving }
+						onChange={ ( checked ) => {
+							setSkipExistingSales( checked );
+							setErrors( [] );
+							setWarnings( [] );
+							setAcknowledged( null );
+						} }
+					/>
+				</Notice>
+			) : null }
+
+			{ bulk && plannedCount > 0 && ! loading ? (
+				<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } />
+			) : null }
 
 			{ warnings.length > 0 ? (
 				<EditErrors
@@ -647,7 +946,13 @@ export function ProductEditModal( { items: selected, closeModal, onActionPerform
 				<Button type="button" variant="tertiary" onClick={ requestClose } disabled={ saving } __next40pxDefaultSize>
 					{ __( 'Cancel', 'wp-woocommerce-products-list' ) }
 				</Button>
-				<Button type="submit" variant="primary" isBusy={ saving } disabled={ saving || loading || needsEditOthers || ( pendingCount === 0 && ! state.hasInput ) } __next40pxDefaultSize>
+				<Button
+					type="submit"
+					variant="primary"
+					isBusy={ saving }
+					disabled={ saving || loading || needsEditOthers || ( ! failedButNothingToRetry && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) ) }
+					__next40pxDefaultSize
+				>
 					{ saveLabel }
 				</Button>
 			</div>

@@ -11,14 +11,18 @@
  * its label lookup compare with), so the form sees strings and the edit
  * state gets the row's type back.
  */
+import { decodeEntities } from '@wordpress/html-entities';
 import { __, sprintf } from '@wordpress/i18n';
 import type { ComponentType } from 'react';
 import type { DataFormControlProps, Field, Option } from '../dataviews';
+import { formatMoney } from '../extensions/declarative';
+import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { isSalePriceField, numericKindOf } from './bulk-numeric';
 import { createBulkNumericControl } from './bulk-numeric-control';
 import type { FormData } from './bulk-numeric-control';
+import { createDateTimeControl } from './datetime-control';
 import { isVariation, readFieldValue } from './field-value';
 import { mergeReference, MIXED_VALUE, hasOptionList } from './merge';
 import type { MixedState } from './merge';
@@ -46,6 +50,11 @@ export const VARIATION_STATUS_ELEMENTS: Option[] = [
 /** How much of a reference value (the default-language description) the help text shows. */
 export const REFERENCE_MAX_LENGTH = 200;
 
+/** The shipping classes a variation can pick: its parent's, or one of the store's. */
+export function variationShippingClassElements( settings: Pick< Settings, 'shippingClasses' > ): Option[] {
+	return [ { value: '', label: __( 'Same as parent', 'wp-woocommerce-products-list' ) }, ...settings.shippingClasses.map( ( entry ) => ( { value: String( entry.value ), label: entry.label } ) ) ];
+}
+
 function scheduleIdFor( fieldId: string ): string | null {
 	const match = /^(.*)date_on_sale_(from|to)$/.exec( fieldId );
 
@@ -63,14 +72,20 @@ function displayValue( value: unknown ): string {
 /** Reference text for the help line: money formatted, HTML stripped, long text cut. */
 export function referenceText( field: ProductField, reference: string, settings: Settings ): string {
 	if ( numericKindOf( field ) === 'money' ) {
-		return formatPrice( reference, settings ) || reference;
+		// A language's price column is in that market's currency (SEK), not the shop's.
+		const currency = ( field as { currency?: FieldCurrency } ).currency;
+
+		return ( currency ? formatMoney( reference, currency, settings ) : formatPrice( reference, settings ) ) || reference;
 	}
 
 	let text = reference;
 
 	if ( /<[a-z][^>]*>/i.test( text ) ) {
-		text = text.replace( /<[^>]+>/g, ' ' ).replace( /\s+/g, ' ' ).trim();
+		text = text.replace( /<[^>]+>/g, ' ' );
 	}
+
+	// Stored HTML carries entities (`&amp;`, `&nbsp;`); the help line is plain text.
+	text = decodeEntities( text ).replace( /\u00a0/g, ' ' ).replace( /\s+/g, ' ' ).trim();
 
 	return text.length > REFERENCE_MAX_LENGTH ? `${ text.slice( 0, REFERENCE_MAX_LENGTH ).trimEnd() }…` : text;
 }
@@ -141,9 +156,11 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			formField.isVisible = ( data ) => data[ scheduleId ] === true;
 		}
 
-		// The default datetime control opens a full calendar; the compact one keeps the form short.
+		// Our own datetime-local input: named after the field for assistive technology
+		// ("Sale from", not "Date time"), site wall-clock time in and out, no calendar popover.
 		if ( ( field.type === 'datetime' || field.type === 'date' ) && ! field.Edit ) {
-			formField.Edit = { control: 'datetime', compact: true };
+			formField.type = undefined;
+			formField.Edit = createDateTimeControl( settings ) as ComponentType< DataFormControlProps< FormData > >;
 			// The control clears with `undefined`, which would read as "untouched"; an empty string is "no date".
 			formField.setValue = ( { value } ) => ( { [ field.id ]: value === undefined ? '' : value } );
 		}
@@ -167,6 +184,12 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 		if ( onlyVariations && leaf === 'status' && ! field.Edit ) {
 			formField.elements = VARIATION_STATUS_ELEMENTS;
+			formField.getElements = undefined;
+		}
+
+		// A variation without a class of its own ships like its parent; the product-level "No shipping class" is not a choice here.
+		if ( onlyVariations && field.id === 'shipping_class' && ! field.Edit ) {
+			formField.elements = variationShippingClassElements( settings );
 			formField.getElements = undefined;
 		}
 

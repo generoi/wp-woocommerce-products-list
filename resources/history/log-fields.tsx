@@ -50,6 +50,18 @@ function text( value: string | null ): string {
 }
 
 export function ChangeCell( { item }: { item: LogRow } ) {
+	if ( item.action === 'duplicate' ) {
+		const copy = item.related;
+		const label = copy ? copy.name || `#${ copy.id }` : item.new_value ? `#${ item.new_value }` : null;
+
+		return (
+			<span className="wc-pl-history__change">
+				{ __( 'Copied to', 'wp-woocommerce-products-list' ) }{ ' ' }
+				{ copy?.edit_link ? <a href={ copy.edit_link }>{ label }</a> : label ? <span>{ label }</span> : <span>{ __( '(the copy no longer exists)', 'wp-woocommerce-products-list' ) }</span> }
+			</span>
+		);
+	}
+
 	if ( item.action !== 'update' ) {
 		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
 	}

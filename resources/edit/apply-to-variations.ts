@@ -42,7 +42,7 @@ export function splitParentEdits( edits: Record< string, unknown >, fields: Prod
 
 /** The variation `_fields` needed to resolve the sellable edits: ids plus the fields edited and their price siblings. */
 export function variationFetchFields( fields: ProductField[], sellableEdits: Record< string, unknown > ): string[] {
-	const result = new Set< string >( [ 'id', 'parent_id', 'status', 'name', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to' ] );
+	const result = new Set< string >( [ 'id', 'parent_id', 'status', 'name', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_to', 'manage_stock' ] );
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 
 	for ( const id of Object.keys( sellableEdits ) ) {
@@ -90,6 +90,32 @@ export async function resolveSaveTargets(
 	options: { applyToVariations: boolean; fetchVariations: FetchVariations }
 ): Promise< SaveTarget[] > {
 	const rows = items.filter( ( item ) => ! item._placeholder );
+	const { sellable } = splitParentEdits( edits, fields );
+	const variableParents = rows.filter( isVariableParent );
+	const byParent = new Map< number, ProductListItem[] >();
+
+	if ( options.applyToVariations && variableParents.length > 0 && Object.keys( sellable ).length > 0 ) {
+		const fetchFields = variationFetchFields( fields, sellable );
+		const variationLists = await mapWithConcurrency( variableParents, VARIATION_FETCH_CONCURRENCY, ( parentItem ) => options.fetchVariations( parentItem.id, fetchFields ) );
+
+		variableParents.forEach( ( parentItem, index ) => byParent.set( parentItem.id, variationLists[ index ] ?? [] ) );
+	}
+
+	return resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: byParent } );
+}
+
+/**
+ * The same, with the variations already in hand (the modal fetches them
+ * when the option is ticked, so the plan it shows before Save is exact).
+ * A parent missing from `variationsByParent` contributes no variations.
+ */
+export function resolveSaveTargetsWith(
+	items: ProductListItem[],
+	edits: Record< string, unknown >,
+	fields: ProductField[],
+	options: { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] > }
+): SaveTarget[] {
+	const rows = items.filter( ( item ) => ! item._placeholder );
 	const { parent, sellable } = splitParentEdits( edits, fields );
 	const targets = new Map< number, SaveTarget >();
 
@@ -101,14 +127,13 @@ export async function resolveSaveTargets(
 		}
 	}
 
-	const variableParents = rows.filter( isVariableParent );
+	if ( options.applyToVariations && Object.keys( sellable ).length > 0 ) {
+		for ( const item of rows.filter( isVariableParent ) ) {
+			for ( const variation of options.variationsByParent?.get( item.id ) ?? [] ) {
+				if ( variation._placeholder ) {
+					continue;
+				}
 
-	if ( options.applyToVariations && variableParents.length > 0 && Object.keys( sellable ).length > 0 ) {
-		const fetchFields = variationFetchFields( fields, sellable );
-		const variationLists = await mapWithConcurrency( variableParents, VARIATION_FETCH_CONCURRENCY, ( parentItem ) => options.fetchVariations( parentItem.id, fetchFields ) );
-
-		for ( const variations of variationLists ) {
-			for ( const variation of variations ) {
 				const existing = targets.get( variation.id );
 
 				if ( existing ) {

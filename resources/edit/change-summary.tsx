@@ -9,8 +9,10 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { formatPrice } from '../fields/currency';
 import type { Option } from '../dataviews';
 import type { ProductField, ProductListItem, Settings } from '../types';
+import { applyArrayOp, arrayOpFieldId, describeArrayOperation, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
 import { editsForItem, isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
 import type { NumericOp } from './bulk-numeric';
+import type { RowEditOptions } from './row-rules';
 import { isVariableParent, readFieldValue } from './field-value';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { fieldAppliesTo, isSellableField, leafOf } from './visibility';
@@ -109,7 +111,7 @@ function reaches( field: ProductField, item: ProductListItem, applyToVariations:
 	return fieldAppliesTo( field, item, applyToVariations );
 }
 
-export function describeEdits( edits: Record< string, unknown >, fields: ProductField[], targets: ProductListItem[], settings: Settings, applyToVariations = false ): ChangeLine[] {
+export function describeEdits( edits: Record< string, unknown >, fields: ProductField[], targets: ProductListItem[], settings: Settings, applyToVariations = false, options: RowEditOptions = {} ): ChangeLine[] {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 	const rows = targets.filter( ( item ) => ! item._placeholder );
 	const lines: ChangeLine[] = [];
@@ -117,12 +119,22 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 	for ( const [ id, value ] of Object.entries( edits ) ) {
 		const field = byId.get( id );
 
-		if ( ! field || value === undefined ) {
+		if ( ! field || value === undefined || isArrayOpFieldId( id ) ) {
 			continue;
 		}
 
-		const reached = rows.filter( ( item ) => reaches( field, item, applyToVariations ) );
+		// A row the per-row rules drop the edit for (no stock management, an existing sale) is not reached.
+		const reached = rows.filter( ( item ) => reaches( field, item, applyToVariations ) && id in editsForItem( item, edits, fields, options ) );
 		const label = field.label ?? id;
+
+		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
+			const chosen = edits[ arrayOpFieldId( id ) ];
+			const operation = isArrayOperation( chosen ) ? chosen : 'add';
+			const changed = reached.filter( ( item ) => applyArrayOp( readFieldValue( field, item ), operation, value ).changed ).length;
+
+			lines.push( { field: id, label, change: `${ describeArrayOperation( operation ) } ${ describeValue( field, value, settings ) }`, count: changed } );
+			continue;
+		}
 
 		if ( leafOf( id ) === SCHEDULE_SALE_FIELD_ID ) {
 			lines.push( {
@@ -145,7 +157,7 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 			let changed = 0;
 
 			for ( const item of reached ) {
-				const projected = projectEdits( item, editsForItem( item, edits, fields ), fields, settings );
+				const projected = projectEdits( item, editsForItem( item, edits, fields, options ), fields, settings );
 				const next = projected[ id ];
 
 				if ( next === undefined ) {
@@ -178,10 +190,13 @@ export interface ChangeSummaryProps {
 	targets: ProductListItem[];
 	settings: Settings;
 	applyToVariations: boolean;
+	options?: RowEditOptions;
+	/** Rows the edits reach whose values already equal the result (from the save plan). */
+	unchanged?: number;
 }
 
-export function ChangeSummary( { edits, fields, targets, settings, applyToVariations }: ChangeSummaryProps ) {
-	const lines = describeEdits( edits, fields, targets, settings, applyToVariations );
+export function ChangeSummary( { edits, fields, targets, settings, applyToVariations, options, unchanged = 0 }: ChangeSummaryProps ) {
+	const lines = describeEdits( edits, fields, targets, settings, applyToVariations, options );
 
 	if ( lines.length === 0 ) {
 		return null;
@@ -216,6 +231,15 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 						{ line.example ? <span className="wc-pl-edit__summary-example"> — { sprintf( /* translators: %s: an example "Name: old → new" */ __( 'e.g. %s', 'wp-woocommerce-products-list' ), line.example ) }</span> : null }
 					</li>
 				) ) }
+				{ unchanged > 0 ? (
+					<li className="wc-pl-edit__summary-count">
+						{ sprintf(
+							/* translators: %d: number of rows */
+							_n( '%d row already has these values and is left as it is.', '%d rows already have these values and are left as they are.', unchanged, 'wp-woocommerce-products-list' ),
+							unchanged
+						) }
+					</li>
+				) : null }
 			</ul>
 		</div>
 	);

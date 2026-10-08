@@ -88,3 +88,44 @@ export function revealInvalidControls( root: HTMLElement | null ): number {
 
 	return revealed;
 }
+
+/**
+ * The first control the user has to fix: one flagged invalid by its
+ * control (`aria-invalid`, an `is-invalid` wrapper) or by the browser.
+ */
+export function firstInvalidControl( root: HTMLElement | null ): HTMLElement | null {
+	if ( ! root ) {
+		return null;
+	}
+
+	const flagged = root.querySelector< HTMLElement >( '[aria-invalid="true"], .is-invalid input, .is-invalid select, .is-invalid textarea' );
+
+	if ( flagged ) {
+		return flagged;
+	}
+
+	for ( const control of Array.from( root.querySelectorAll< HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement >( 'input, select, textarea' ) ) ) {
+		if ( control.willValidate && ! control.validity.valid ) {
+			return control;
+		}
+	}
+
+	return null;
+}
+
+/** Move keyboard focus to the first invalid control; true when one was found. */
+export function focusFirstInvalidControl( root: HTMLElement | null ): boolean {
+	const control = firstInvalidControl( root );
+
+	if ( ! control ) {
+		return false;
+	}
+
+	control.focus();
+
+	if ( typeof control.scrollIntoView === 'function' ) {
+		control.scrollIntoView( { block: 'center' } );
+	}
+
+	return true;
+}

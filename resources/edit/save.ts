@@ -4,16 +4,17 @@
  */
 import { doAction } from '@wordpress/hooks';
 import { rowFields } from '../actions/context';
-import { batchProducts, batchVariations, getVariations, newBatchId, toRow } from '../api/client';
+import { batchProducts, batchVariations, batchVariationsAcross, getVariations, newBatchId, toRow } from '../api/client';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
 import { invalidateProducts, patchItems } from '../store/products';
-import type { BatchResult, ProductField, ProductListItem } from '../types';
+import { getVisibleFieldIds } from '../store/rows';
+import type { ProductField, ProductListItem } from '../types';
 import { fetchAllVariations } from './apply-to-variations';
-import type { SaveDeps, SaveOptions } from './save-runner';
+import type { SaveDeps, SaveOptions, SaveResult } from './save-runner';
 import { runSave } from './save-runner';
 
-export type { SaveOptions } from './save-runner';
+export type { SaveOptions, SaveResult } from './save-runner';
 
 function realDeps(): SaveDeps {
 	const settings = getSettings();
@@ -21,6 +22,8 @@ function realDeps(): SaveDeps {
 	return {
 		batchProducts: ( update, options ) => batchProducts( update, options ),
 		batchVariations: ( parentId, update, options ) => batchVariations( parentId, update, options ),
+		batchVariationsAcross: ( update, options ) => batchVariationsAcross( update, options ),
+		variationsBatchSize: settings.limits.actionBatchSize,
 		fetchVariations: ( parentId, fields ) =>
 			fetchAllVariations( parentId, fields, ( id, page, fieldList ) => getVariations( id, page, { perPage: settings.limits.perPageMax, fields: fieldList } ) ),
 		patchItems,
@@ -35,10 +38,34 @@ function changesStatus( edits: Record< string, unknown > ): boolean {
 	return edits.status !== undefined;
 }
 
-export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveOptions ): Promise< BatchResult > {
-	// The rows a write returns are trimmed to what the list can show: the
-	// registered fields' keys, never the full wc/v3 object (PHP Rows::trimBatchItem).
-	const result = await runSave( realDeps(), items, edits, fields, getSettings(), { fields: rowFields( fields ), ...options } );
+/**
+ * The wc/v3 keys a save asks back: the base row keys, the visible columns'
+ * fields and the fields of the edited keys. The server trims each returned
+ * row to them and builds nothing else (every batch sub-request gets the
+ * list as its `_fields`): a status change on 100 variable products returns
+ * no price ranges, galleries or translations. Every registered field when
+ * no view is on screen (the extension API's `batchUpdate` outside the list).
+ */
+export function saveFields( fields: ProductField[], edits: Record< string, unknown >, visibleIds: string[] = getVisibleFieldIds() ): string[] {
+	if ( visibleIds.length === 0 ) {
+		return rowFields( fields );
+	}
+
+	const wanted = new Set( visibleIds );
+
+	for ( const id of Object.keys( edits ) ) {
+		// A bulk list op ('categories__op') and the schedule toggle name their field.
+		wanted.add( id.replace( /__op$/, '' ) );
+		wanted.add( id.split( '.' )[ 0 ] ?? id );
+	}
+
+	return rowFields( fields.filter( ( field ) => wanted.has( field.id ) ) );
+}
+
+export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveOptions ): Promise< SaveResult > {
+	// The rows a write returns are trimmed to what the list shows plus what
+	// was edited, never the full wc/v3 object (PHP Rows::trimBatchItem).
+	const result = await runSave( realDeps(), items, edits, fields, getSettings(), { fields: saveFields( fields, edits ), ...options } );
 
 	if ( result.updated.length > 0 && changesStatus( edits ) ) {
 		invalidateProducts( { counts: true } );

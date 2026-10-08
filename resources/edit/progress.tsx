@@ -10,9 +10,11 @@ export interface SaveProgressProps {
 	done: number;
 	total: number;
 	saving: boolean;
+	/** The text next to the bar; "Saving N of M…" by default. */
+	label?: ( done: number, total: number ) => string;
 }
 
-export function SaveProgress( { done, total, saving }: SaveProgressProps ) {
+export function SaveProgress( { done, total, saving, label }: SaveProgressProps ) {
 	if ( ! saving || total === 0 ) {
 		return null;
 	}
@@ -23,12 +25,14 @@ export function SaveProgress( { done, total, saving }: SaveProgressProps ) {
 		<div className="wc-pl-edit__progress" role="status" aria-live="polite">
 			<ProgressBar value={ value } />
 			<span className="wc-pl-edit__progress-label">
-				{ sprintf(
-					/* translators: 1: rows saved, 2: rows in total */
-					__( 'Saving %1$d of %2$d…', 'wp-woocommerce-products-list' ),
-					done,
-					total
-				) }
+				{ label
+					? label( done, total )
+					: sprintf(
+							/* translators: 1: rows saved, 2: rows in total */
+							__( 'Saving %1$d of %2$d…', 'wp-woocommerce-products-list' ),
+							done,
+							total
+					  ) }
 			</span>
 		</div>
 	);

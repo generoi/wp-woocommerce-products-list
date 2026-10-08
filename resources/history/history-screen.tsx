@@ -5,24 +5,45 @@
  * as skipped by the server).
  */
 import { Button, Spinner } from '@wordpress/components';
+import { dateI18n } from '@wordpress/date';
 import { useCallback, useEffect, useMemo, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { getQueryArg } from '@wordpress/url';
-import { getLog, getLogUsers, revertBatch } from '../api/client';
+import { getLogUsers, getRevertPlan } from '../api/client';
+import type { RevertPlan } from '../api/client';
 import { notify } from '../actions/notices';
 import { DataViews } from '../dataviews';
 import type { Action, Filter, RenderModalProps, View } from '../dataviews';
+import { SaveProgress } from '../edit/progress';
 import { getSettings } from '../settings';
+import type { Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { createLogFields, logQueryFromView } from './log-fields';
-import { describeBatchScope, summarizeBatch } from './batch-scope';
-import type { BatchScope } from './batch-scope';
+import { describeBatchScope, scopeFromPlan } from './batch-scope';
+import { runRevert } from './revert';
+import type { RevertOutcome } from './revert';
 import { invalidateLog, useLog } from './use-log';
 import type { LogRow } from './use-log';
 import '../edit/style.scss';
 
 const TABLE_FIELDS = [ 'user', 'object', 'source', 'action', 'field', 'change', 'status', 'batch_id' ];
+
+/** A log row's time in the site's date/time format and timezone (the same the table shows), from the GMT stamp when the row carries one. */
+export function formatLogTime( row: Pick< LogRow, 'created_at' | 'created_at_gmt' >, settings: Pick< Settings, 'dateFormat' | 'timeFormat' > ): string {
+	const gmt = row.created_at_gmt ? `${ row.created_at_gmt.replace( ' ', 'T' ) }Z` : '';
+	const source = gmt || row.created_at;
+
+	if ( ! source ) {
+		return '';
+	}
+
+	try {
+		return dateI18n( `${ settings.dateFormat } ${ settings.timeFormat }`, source );
+	} catch {
+		return row.created_at;
+	}
+}
 
 function initialFilters(): Filter[] {
 	const href = typeof window !== 'undefined' ? window.location.href : '';
@@ -41,32 +62,52 @@ function initialFilters(): Filter[] {
 	return filters;
 }
 
+function revertLabel( done: number, total: number ): string {
+	return sprintf(
+		/* translators: 1: items put back so far, 2: items in total */
+		__( 'Reverting %1$d of %2$d…', 'wp-woocommerce-products-list' ),
+		done,
+		total
+	);
+}
+
+/** The names of the fields the conflicting objects changed again, for the summary line. */
+function conflictFields( outcome: RevertOutcome ): string[] {
+	return Array.from( new Set( outcome.conflicts.flatMap( ( result ) => result.fields ?? [] ) ) );
+}
+
 function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps< LogRow > ) {
+	const settings = getSettings();
 	const row = items[ 0 ];
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
-	const [ scope, setScope ] = useState< BatchScope | null | 'loading' >( 'loading' );
+	const [ plan, setPlan ] = useState< RevertPlan | null | 'loading' >( 'loading' );
+	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
+	// Set when a pass left conflicts behind: the summary and "Revert anyway".
+	const [ outcome, setOutcome ] = useState< RevertOutcome | null >( null );
 	const batchId = row?.batch_id;
 
 	useEffect( () => {
 		if ( ! batchId ) {
-			setScope( null );
+			setPlan( null );
 
 			return;
 		}
 
 		let cancelled = false;
 
-		setScope( 'loading' );
-		getLog( { batch: batchId, action: 'update', per_page: 100 } )
-			.then( ( result ) => {
+		setPlan( 'loading' );
+
+		// What the revert writes, from the log itself: exact for any batch size, and the chunks to post.
+		getRevertPlan( batchId )
+			.then( ( loaded ) => {
 				if ( ! cancelled ) {
-					setScope( summarizeBatch( result.items, result.total ) );
+					setPlan( loaded );
 				}
 			} )
 			.catch( () => {
 				if ( ! cancelled ) {
-					setScope( null );
+					setPlan( null );
 				}
 			} );
 
@@ -75,8 +116,38 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 		};
 	}, [ batchId ] );
 
-	const confirm = async () => {
-		if ( ! row ) {
+	const finish = ( result: RevertOutcome ) => {
+		invalidateProducts( { counts: true } );
+		invalidateLog();
+
+		if ( result.ok && ! result.failed.length ) {
+			notify.success(
+				sprintf(
+					/* translators: %d: number of items reverted */
+					_n( '%d item reverted.', '%d items reverted.', result.ok, 'wp-woocommerce-products-list' ),
+					result.ok
+				)
+			);
+		}
+
+		if ( result.failed.length ) {
+			notify.error(
+				sprintf(
+					/* translators: 1: items reverted, 2: items that failed, 3: the first failure's message */
+					__( '%1$d reverted, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
+					result.ok,
+					result.failed.length,
+					result.failed[ 0 ]?.message ?? __( 'Some items could not be reverted.', 'wp-woocommerce-products-list' )
+				)
+			);
+		}
+
+		onActionPerformed?.( items );
+		closeModal?.();
+	};
+
+	const confirm = async ( force = false ) => {
+		if ( ! row || ! plan || plan === 'loading' ) {
 			return;
 		}
 
@@ -84,34 +155,40 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 		setError( null );
 
 		try {
-			// Only the per-object results are used; the rows are refetched by the list.
-			const response = await revertBatch( row.batch_id, { fields: [ 'id' ] } );
-			const ok = response.results.filter( ( result ) => result.ok ).length;
-			const failed = response.results.filter( ( result ) => ! result.ok );
+			const result = force && outcome
+				? await runRevert( row.batch_id, plan, { ids: outcome.conflicts.map( ( conflict ) => conflict.id ), force: true, revertBatchId: outcome.revertBatchId, onProgress: ( done, total ) => setProgress( { done, total } ) } )
+				: await runRevert( row.batch_id, plan, { onProgress: ( done, total ) => setProgress( { done, total } ) } );
 
+			if ( force && outcome ) {
+				// The forced pass completes the first one.
+				finish( { ...result, ok: result.ok + outcome.ok, failed: [ ...outcome.failed, ...result.failed ], skipped: outcome.skipped } );
+
+				return;
+			}
+
+			if ( result.conflicts.length === 0 ) {
+				finish( result );
+
+				return;
+			}
+
+			// Some fields were changed again since; say so and offer to overwrite them.
 			invalidateProducts( { counts: true } );
 			invalidateLog();
-
-			if ( ok ) {
-				notify.success(
-					sprintf(
-						/* translators: %d: number of items reverted */
-						_n( '%d item reverted.', '%d items reverted.', ok, 'wp-woocommerce-products-list' ),
-						ok
-					)
-				);
-			}
-
-			if ( failed.length ) {
-				notify.error( failed[ 0 ]?.message ?? __( 'Some items could not be reverted.', 'wp-woocommerce-products-list' ) );
-			}
-
-			onActionPerformed?.( items );
-			closeModal?.();
+			setOutcome( result );
+			setBusy( false );
 		} catch ( caught ) {
 			setBusy( false );
 			setError( caught instanceof Error ? caught.message : __( 'The revert failed.', 'wp-woocommerce-products-list' ) );
 		}
+	};
+
+	const closeAfterConflicts = () => {
+		if ( outcome ) {
+			onActionPerformed?.( items );
+		}
+
+		closeModal?.();
 	};
 
 	return (
@@ -121,32 +198,59 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 			</p>
 			{ row ? (
 				<p>
-					<code>{ row.batch_id }</code> · { row.user?.name } · { row.created_at }
+					<code>{ row.batch_id }</code> · { row.user?.name } · { formatLogTime( row, settings ) }
 				</p>
 			) : null }
 			<p className="wc-pl-confirm__scope" aria-live="polite">
-				{ scope === 'loading' ? (
+				{ plan === 'loading' ? (
 					<>
 						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
 					</>
-				) : scope ? (
-					<strong>{ describeBatchScope( scope ) }</strong>
+				) : plan ? (
+					<strong>{ describeBatchScope( scopeFromPlan( plan ) ) }</strong>
 				) : (
 					__( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
 			</p>
+			<SaveProgress done={ progress.done } total={ progress.total } saving={ busy } label={ revertLabel } />
+			{ outcome ? (
+				<p className="wc-pl-confirm__conflicts" role="status">
+					{ sprintf(
+						/* translators: 1: items put back, 2: items left alone, 3: the field names */
+						_n(
+							'%1$d put back. %2$d item was changed again after this batch (%3$s) and was left as it is.',
+							'%1$d put back. %2$d items were changed again after this batch (%3$s) and were left as they are.',
+							outcome.conflicts.length,
+							'wp-woocommerce-products-list'
+						),
+						outcome.ok,
+						outcome.conflicts.length,
+						conflictFields( outcome ).join( ', ' )
+					) }
+				</p>
+			) : null }
 			{ error ? (
 				<p className="wc-pl-confirm__error" role="alert">
 					{ error }
 				</p>
 			) : null }
 			<div className="wc-pl-edit__footer">
-				<Button variant="tertiary" onClick={ () => closeModal?.() } disabled={ busy } __next40pxDefaultSize>
-					{ __( 'Cancel', 'wp-woocommerce-products-list' ) }
+				<Button variant="tertiary" onClick={ closeAfterConflicts } disabled={ busy } __next40pxDefaultSize>
+					{ outcome ? __( 'Keep them', 'wp-woocommerce-products-list' ) : __( 'Cancel', 'wp-woocommerce-products-list' ) }
 				</Button>
-				<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || scope === 'loading' } onClick={ () => void confirm() } __next40pxDefaultSize>
-					{ __( 'Revert batch', 'wp-woocommerce-products-list' ) }
-				</Button>
+				{ outcome ? (
+					<Button variant="primary" isDestructive isBusy={ busy } disabled={ busy } onClick={ () => void confirm( true ) } __next40pxDefaultSize>
+						{ sprintf(
+							/* translators: %d: number of items */
+							_n( 'Revert %d anyway', 'Revert %d anyway', outcome.conflicts.length, 'wp-woocommerce-products-list' ),
+							outcome.conflicts.length
+						) }
+					</Button>
+				) : (
+					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable } onClick={ () => void confirm() } __next40pxDefaultSize>
+						{ __( 'Revert batch', 'wp-woocommerce-products-list' ) }
+					</Button>
+				) }
 			</div>
 		</div>
 	);

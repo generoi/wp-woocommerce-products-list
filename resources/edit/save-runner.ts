@@ -2,19 +2,28 @@
  * The save orchestration with its I/O injected, so it is unit-testable
  * without the REST client or the cache. save.ts wires the real ones in.
  *
- * Order: variations first (one `variations/batch` per parent, parents in
- * sequence, chunks of `batchSize`), then parents (`products/batch`, chunked).
+ * `planSave` is the synchronous half: which rows get written with what,
+ * which are skipped (do not manage stock, already on sale) and which are
+ * unchanged. The modal shows the plan before Save; `runSave` executes it.
+ *
+ * Order: variations first, then parents (`products/batch`, chunked). The
+ * variations go through the cross-parent `variations/batch` route in
+ * chunks of `variationsBatchSize` (a scheduled sale over a page of
+ * variable products is one or two requests, not one per parent); without
+ * that dep they go one `variations/batch` per parent in sequence.
  * Rows are patched optimistically before each request and replaced by the
  * returned objects after; failed rows roll back and are reported per id.
  */
 import type { BatchItemError, BatchResponse, BatchResult, ProductField, ProductListItem, RawProduct, RawVariation, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import type { FetchVariations } from './apply-to-variations';
-import { resolveSaveTargets } from './apply-to-variations';
+import { resolveSaveTargets, resolveSaveTargetsWith } from './apply-to-variations';
 import type { SaveTarget } from './apply-to-variations';
 import { humanizeError } from './errors';
 import { isVariation, parentIdOf } from './field-value';
 import { buildPayload, hasPayload } from './payload';
+import { hasSale, hasSaleEdit, hasStockGatedEdit, resolveRowEdits } from './row-rules';
+import type { RowEditOptions } from './row-rules';
 
 export interface SaveRequestOptions {
 	batchId: string;
@@ -26,15 +35,19 @@ export interface SaveRequestOptions {
 export interface SaveDeps {
 	batchProducts( update: Array< { id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawProduct > >;
 	batchVariations( parentId: number, update: Array< { id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawVariation > >;
+	/** Variations of any parents in one request (`POST /wc-products-list/v1/variations/batch`); when present it replaces the per-parent calls. */
+	batchVariationsAcross?( update: Array< { id: number; parent_id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawVariation > >;
 	fetchVariations: FetchVariations;
 	patchItems( items: Array< Partial< ProductListItem > & { id: number } > ): void;
 	newBatchId(): string;
 	batchSize: number;
+	/** Rows per cross-parent variations request (the server's batch limit, 100); `batchSize` when missing. */
+	variationsBatchSize?: number;
 	/** Normalise a wc/v3 object a write returned the way list reads are (toRow: hierarchy keys, `wcProductsList.item` filter). */
 	normalizeRow?( raw: RawProduct | RawVariation, parentId?: number ): ProductListItem;
 }
 
-export interface SaveOptions {
+export interface SaveOptions extends RowEditOptions {
 	applyToVariations: boolean;
 	source: 'quick' | 'bulk';
 	/** Trim the rows a write returns to these wc/v3 fields (a 100-row page is tens of KB instead of a megabyte). */
@@ -44,11 +57,36 @@ export interface SaveOptions {
 	prefetchedVariations?: ReadonlyMap< number, ProductListItem[] >;
 }
 
-interface Prepared {
+export interface Prepared {
 	target: SaveTarget;
 	payload: Record< string, unknown >;
 	/** The row's values for the payload's top-level keys, to roll back to. */
 	snapshot: Record< string, unknown >;
+}
+
+export interface SavePlan {
+	/** The rows that get a request, with their bodies. */
+	writes: Prepared[];
+	/** Parent products among the writes. */
+	products: number;
+	/** Variations among the writes. */
+	variations: number;
+	/** Rows the edits reach whose values already equal the result. */
+	unchanged: number;
+	/** Rows a stock edit was dropped for (they do not manage stock). */
+	stockSkipped: ProductListItem[];
+	/** Rows left alone because they already have a sale. */
+	saleSkipped: ProductListItem[];
+	/** Rows written whose existing sale the edits replace. */
+	replacedSales: number;
+}
+
+/** What `runSave` reports: the batch result plus what the plan left out. */
+export interface SaveResult extends BatchResult {
+	unchanged: number;
+	stockSkipped: number;
+	saleSkipped: number;
+	replacedSales: number;
 }
 
 function chunk< T >( list: T[], size: number ): T[][] {
@@ -127,8 +165,72 @@ function snapshotOf( target: SaveTarget, patch: Record< string, unknown > ): Rec
 	return snapshot;
 }
 
+/** Turn resolved targets into the plan: payloads for the rows that change, counts for the rest. */
+export function planTargets( targets: SaveTarget[], fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): SavePlan {
+	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], replacedSales: 0 };
+
+	for ( const target of targets ) {
+		const own = resolveRowEdits( target.item, target.edits, options );
+
+		if ( hasStockGatedEdit( target.edits ) && ! hasStockGatedEdit( own ) ) {
+			plan.stockSkipped.push( target.item );
+		}
+
+		if ( hasSaleEdit( target.edits ) && ! hasSaleEdit( own ) ) {
+			plan.saleSkipped.push( target.item );
+		}
+
+		if ( Object.keys( own ).length === 0 ) {
+			continue;
+		}
+
+		const payload = buildPayload( target.item, own, fields, settings, options );
+
+		if ( ! hasPayload( payload ) ) {
+			plan.unchanged += 1;
+			continue;
+		}
+
+		const patch = optimisticPatch( target, payload );
+
+		plan.writes.push( { target, payload, snapshot: snapshotOf( target, patch ) } );
+
+		if ( isVariation( target.item ) ) {
+			plan.variations += 1;
+		} else {
+			plan.products += 1;
+		}
+
+		if ( hasSale( target.item ) && hasSaleEdit( own ) ) {
+			plan.replacedSales += 1;
+		}
+	}
+
+	return plan;
+}
+
+/**
+ * The plan for a selection with the variations already fetched (what the
+ * modal shows as "Save N products, M variations" and in the summary).
+ */
+export function planSave(
+	items: ProductListItem[],
+	edits: Record< string, unknown >,
+	fields: ProductField[],
+	settings: Settings,
+	options: RowEditOptions & { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] > }
+): SavePlan {
+	const targets = resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: options.variationsByParent } );
+
+	return planTargets( targets, fields, settings, options );
+}
+
 /** Prepare the per-row payloads; rows with nothing to send are left out. */
-export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' > ): Promise< Prepared[] > {
+export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' > ): Promise< Prepared[] > {
+	return ( await preparePlan( deps, items, edits, fields, settings, options ) ).writes;
+}
+
+async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' > ): Promise< SavePlan > {
 	const prefetched = options.prefetchedVariations;
 	const fetchVariations: FetchVariations = ( parentId, fieldList ) => {
 		const rows = prefetched?.get( parentId );
@@ -137,20 +239,22 @@ export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, it
 	};
 	const targets = await resolveSaveTargets( items, edits, fields, { applyToVariations: options.applyToVariations, fetchVariations } );
 
-	return targets
-		.map( ( target ) => {
-			const payload = buildPayload( target.item, target.edits, fields, settings );
-			const patch = optimisticPatch( target, payload );
-
-			return { target, payload, snapshot: snapshotOf( target, patch ) };
-		} )
-		.filter( ( prepared ) => hasPayload( prepared.payload ) );
+	return planTargets( targets, fields, settings, { enableManageStock: options.enableManageStock, skipExistingSales: options.skipExistingSales } );
 }
 
-export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: SaveOptions ): Promise< BatchResult > {
+export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: SaveOptions ): Promise< SaveResult > {
 	const batchId = deps.newBatchId();
-	const prepared = await prepareSave( deps, items, edits, fields, settings, options );
-	const result: BatchResult = { updated: [], errors: [], batchId };
+	const plan = await preparePlan( deps, items, edits, fields, settings, options );
+	const prepared = plan.writes;
+	const result: SaveResult = {
+		updated: [],
+		errors: [],
+		batchId,
+		unchanged: plan.unchanged,
+		stockSkipped: plan.stockSkipped.length,
+		saleSkipped: plan.saleSkipped.length,
+		replacedSales: plan.replacedSales,
+	};
 	const total = prepared.length;
 	let done = 0;
 
@@ -163,8 +267,11 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ) };
 	const byId = new Map( prepared.map( ( entry ) => [ entry.target.item.id, entry ] ) );
 
+	// One patch per response: every patch re-renders the list (and the
+	// expanded variations), so 100 rows go into the cache in one go, not 100.
 	const applyResponse = ( group: Prepared[], response: BatchResponse< RawProduct | RawVariation > ): void => {
 		const seen = new Set< number >();
+		const patches: Array< Partial< ProductListItem > & { id: number } > = [];
 
 		for ( const entry of response.update ?? [] ) {
 			if ( isBatchItemError( entry ) ) {
@@ -175,7 +282,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 				result.errors.push( { id: failed.id, message: humanizeError( failed.error.code, failed.error.message ), code: failed.error.code } );
 
 				if ( original ) {
-					deps.patchItems( [ original.snapshot as Partial< ProductListItem > & { id: number } ] );
+					patches.push( original.snapshot as Partial< ProductListItem > & { id: number } );
 				}
 
 				continue;
@@ -188,15 +295,19 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 			const normalized = deps.normalizeRow ? deps.normalizeRow( entry, parentId > 0 ? parentId : undefined ) : ( entry as ProductListItem );
 			const row = withoutUntouchedImages( normalized as Record< string, unknown >, original?.payload ?? {} ) as ProductListItem;
 
-			deps.patchItems( [ row ] );
+			patches.push( row );
 			result.updated.push( { ...( original?.target.item ?? {} ), ...row } as ProductListItem );
 		}
 
 		for ( const entry of group ) {
 			if ( ! seen.has( entry.target.item.id ) ) {
 				result.errors.push( { id: entry.target.item.id, message: humanizeError( 'missing_result', '' ), code: 'missing_result' } );
-				deps.patchItems( [ entry.snapshot as Partial< ProductListItem > & { id: number } ] );
+				patches.push( entry.snapshot as Partial< ProductListItem > & { id: number } );
 			}
+		}
+
+		if ( patches.length ) {
+			deps.patchItems( patches );
 		}
 	};
 
@@ -206,8 +317,9 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 		for ( const entry of group ) {
 			result.errors.push( { id: entry.target.item.id, message, code } );
-			deps.patchItems( [ entry.snapshot as Partial< ProductListItem > & { id: number } ] );
 		}
+
+		deps.patchItems( group.map( ( entry ) => entry.snapshot as Partial< ProductListItem > & { id: number } ) );
 	};
 
 	const variations = prepared.filter( ( entry ) => isVariation( entry.target.item ) );
@@ -223,12 +335,19 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		byParent.set( parentId, list );
 	}
 
-	for ( const [ parentId, entries ] of byParent ) {
-		for ( const group of chunk( entries, deps.batchSize ) ) {
+	if ( deps.batchVariationsAcross ) {
+		// Grouped by parent so each request touches as few parents as possible
+		// (the server syncs a parent once per request it appears in).
+		const ordered = Array.from( byParent.values() ).flat();
+
+		for ( const group of chunk( ordered, deps.variationsBatchSize ?? deps.batchSize ) ) {
 			deps.patchItems( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 			try {
-				const response = await deps.batchVariations( parentId, group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
+				const response = await deps.batchVariationsAcross(
+					group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
+					requestOptions
+				);
 
 				applyResponse( group, response );
 			} catch ( error ) {
@@ -237,6 +356,23 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 			done += group.length;
 			options.onProgress?.( done, total );
+		}
+	} else {
+		for ( const [ parentId, entries ] of byParent ) {
+			for ( const group of chunk( entries, deps.batchSize ) ) {
+				deps.patchItems( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+
+				try {
+					const response = await deps.batchVariations( parentId, group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
+
+					applyResponse( group, response );
+				} catch ( error ) {
+					failGroup( group, error );
+				}
+
+				done += group.length;
+				options.onProgress?.( done, total );
+			}
 		}
 	}
 

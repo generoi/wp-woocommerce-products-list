@@ -34,3 +34,10 @@ export function humanizeError( code: string | undefined, message: string ): stri
 
 	return text;
 }
+
+const GONE_CODES: ReadonlySet< string > = new Set( [ 'woocommerce_rest_product_invalid_id', 'woocommerce_rest_variation_invalid_id', 'woocommerce_rest_invalid_id', 'rest_post_invalid_id' ] );
+
+/** Whether an error code means the row no longer exists (nothing to retry; the row leaves the list). */
+export function isGoneCode( code: string | undefined ): boolean {
+	return code !== undefined && GONE_CODES.has( code );
+}

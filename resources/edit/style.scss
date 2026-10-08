@@ -170,3 +170,41 @@
 		margin-bottom: 12px;
 	}
 }
+
+// A price control the projected sale < regular check rejects: its message reads as an error, not as help.
+.wc-pl-edit .wc-products-list__price-edit.is-invalid {
+	.components-base-control__help {
+		color: var( --wp-components-color-foreground-error, #cc1818 );
+	}
+
+	.components-input-control__backdrop {
+		border-color: var( --wp-components-color-foreground-error, #cc1818 );
+	}
+}
+
+.wc-pl-edit__notice {
+	margin: 0;
+
+	.components-checkbox-control {
+		margin-top: 8px;
+	}
+}
+
+.wc-pl-edit__gone {
+	color: var( --wp-components-color-foreground-muted, #757575 );
+}
+
+// Confirm dialogs (trash, delete, revert): the rows named, and what a revert left alone.
+.wc-pl-confirm__list {
+	margin: 0 0 12px;
+	padding-left: 20px;
+	max-height: 200px;
+	overflow: auto;
+	list-style: disc;
+}
+
+.wc-pl-confirm__conflicts {
+	padding: 8px 12px;
+	border-left: 4px solid #dba617;
+	background: #fcf9e8;
+}

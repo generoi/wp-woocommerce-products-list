@@ -89,6 +89,7 @@ export function coreFields(): ProductField[] {
 			rest: { fields: [ 'stock_quantity' ], applies: { product: true, variation: true } },
 			edit: { group: 'inventory', bulk: 'integer' },
 		} ),
+		field( 'manage_stock', { type: 'boolean', rest: { fields: [ 'manage_stock' ], applies: { product: true, variation: true } }, edit: { group: 'inventory', bulk: 'default' } } ),
 		field( 'featured', { type: 'boolean', edit: { group: 'organization', bulk: 'default' } } ),
 		field( 'categories', { type: 'array', edit: { group: 'organization', bulk: 'default' } } ),
 		field( 'external_url', { productTypes: [ 'external' ], edit: { group: 'external', bulk: 'default' } } ),
@@ -141,6 +142,7 @@ export function simple( id: number, props: Record< string, unknown > = {} ): Pro
 		sku: `S${ id }`,
 		regular_price: '100',
 		sale_price: '',
+		manage_stock: true,
 		stock_quantity: 5,
 		featured: false,
 		categories: [],
@@ -158,7 +160,7 @@ export function external( id: number, props: Record< string, unknown > = {} ): P
 }
 
 export function variable( id: number, props: Record< string, unknown > = {} ): ProductRow {
-	return simple( id, { type: 'variable', regular_price: '', sale_price: '', _hasChildren: true, _childCount: 2, ...props } );
+	return simple( id, { type: 'variable', regular_price: '', sale_price: '', manage_stock: false, stock_quantity: null, _hasChildren: true, _childCount: 2, ...props } );
 }
 
 export function variation( id: number, parentId: number, props: Record< string, unknown > = {} ): VariationRow {
@@ -170,6 +172,7 @@ export function variation( id: number, parentId: number, props: Record< string, 
 		sku: `V${ id }`,
 		regular_price: '50',
 		sale_price: '',
+		manage_stock: true,
 		stock_quantity: 3,
 		_kind: 'variation',
 		_level: 1,

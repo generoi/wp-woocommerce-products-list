@@ -56,6 +56,8 @@ export interface ActionResult {
 	code?: string;
 	message?: string;
 	data?: Record< string, unknown >;
+	/** On a revert `conflict`: the fields changed again since the batch. */
+	fields?: string[];
 }
 
 export interface ActionResponse {
@@ -82,6 +84,8 @@ export interface LogRow {
 	new_value: string | null;
 	status: 'ok' | 'error';
 	message: string;
+	/** The copy a `duplicate` row created, while it still exists. */
+	related?: { id: number; name: string; edit_link: string | null } | null;
 }
 
 export interface LogBatch {
@@ -360,6 +364,44 @@ export async function batchProducts( update: ProductUpdate[], options?: BatchOpt
 	return result;
 }
 
+/** A variation row for the cross-parent batch: its parent is only needed for the single-write fallback. */
+export type VariationUpdateAcross = VariationUpdate & { parent_id: number };
+
+/**
+ * `POST /wc-products-list/v1/variations/batch`: variations of any number
+ * of parents in one request (chunks of `limits.actionBatchSize`, one batch
+ * id), the server grouping them by parent (docs/contracts.md §3.4b). The
+ * response has wc/v3's `{update: [...]}` shape in request order. A user
+ * without `edit_others_products` writes each row on its own route instead.
+ */
+export async function batchVariationsAcross( update: VariationUpdateAcross[], options?: BatchOptions ): Promise< BatchResponse< RawVariation > > {
+	const batchId = options?.batchId ?? newBatchId();
+	let result: BatchResponse< RawVariation > = { update: [] };
+
+	if ( singleWritesOnly() ) {
+		for ( const row of update ) {
+			const { parent_id: parentId, ...body } = row;
+
+			result = mergeBatch( result, await singleWrite< RawVariation >( `${ PRODUCTS }/${ parentId }/variations/${ row.id }`, body, { ...options, batchId } ) );
+		}
+
+		return result;
+	}
+
+	for ( const part of chunk( update, getSettings().limits.actionBatchSize ) ) {
+		const response = await request< BatchResponse< RawVariation > >( {
+			path: batchPath( `${ OWN }/variations/batch`, options ),
+			method: 'POST',
+			// The server addresses each row by its own parent; the one sent along is ignored.
+			data: { update: part.map( ( { parent_id: _parent, ...body } ) => body ) },
+			...listMode( { ...options, batchId } ),
+		} );
+		result = mergeBatch( result, response );
+	}
+
+	return result;
+}
+
 export async function batchVariations(
 	parentId: number,
 	update: VariationUpdate[],
@@ -459,10 +501,57 @@ export async function getLogBatches( params: { page?: number; perPage?: number }
 	return { items: response.items ?? [], total: response.total ?? 0, totalPages: response.totalPages ?? 1 };
 }
 
-export async function revertBatch( batchId: string, options?: RequestOptions & { fields?: string[] } ): Promise< ActionResponse > {
+/** `GET /log/batch/{id}`: what a revert of the batch would write, cut into the chunks to post (docs/contracts.md §3.5). */
+export interface RevertPlan {
+	batch_id: string;
+	/** Log rows in the batch. */
+	rows: number;
+	/** Objects a revert writes. */
+	objects: number;
+	chunk: number;
+	/** Object ids in write order, `chunk` per entry; one POST each. */
+	chunks: number[][];
+	/** Rows that are not reverted (trash, delete, duplicate, masked values). */
+	skipped: Array< { id: number; object_type: 'product' | 'variation'; action: string } >;
+	revertable: boolean;
+}
+
+export async function getRevertPlan( batchId: string, options?: RequestOptions ): Promise< RevertPlan > {
+	const plan = await request< RevertPlan >( { path: `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }`, ...listMode( options ) } );
+
+	return { ...plan, chunks: Array.isArray( plan.chunks ) ? plan.chunks : [], skipped: Array.isArray( plan.skipped ) ? plan.skipped : [] };
+}
+
+export interface RevertOptions extends RequestOptions {
+	fields?: string[];
+	/** One chunk of `RevertPlan.chunks`; without it the whole batch, which the server refuses above `chunk` objects. */
+	ids?: number[];
+	/** The batch id every chunk of one revert is logged under (`revert_batch_id`). */
+	revertBatchId?: string;
+	/** Also put back fields changed again since the batch (otherwise reported as `conflict`). */
+	force?: boolean;
+}
+
+/** `POST /log/batch/{id}/revert`: the whole batch, or one chunk of it (`ids`). Conflicting objects come back as results with `code: 'conflict'`. */
+export async function revertBatch( batchId: string, options?: RevertOptions ): Promise< ActionResponse > {
+	const data: Record< string, unknown > = {};
+
+	if ( options?.ids?.length ) {
+		data.ids = options.ids;
+	}
+
+	if ( options?.revertBatchId ) {
+		data.revert_batch_id = options.revertBatchId;
+	}
+
+	if ( options?.force ) {
+		data.force = true;
+	}
+
 	const response = await request< ActionResponse >( {
 		path: addQueryArgs( `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }/revert`, options?.fields?.length ? { fields: options.fields.join( ',' ) } : {} ),
 		method: 'POST',
+		data,
 		...listMode( { ...options, source: options?.source ?? 'quick' } ),
 	} );
 

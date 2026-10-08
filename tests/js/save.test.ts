@@ -45,6 +45,38 @@ describe( 'prepareSave', () => {
 } );
 
 describe( 'runSave', () => {
+	it( 'writes the variations of every parent through the cross-parent batch when the dep is there', async () => {
+		const d = deps( { variationsBatchSize: 3 } );
+		const across = vi.fn( async ( update: Array< Update & { parent_id: number } > ) => {
+			d.calls.push( `across:${ update.map( ( row ) => `${ row.parent_id }/${ row.id }` ).join( ',' ) }` );
+
+			return { update: update.map( ( { parent_id: _parent, ...row } ) => ( { ...row, echoed: true } ) ) } as BatchResponse< RawVariation >;
+		} );
+		d.batchVariationsAcross = across;
+		const progress: Array< [ number, number ] > = [];
+		const items = [ simple( 1 ), variation( 41, 4 ), variation( 51, 5 ), variation( 42, 4 ), variation( 61, 6 ) ];
+		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', onProgress: ( done, total ) => progress.push( [ done, total ] ) } );
+
+		// Grouped by parent, chunked by the cross-parent size, parents after.
+		expect( d.calls ).toEqual( [ 'across:4/41,4/42,5/51', 'across:6/61', 'products:1' ] );
+		expect( d.batchVariations ).not.toHaveBeenCalled();
+		expect( across ).toHaveBeenCalledWith( [ { id: 41, parent_id: 4, status: 'draft' }, { id: 42, parent_id: 4, status: 'draft' }, { id: 51, parent_id: 5, status: 'draft' } ], { batchId: 'batch-1', source: 'bulk' } );
+		expect( result.errors ).toEqual( [] );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 51, 61, 1 ] );
+		expect( progress ).toEqual( [ [ 0, 5 ], [ 3, 5 ], [ 4, 5 ], [ 5, 5 ] ] );
+	} );
+
+	it( 'reports every row of a failed cross-parent request and rolls it back', async () => {
+		const d = deps( { batchVariationsAcross: vi.fn( async () => { throw Object.assign( new Error( 'Boom' ), { code: 'http_500' } ); } ) } );
+		const items = [ variation( 41, 4 ), variation( 51, 5 ) ];
+		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.updated ).toEqual( [] );
+		expect( result.errors.map( ( error ) => [ error.id, error.code ] ) ).toEqual( [ [ 41, 'http_500' ], [ 51, 'http_500' ] ] );
+		// Optimistic patch, then every snapshot of the group back in one patch.
+		expect( d.patchItems ).toHaveBeenLastCalledWith( [ { id: 41, status: 'publish' }, { id: 51, status: 'publish' } ] );
+	} );
+
 	it( 'saves variations per parent first, then parents, chunked, with progress', async () => {
 		const d = deps();
 		const progress: Array< [ number, number ] > = [];
@@ -120,7 +152,9 @@ describe( 'runSave', () => {
 
 		const patches = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => call[ 0 ] );
 
-		expect( patches.at( -1 ) ).toEqual( [ { id: 2, status: 'publish' } ] );
+		// The saved row and the failed row's snapshot land in one patch.
+		expect( patches.at( -1 ) ).toContainEqual( { id: 2, status: 'publish' } );
+		expect( patches.at( -1 ) ).toHaveLength( 2 );
 	} );
 
 	it( 'a failed request fails every row of that chunk and continues with the next', async () => {
@@ -193,7 +227,7 @@ describe( 'runSave', () => {
 		const d = deps();
 		const result = await runSave( d, [ simple( 1, { status: 'draft' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
 
-		expect( result ).toEqual( { updated: [], errors: [], batchId: 'batch-1' } );
+		expect( result ).toMatchObject( { updated: [], errors: [], batchId: 'batch-1', unchanged: 1, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
 		expect( d.batchProducts ).not.toHaveBeenCalled();
 	} );
 

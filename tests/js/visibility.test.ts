@@ -74,6 +74,7 @@ describe( 'visibleEditFields', () => {
 			'date_on_sale_from',
 			'date_on_sale_to',
 			'stock_quantity',
+			'manage_stock',
 			'featured',
 			'categories',
 			'dimensions',
@@ -105,17 +106,17 @@ describe( 'visibleEditFields', () => {
 	it( 'variations in the selection drop parent-owned fields', () => {
 		const ids = idsOf( visibleEditFields( fields, [ variation( 11, 1 ) ], quick ) );
 
-		expect( ids ).toEqual( [ 'sku', 'status', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'i18n:se.sale_price', 'i18n:se.regular_price' ] );
+		expect( ids ).toEqual( [ 'sku', 'status', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'manage_stock', 'i18n:se.sale_price', 'i18n:se.regular_price' ] );
 
 		const mixed = idsOf( visibleEditFields( fields, [ simple( 1 ), variation( 11, 1 ) ], bulk ) );
 
-		expect( mixed ).toEqual( [ 'status', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'i18n:se.sale_price', 'i18n:se.regular_price' ] );
+		expect( mixed ).toEqual( [ 'status', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to', 'stock_quantity', 'manage_stock', 'i18n:se.sale_price', 'i18n:se.regular_price' ] );
 	} );
 
 	it( 'variable parents hide sellable fields unless applied to their variations', () => {
 		const alone = idsOf( visibleEditFields( fields, [ variable( 1 ) ], quick ) );
 
-		expect( alone ).toEqual( [ 'name', 'sku', 'status', 'stock_quantity', 'featured', 'categories', 'dimensions', 'i18n:se.name' ] );
+		expect( alone ).toEqual( [ 'name', 'sku', 'status', 'stock_quantity', 'manage_stock', 'featured', 'categories', 'dimensions', 'i18n:se.name' ] );
 
 		const applied = idsOf( visibleEditFields( fields, [ variable( 1 ) ], { mode: 'quick', applyToVariations: true } ) );
 

@@ -16,7 +16,7 @@ import { visibleEditFields } from './visibility';
 export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list', 'name', 'permalink' ] as const;
 
 /** The projected sale < regular check reads both prices whichever one is edited. */
-export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to' ] as const;
+export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_to', 'manage_stock' ] as const;
 
 /** Every status, trash included: a selection may hold rows of any tab. */
 export const ANY_STATUS = 'publish,future,draft,pending,private,trash';
@@ -45,12 +45,23 @@ export interface HydrateDeps {
 
 const DEFAULT_DEPS: HydrateDeps = { listProducts, getVariations };
 
+export interface HydratedSelection {
+	/** The rows with the fetched values merged in, row order and hierarchy keys kept; missing rows left as they were. */
+	items: ProductListItem[];
+	/** Ids the server no longer returned (deleted since the list loaded). */
+	missing: number[];
+}
+
 /**
  * The same rows with the fetched values merged in (row order and the
  * hierarchy keys kept). Rows the server no longer returns stay as they
- * are; the save reports them.
+ * are; `hydrateSelection` also names them.
  */
 export async function hydrateItems( items: ProductListItem[], fields: string[], deps: HydrateDeps = DEFAULT_DEPS, chunk = 100 ): Promise< ProductListItem[] > {
+	return ( await hydrateSelection( items, fields, deps, chunk ) ).items;
+}
+
+export async function hydrateSelection( items: ProductListItem[], fields: string[], deps: HydrateDeps = DEFAULT_DEPS, chunk = 100 ): Promise< HydratedSelection > {
 	const limit = createLimiter( 4 );
 	const byId = new Map< number, ProductListItem >();
 	const products: number[] = [];
@@ -103,9 +114,16 @@ export async function hydrateItems( items: ProductListItem[], fields: string[], 
 
 	await Promise.all( jobs );
 
-	return items.map( ( item ) => {
+	const missing: number[] = [];
+	const merged = items.map( ( item ) => {
 		const full = byId.get( item.id );
+
+		if ( ! full && ! item._placeholder ) {
+			missing.push( item.id );
+		}
 
 		return full ? ( { ...item, ...full } as ProductListItem ) : item;
 	} );
+
+	return { items: merged, missing };
 }
