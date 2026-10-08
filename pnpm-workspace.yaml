@@ -1,0 +1,15 @@
+# One flat node_modules: wp-scripts resolves loaders from the project root and
+# dataviews' peer React must be the single copy the types see.
+nodeLinker: hoisted
+
+# None of these need their install scripts (native watcher, core-js banners,
+# resolver prebuilt); pnpm refuses to run any script until they are decided.
+allowBuilds:
+  '@parcel/watcher': false
+  core-js: false
+  core-js-pure: false
+  fs-ext-extra-prebuilt: false
+  unrs-resolver: false
+
+# Scripts run against whatever is installed; CI installs with --frozen-lockfile.
+verifyDepsBeforeRun: false

@@ -1,0 +1,49 @@
+{
+    "name": "generoi/wp-woocommerce-products-list",
+    "type": "wordpress-plugin",
+    "license": "MIT",
+    "description": "A fast DataViews product catalog for WooCommerce with variations inline, bulk editing, scheduled sales and a change log",
+    "homepage": "https://github.com/generoi/wp-woocommerce-products-list",
+    "authors": [
+        {
+            "name": "Genero",
+            "email": "info@genero.fi"
+        }
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.17",
+        "php-stubs/woocommerce-stubs": "^11.1",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^9.6",
+        "szepeviktor/phpstan-wordpress": "^2.0",
+        "wp-phpunit/wp-phpunit": "^7.1",
+        "yoast/phpunit-polyfills": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "GeneroWP\\ProductsList\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "GeneroWP\\ProductsList\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "lint": "pint --test",
+        "lint:fix": "pint",
+        "test": "phpunit --testsuite unit",
+        "test:integration": "phpunit --bootstrap tests/bootstrap.php --testsuite integration",
+        "test:wp-env": "npx wp-env run tests-cli --env-cwd=wp-content/plugins/wp-woocommerce-products-list php -d memory_limit=1024M vendor/bin/phpunit --bootstrap tests/bootstrap.php --testsuite integration",
+        "stan": "./vendor/bin/phpstan analyse --memory-limit=4G"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.3"
+        }
+    }
+}

@@ -1,0 +1,22 @@
+# Left out of the package Composer installs: nothing here is needed to run
+# the plugin, and tests have no business being reachable on a live site.
+/.github export-ignore
+/tests export-ignore
+/docs export-ignore
+/resources export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.wp-env.json export-ignore
+/package.json export-ignore
+/pnpm-lock.yaml export-ignore
+/pnpm-workspace.yaml export-ignore
+/phpstan.neon export-ignore
+/phpunit.xml export-ignore
+/pint.json export-ignore
+/tsconfig.json export-ignore
+/webpack.config.js export-ignore
+/eslint.config.mjs export-ignore
+/vitest.config.mts export-ignore
+
+# Built, minified: not for review.
+/build/** linguist-generated=true -diff

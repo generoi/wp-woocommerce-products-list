@@ -1,0 +1,10 @@
+<?php
+
+/**
+ * Functions PHPStan cannot see in the WooCommerce stubs.
+ */
+
+/**
+ * @return \Automattic\WooCommerce\Container
+ */
+function wc_get_container() {}

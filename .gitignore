@@ -1,0 +1,9 @@
+/vendor/
+/node_modules/
+.phpunit.result.cache
+/tests/wp-tests-config.php
+/tests/e2e/.auth/
+/test-results/
+/playwright-report/
+/coverage/
+.DS_Store

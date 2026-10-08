@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    # Lint, static analysis and the unit suite; none of it boots WordPress.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - run: composer install --no-interaction --prefer-dist
+
+      - name: Lint
+        run: composer lint
+
+      - name: Static analysis
+        run: composer stan
+
+      - name: Unit tests
+        run: composer test
+
+  build:
+    runs-on: ubuntu-latest
+    # The committed build/ must match the sources, and stay under budget.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint:js
+
+      - name: Types
+        run: pnpm lint:types
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Build is committed
+        run: git diff --exit-code build/
+
+      # dataviews' /wp entry inlines its own @wordpress/components, which is
+      # most of the 1.9 MB (380 KB gzipped). Lazy-load edit/ before raising this.
+      - name: Size budget
+        run: |
+          size=$(wc -c < build/index.js)
+          echo "build/index.js: $size bytes"
+          test "$size" -le 2097152
+
+  integration:
+    runs-on: ubuntu-latest
+    # Boots WordPress and WooCommerce in wp-env. Allowed to fail while the
+    # suite is being built up; flip continue-on-error once it is stable.
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: composer install --no-interaction --prefer-dist
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm env:start
+
+      - run: composer test:wp-env

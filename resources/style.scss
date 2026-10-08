@@ -1,0 +1,20 @@
+// DataViews' own stylesheet; its --wpds-* tokens come from core's
+// wp-components stylesheet, which the PHP side lists as a dependency.
+@use '@wordpress/dataviews/build-style/style';
+
+.wc-products-list-wrap {
+	margin: 0;
+	padding-top: 8px;
+}
+
+.wc-products-list {
+	// The admin content area is the scroll container; the list fills it.
+	min-height: calc(100vh - 100px);
+	background: #fff;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+
+	.dataviews-wrapper {
+		height: auto;
+	}
+}

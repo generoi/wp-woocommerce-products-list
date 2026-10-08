@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<phpunit
+    colors="true"
+    beStrictAboutTestsThatDoNotTestAnything="true"
+>
+    <testsuites>
+        <!-- Pure logic: definition normalisation, query building, diffing.
+             No WordPress involved. -->
+        <testsuite name="unit">
+            <directory suffix="Test.php">tests/Unit</directory>
+        </testsuite>
+        <!-- Everything that touches the database or the REST API boots
+             WordPress and WooCommerce: the behaviour is defined by their hooks. -->
+        <testsuite name="integration">
+            <directory suffix="Test.php">tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+
+    <php>
+        <!-- wp-env path. Override for another setup: WP_PHPUNIT__TESTS_CONFIG=tests/wp-tests-config.php -->
+        <env name="WP_PHPUNIT__TESTS_CONFIG" value="/var/www/html/wp-config.php" />
+    </php>
+</phpunit>
