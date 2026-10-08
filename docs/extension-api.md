@@ -79,8 +79,8 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 | --- | --- |
 | `version`, `settings` | the plugin version and the bootstrap payload (currency, caps, product types, limits, links, languages…) |
 | `registerField( field )` | adds a column. A DataViews `Field` plus `rest { fields, read?, write?, param?, sortParam?, applies }`, `productTypes`, `edit`, `reference?`, `source?`. Missing extras get defaults: `rest.fields` from the id, applies to products only, not editable. Re-registering an id replaces it in place |
-| `registerAction( action )` | adds a DataViews action (`callback` or `RenderModal`), optionally with `scope` and `capability` |
-| `registerQuickEditTab( { id, label, fields?, order? } )` | adds a tab to quick/bulk edit; fields join it through `edit.tab` |
+| `registerAction( action )` | adds a DataViews action (`callback` or `RenderModal`), optionally with `scope` and `capability`. The built-in `quick-edit` action is a `callback` that opens the inline editor; an extension cannot replace it with a `RenderModal` of its own (register a differently named action instead) |
+| `registerQuickEditTab( { id, label, fields?, order? } )` | adds a tab to quick/bulk edit; fields join it through `edit.tab`. The editor is inline in the table (a quick edit takes the edited row's place, the bulk editor sits above the first row); tabs and fields work the same as they did in the modal |
 | `addQueryParams( ( params, { tab, view, fields } ) => params )` | changes the wc/v3 list request |
 | `refresh( { counts? } )` | refetches the current page (and counts) |
 | `patchItems( [ { id, …partial } ] )` | merges partial rows into every cached list without a request (for optimistic updates) |
@@ -115,7 +115,9 @@ A registered field is offered under **Add filter** only when the list query can 
 
 `getValue` is what the column and the form read. `setValue` is what DataForm applies to the form data while editing (it must produce the same shape the row has). `rest.write` is what goes into the wc/v3 request body on save. For a plain wc/v3 key (`sku`, `regular_price`) none of the three is needed.
 
-A **filter-only** field has `filterOnly: true`, `elements`, `filterBy`, `getValue: () => undefined`, `render: () => null` and `rest.toParams( value, operator )` (or `rest.param`); see the demo.
+A **filter-only** field has `filterOnly: true`, `elements`, `filterBy`, `getValue: () => undefined`, `render: () => null` and `rest.toParams( value, operator )` (or `rest.param`); see the demo. Give it `enableHiding: false` as well, so neither column picker (DataViews' Properties, the toolbar's Columns) lists it as a column.
+
+A column's default width is its `columnStyle` (`{ width | minWidth | maxWidth, align }`, DataViews' `view.layout.styles` entry); declarative fields get one from their `width` or, failing that, their type (a `*.name` text column is as wide as the name column, other text 180 px, prices 120 px right-aligned). `columnGroup` names the section of the toolbar's Columns picker (`i18n:se` is listed under the language's name; declarative fields take it from `group`).
 
 ### Actions from JavaScript
 
@@ -149,7 +151,7 @@ Names are exported from `resources/extensions/hooks.ts` and available as `api.ho
 | `wcProductsList.defaultView` | the DataViews `View` | `settings` |
 | `wcProductsList.statusTabs` | `{ id, label, count }[]` | `counts` |
 | `wcProductsList.quickEdit.tabs` | `QuickEditTab[]` | `items` |
-| `wcProductsList.quickEdit.layout` | the DataForm `Form` of a tab | `tab, items` |
+| `wcProductsList.quickEdit.layout` | the DataForm `Form` of a tab (the General tab is a `row` layout of up to three `regular` columns, each holding labelled `regular` groups; other tabs one or two columns) | `tab, items` |
 | `wcProductsList.bulkNumericFields` | field ids with the set/increase/decrease (and, for sale prices, regular-price-minus) control | — |
 
 | Action | Payload |
@@ -158,6 +160,7 @@ Names are exported from `resources/extensions/hooks.ts` and available as `api.ho
 | `wcProductsList.loaded` | `items, { tab, view, total }` — once per completed list request; optimistic patches (a save, a trash) do not fire it |
 | `wcProductsList.saved` | `{ updated, errors, batchId }, { source }` |
 | `wcProductsList.deleted` | `ids, { action: 'trash' | 'delete', batchId }` |
+| `wcProductsList.actionPerformed` | `{ action, ids, batchId, items }` — a declarative (PHP) action finished; `ids` are the rows it processed without error. The Catalog drops them from the selection. |
 
 Register with a namespace of your own, for example `api.hooks.hookNamespace( 'my-plugin' )` → `my-plugin/wc-products-list`.
 

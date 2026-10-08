@@ -1,6 +1,6 @@
 # WooCommerce Products List
 
-A fast product catalog for the WooCommerce admin, built on `@wordpress/dataviews`: variations expand inline under their parents, quick edit and bulk edit (including scheduled sales across variations) happen in place without a page reload, and every change made through the list is logged with a revert path. Extensions add columns, filters and actions in PHP alone, or in JavaScript through `window.wcProductsList`.
+A fast product catalog for the WooCommerce admin, built on `@wordpress/dataviews`: variations expand inline under their parents, quick edit and bulk edit (including scheduled sales across variations) happen inline in the table like the classic list's quick edit, without a modal or a page reload, and every change made through the list is logged with a revert path. Extensions add columns, filters and actions in PHP alone, or in JavaScript through `window.wcProductsList`.
 
 Requires WordPress 6.8+, WooCommerce 11.0+ and PHP 8.2+. Adds **Products → Catalog**; the classic list stays untouched.
 

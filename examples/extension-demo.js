@@ -86,6 +86,8 @@
 			],
 			filterBy: { operators: [ 'is' ], isPrimary: false },
 			filterOnly: true,
+			// Not a column: keep it out of the column pickers.
+			enableHiding: false,
 			readOnly: true,
 			enableSorting: false,
 			getValue: function () {
