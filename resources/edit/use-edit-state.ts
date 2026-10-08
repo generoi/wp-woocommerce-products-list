@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from '@wordpress/element';
 import type { ProductField, ProductListItem } from '../types';
 import { isNumericOp, isPendingOp } from './bulk-numeric';
 import { normalizeForCompare } from './field-value';
-import { mergeItems, MIXED_VALUE } from './merge';
+import { CLEAR_VALUE, mergeItems, MIXED_VALUE } from './merge';
 import type { MixedState } from './merge';
 
 export interface EditState {
@@ -23,12 +23,23 @@ export interface EditState {
 	hasInput: boolean;
 }
 
-/** Drop edits that do not change anything: unset values and idle numeric ops. */
+/**
+ * Drop edits that do not change anything: unset values, idle numeric ops,
+ * and a mixed field typed into and erased again (its control shows "Mixed"
+ * once more, so it must mean "no change"; clearing every row is the
+ * explicit `CLEAR_VALUE`, written as an empty string).
+ */
 export function effectiveEdits( edits: Record< string, unknown >, base: Record< string, unknown >, mixed: Record< string, MixedState > ): Record< string, unknown > {
 	const result: Record< string, unknown > = {};
 
 	for ( const [ id, value ] of Object.entries( edits ) ) {
 		if ( value === undefined || value === MIXED_VALUE ) {
+			continue;
+		}
+
+		if ( value === CLEAR_VALUE ) {
+			result[ id ] = '';
+
 			continue;
 		}
 
@@ -40,7 +51,11 @@ export function effectiveEdits( edits: Record< string, unknown >, base: Record< 
 			continue;
 		}
 
-		if ( ! mixed[ id ]?.isMixed && normalizeForCompare( base[ id ] ) === normalizeForCompare( value ) ) {
+		if ( mixed[ id ]?.isMixed ) {
+			if ( value === '' || value === null || ( Array.isArray( value ) && value.length === 0 ) ) {
+				continue;
+			}
+		} else if ( normalizeForCompare( base[ id ] ) === normalizeForCompare( value ) ) {
 			continue;
 		}
 

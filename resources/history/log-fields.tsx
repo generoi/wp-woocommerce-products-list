@@ -62,7 +62,8 @@ export function ChangeCell( { item }: { item: LogRow } ) {
 		);
 	}
 
-	if ( item.action !== 'update' ) {
+	// Extension actions that report changes (i18n_copy) have a field and old/new values like an update.
+	if ( item.action !== 'update' && ! item.field ) {
 		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
 	}
 
@@ -193,7 +194,16 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 			enableSorting: false,
 			filterBy: false,
 			getValue: ( { item } ) => item.status,
-			render: ( { item } ) => ( item.status === 'ok' ? <span>{ __( 'OK', 'wp-woocommerce-products-list' ) }</span> : <span className="wc-pl-history__error" title={ item.message }>{ __( 'Error', 'wp-woocommerce-products-list' ) }</span> ),
+			// The reason is text in the cell, not a tooltip: readable without a mouse.
+			render: ( { item } ) =>
+				item.status === 'ok' ? (
+					<span>{ __( 'OK', 'wp-woocommerce-products-list' ) }</span>
+				) : (
+					<span className="wc-pl-history__error">
+						<strong>{ __( 'Error', 'wp-woocommerce-products-list' ) }</strong>
+						{ item.message ? `: ${ item.message }` : '' }
+					</span>
+				),
 		},
 		{
 			id: 'batch_id',

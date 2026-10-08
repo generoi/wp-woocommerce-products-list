@@ -1,32 +1,50 @@
-/** Quick edit (one row) / bulk edit (many) in a DataViews modal. */
-import { Spinner } from '@wordpress/components';
-import { lazy, Suspense } from '@wordpress/element';
-import { __, _n, sprintf } from '@wordpress/i18n';
+/**
+ * Quick edit (one row) / bulk edit (many) inline in the table: the action
+ * hands the rows to the screen, which places the editor row (a quick edit
+ * in the row's place, the bulk editor above the first row) and mounts the
+ * editor chunk into it. DataViews' bulk footer and the row menu both call
+ * the callback; the selection bar's "Bulk edit" goes to the screen directly.
+ */
 import { pencil } from '@wordpress/icons';
-import type { RenderModalProps } from '../dataviews';
-import type { ProductAction, ProductListItem } from '../types';
+import { __ } from '@wordpress/i18n';
+import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
 import { canEdit, isRealRow, realRows } from './context';
 import '../edit/style.scss';
 
-/**
- * The modal (DataForm glue, numeric ops, save flow) loads on first use as
- * its own chunk: the list page stays under the size budget and most visits
- * never open it. The stylesheet is imported here, statically, so it ships
- * with the main bundle and the chunk carries no CSS of its own.
- */
-const ProductEditModal = lazy( () => import( /* webpackChunkName: "edit" */ '../edit/product-edit-modal' ) );
+const TRANSLATION_FILTER = /^(?:missing|translated):([a-z]{2,8})$/i;
 
-export const createQuickEditAction: ActionFactory = ( { settings, fields } ) => {
-	if ( ! settings.caps.edit ) {
-		return null;
+/**
+ * The tab the editor opens on, from the list: a "Missing in Svenska"
+ * translation filter means the Svenska tab (the user is there to fill it);
+ * nothing otherwise (the editor then remembers the last tab used).
+ */
+export function initialTabFor( filters: Array< { field: string; value?: unknown } > | undefined ): string | undefined {
+	for ( const filter of filters ?? [] ) {
+		if ( filter.field !== 'translation' ) {
+			continue;
+		}
+
+		const values = Array.isArray( filter.value ) ? filter.value : [ filter.value ];
+
+		for ( const value of values ) {
+			const match = typeof value === 'string' ? TRANSLATION_FILTER.exec( value ) : null;
+
+			if ( match ) {
+				return `i18n:${ match[ 1 ]!.toLowerCase() }`;
+			}
+		}
 	}
 
-	const RenderModal = ( props: RenderModalProps< ProductListItem > ) => (
-		<Suspense fallback={ <div className="wc-pl-edit__loading"><Spinner /></div> }>
-			<ProductEditModal { ...props } items={ realRows( props.items ) } fields={ fields } />
-		</Suspense>
-	);
+	return undefined;
+}
+
+export const createQuickEditAction: ActionFactory = ( context ) => {
+	const { settings } = context;
+
+	if ( ! settings.caps.edit || ! context.openEditor ) {
+		return null;
+	}
 
 	const action: ProductAction = {
 		id: 'quick-edit',
@@ -35,17 +53,10 @@ export const createQuickEditAction: ActionFactory = ( { settings, fields } ) => 
 		isPrimary: true,
 		supportsBulk: true,
 		isEligible: ( item ) => isRealRow( item ) && canEdit( item ),
-		RenderModal,
-		modalHeader: ( items ) =>
-			items.length > 1
-				? sprintf(
-						/* translators: %d: number of rows */
-						_n( 'Edit %d item', 'Edit %d items', items.length, 'wp-woocommerce-products-list' ),
-						items.length
-				  )
-				: __( 'Quick edit', 'wp-woocommerce-products-list' ),
-		modalSize: 'large',
-		modalFocusOnMount: 'firstContentElement',
+		// Resolves at once: DataViews' footer button shows busy until the callback settles, and the editor outlives it.
+		callback: ( items ) => {
+			context.openEditor?.( realRows( items ) );
+		},
 	};
 
 	return action;

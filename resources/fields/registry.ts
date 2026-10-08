@@ -32,7 +32,7 @@ import { createDimensionsField, createShippingClassField, createWeightField } fr
 import { createSkuField } from './sku';
 import { createStatusField } from './status';
 import { createStockQuantityField } from './stock-quantity';
-import { createStockStatusField } from './stock-status';
+import { createStockStatusField, createVariationStockFilter } from './stock-status';
 import { createTaxClassField, createTaxStatusField } from './tax';
 import { createTermsFields } from './terms';
 import { createTypeField } from './type';
@@ -49,6 +49,7 @@ export const CORE_FIELD_IDS: readonly string[] = [
 	'date_on_sale_from',
 	'date_on_sale_to',
 	'stock_status',
+	'variation_stock',
 	'manage_stock',
 	'stock_quantity',
 	'backorders',
@@ -96,6 +97,7 @@ export function createCoreFields( settings: Settings ): ProductField[] {
 		createSalePriceField( settings ),
 		...createSaleScheduleFields( settings ),
 		createStockStatusField( settings ),
+		createVariationStockFilter( settings ),
 		createManageStockField( settings ),
 		createStockQuantityField( settings ),
 		createBackordersField( settings ),

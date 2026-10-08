@@ -55,6 +55,8 @@ export interface ActionResult {
 	ok: boolean;
 	code?: string;
 	message?: string;
+	/** On an ok result: how many fields the handler changed (0 for a no-op). */
+	changed?: number;
 	data?: Record< string, unknown >;
 	/** On a revert `conflict`: the fields changed again since the batch. */
 	fields?: string[];
@@ -96,6 +98,8 @@ export interface LogBatch {
 	rows: number;
 	objects: number;
 	fields: string[];
+	/** Distinct users with rows in the batch; a batch shared by more than one is not revertable. */
+	users?: number;
 	revertable: boolean;
 }
 
@@ -191,9 +195,60 @@ function header( response: Response, name: string ): number {
 	return Number.isFinite( value ) ? value : 0;
 }
 
+/**
+ * A stale REST nonce (the session was renewed in another tab, or the nonce
+ * rotated after a day): core's apiFetch refreshes it and retries on its own,
+ * but only when the error it sees is a parsed `rest_cookie_invalid_nonce`
+ * body. `list()` reads the raw response for its headers (`parse: false`),
+ * so the 403 reaches it as a Response and core's retry never runs; the same
+ * refresh is done here. Resolves to false when there is nothing to refresh
+ * with (no nonce middleware: tests, a logged-out page).
+ */
+export async function refreshNonce(): Promise< boolean > {
+	const api = apiFetch as typeof apiFetch & { nonceEndpoint?: string; nonceMiddleware?: { nonce: string } };
+
+	if ( ! api.nonceEndpoint || ! api.nonceMiddleware ) {
+		return false;
+	}
+
+	try {
+		const response = await globalThis.fetch( api.nonceEndpoint );
+
+		if ( ! response.ok ) {
+			return false;
+		}
+
+		api.nonceMiddleware.nonce = await response.text();
+
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function isStaleNonce( error: unknown ): boolean {
+	return error instanceof ApiError && error.code === 'rest_cookie_invalid_nonce';
+}
+
 /** A GET that keeps the X-WP-Total headers. */
-async function list< Raw >( path: string, options?: RequestOptions ): Promise< ListResult< Raw > > {
-	const response = await request( { path, parse: false, ...listMode( options ) } );
+async function list< Raw >( path: string, options?: RequestOptions, retried = false ): Promise< ListResult< Raw > > {
+	let response: Response;
+
+	try {
+		response = await request( { path, parse: false, ...listMode( options ) } );
+
+		// Older apiFetch builds resolve a failed unparsed request with the Response.
+		if ( ! response.ok ) {
+			throw await toApiError( response );
+		}
+	} catch ( error ) {
+		if ( ! retried && isStaleNonce( error ) && ( await refreshNonce() ) ) {
+			return list< Raw >( path, options, true );
+		}
+
+		throw error;
+	}
+
 	let items: Raw[];
 
 	try {
@@ -513,6 +568,8 @@ export interface RevertPlan {
 	chunks: number[][];
 	/** Rows that are not reverted (trash, delete, duplicate, masked values). */
 	skipped: Array< { id: number; object_type: 'product' | 'variation'; action: string } >;
+	/** Distinct users with rows in the batch; more than one makes it not revertable (409 wc_products_list_batch_shared). */
+	users?: number;
 	revertable: boolean;
 }
 

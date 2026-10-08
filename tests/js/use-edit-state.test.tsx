@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { MIXED_VALUE } from '../../resources/edit/merge';
+import { CLEAR_VALUE, MIXED_VALUE } from '../../resources/edit/merge';
 import { effectiveEdits, useEditState } from '../../resources/edit/use-edit-state';
 import type { ProductListItem } from '../../resources/types';
 import { coreFields, field, simple } from './edit-fixtures';
@@ -50,5 +50,22 @@ describe( 'effectiveEdits', () => {
 		expect( effectiveEdits( { stock_status: MIXED_VALUE }, base, mixed ) ).toEqual( {} );
 		expect( effectiveEdits( { stock_status: 'instock' }, base, mixed ) ).toEqual( { stock_status: 'instock' } );
 		expect( stock.elements ).toHaveLength( 1 );
+	} );
+} );
+
+describe( 'effectiveEdits on mixed text fields', () => {
+	const mixed = { weight: { isMixed: true, isEmpty: false, placeholder: 'Mixed' } };
+	const base = { weight: '' };
+
+	it( 'typing into a mixed field and erasing it again is no edit', () => {
+		expect( effectiveEdits( { weight: '1.5' }, base, mixed ) ).toEqual( { weight: '1.5' } );
+		expect( effectiveEdits( { weight: '' }, base, mixed ) ).toEqual( {} );
+		expect( effectiveEdits( { weight: null }, base, mixed ) ).toEqual( {} );
+	} );
+
+	it( 'clearing every row is the explicit sentinel, written as an empty string', () => {
+		expect( effectiveEdits( { weight: CLEAR_VALUE }, base, mixed ) ).toEqual( { weight: '' } );
+		// Agreeing rows: an empty value is a real edit when the shared value was not empty.
+		expect( effectiveEdits( { weight: '' }, { weight: '2' }, { weight: { isMixed: false, isEmpty: false, placeholder: '' } } ) ).toEqual( { weight: '' } );
 	} );
 } );

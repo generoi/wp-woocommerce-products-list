@@ -72,7 +72,33 @@ export interface ListRowMeta {
 	can_delete: boolean;
 	/** 0 for a product; the parent's id for a variation. */
 	parent_id: number;
+	/**
+	 * Variable parents: how many of their variations are out of stock, so a
+	 * restock can be found without expanding rows. Absent or null on other
+	 * rows and on servers that do not compute it yet.
+	 */
+	variation_stock?: VariationStockSummary | null;
+	/**
+	 * Variable parents: the sales on their variations (counts on sale now
+	 * and scheduled for later, with the earliest start and latest end as
+	 * site-local ISO strings), so a campaign is visible on the parent row.
+	 */
+	sale_summary?: VariationSaleSummary | null;
 	[ extension: string ]: unknown;
+}
+
+export interface VariationStockSummary {
+	out_of_stock: number;
+	total: number;
+}
+
+export interface VariationSaleSummary {
+	/** Variations whose sale is in force now. */
+	on_sale: number;
+	/** Variations with a sale price and a start date in the future. */
+	scheduled: number;
+	from: string | null;
+	to: string | null;
 }
 
 /** The keys a product and a variation share. */
@@ -165,13 +191,23 @@ export interface RawVariation extends RawSellable {
 export type PlaceholderKind = 'loading' | 'error' | 'more';
 
 /**
+ * The inline editor's synthetic row: a quick edit stands in for the row it
+ * edits (`targetId`), the bulk editor sits at the top of the table body.
+ */
+export interface EditorRowMeta {
+	mode: 'quick' | 'bulk';
+	/** The edited row's id for a quick edit; null for the bulk editor. */
+	targetId: number | null;
+}
+
+/**
  * A row of the list. Parents are level 0, their variations level 1; a
  * placeholder row stands in for children while they load, when loading
  * failed, or for the ones beyond `limits.maxChildrenPerParent`.
  */
 export interface ListItemMeta {
-	/** 'product' for a parent row, 'variation' for a child row. */
-	_kind: 'product' | 'variation';
+	/** 'product' for a parent row, 'variation' for a child row, 'editor' for the inline editor's row. */
+	_kind: 'product' | 'variation' | 'editor';
 	_level: 0 | 1;
 	/** null for a parent, the parent's id for a variation or placeholder. */
 	_parentId: number | null;
@@ -185,6 +221,8 @@ export interface ListItemMeta {
 	_placeholder?: PlaceholderKind;
 	/** The placeholder's message (error text, "N more…"). */
 	_placeholderMessage?: string;
+	/** Set only on the inline editor's row (edit/editor-rows.ts). */
+	_editor?: EditorRowMeta;
 }
 
 export type ProductListItem = ( RawProduct | RawVariation ) & ListItemMeta;
@@ -205,8 +243,21 @@ export function isPlaceholderRow( item: ProductListItem ): boolean {
 	return item._placeholder !== undefined;
 }
 
-/** `getItemId` for DataViews: ids are post ids, unique across parents and variations. */
+/** The inline editor's row: not a product, never selected, never acted on. */
+export function isEditorRow( item: ProductListItem ): boolean {
+	return item._kind === 'editor';
+}
+
+/**
+ * `getItemId` for DataViews: ids are post ids, unique across parents and
+ * variations; placeholder and editor rows get a colon-separated key no post
+ * id can collide with ("12:loading", "editor:12", "editor:bulk").
+ */
 export function getItemId( item: ProductListItem ): string {
+	if ( item._editor ) {
+		return `editor:${ item._editor.targetId ?? 'bulk' }`;
+	}
+
 	return item._placeholder ? `${ item._parentId }:${ item._placeholder }` : String( item.id );
 }
 

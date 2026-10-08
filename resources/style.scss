@@ -221,6 +221,75 @@ $link: #2271b1;
 	white-space: nowrap;
 }
 
+// "4 of 16 variations out of stock" under a variable parent's stock status.
+.wc-products-list__stock-variations {
+	display: block;
+	font-size: 11px;
+	color: #d63638;
+	white-space: nowrap;
+}
+
+// The "Columns" picker: a search box over sectioned checkbox lists.
+.wc-products-list__columns-count {
+	margin-inline-start: 4px;
+	padding: 0 5px;
+	border-radius: 8px;
+	background: #f0f0f1;
+	color: $muted;
+	font-size: 11px;
+	line-height: 16px;
+}
+
+.wc-products-list__columns-popover .components-popover__content {
+	min-width: 280px;
+	max-height: 70vh;
+	overflow: auto;
+}
+
+.wc-products-list__columns-panel {
+	padding: 8px 12px 4px;
+}
+
+.wc-products-list__columns-search {
+	width: 100%;
+	margin: 0 0 8px;
+}
+
+.wc-products-list__columns-group {
+	margin: 0 0 8px;
+	padding: 0;
+	border: 0;
+
+	&-label {
+		display: block;
+		margin-bottom: 2px;
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.02em;
+		color: $muted;
+	}
+}
+
+.wc-products-list__columns-option {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 0;
+	font-size: 13px;
+	cursor: pointer;
+
+	input {
+		margin: 0;
+	}
+}
+
+.wc-products-list__columns-empty {
+	margin: 4px 0 8px;
+	color: $muted;
+	font-size: 12px;
+}
+
 .wc-products-list__stale-notice {
 	margin: 8px 12px 0;
 }
@@ -353,6 +422,13 @@ $link: #2271b1;
 	line-height: 14px;
 	text-transform: uppercase;
 	letter-spacing: 0.02em;
+
+	// A sale in force on the variations of a variable parent.
+	&.is-sale {
+		background: #edfaef;
+		border-color: #4ab866;
+		color: #005c12;
+	}
 }
 
 .wc-products-list__price-edit {

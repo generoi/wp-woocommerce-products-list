@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { describeEdits } from '../../resources/edit/change-summary';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { getSettings as getDateSettings, setSettings as setDateSettings } from '@wordpress/date';
+import { describeEdits, describeSiteDateTime } from '../../resources/edit/change-summary';
 import { withScheduleSale } from '../../resources/edit/form-layouts';
 import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
 
@@ -36,5 +37,25 @@ describe( 'describeEdits', () => {
 
 	it( 'skips unknown fields and idle ops', () => {
 		expect( describeEdits( { nope: 'x', stock_quantity: { operation: 'dont_change', value: '' } }, fields, [ simple( 1 ) ], settings ) ).toMatchObject( [ { field: 'stock_quantity', count: 0 } ] );
+	} );
+} );
+
+describe( 'describeSiteDateTime', () => {
+	const dateSettings = getDateSettings();
+
+	beforeAll( () => setDateSettings( { ...dateSettings, timezone: { offset: 0, offsetFormatted: '0', string: 'UTC', abbr: 'UTC' } } ) );
+	afterAll( () => setDateSettings( dateSettings ) );
+
+	it( 'shows the wall-clock value the control emits, whatever the browser timezone, and says it is site time', () => {
+		expect( describeSiteDateTime( '2026-11-01T00:00:00', settings ) ).toBe( '1.11.2026 00:00 (site time)' );
+		expect( describeSiteDateTime( '2026-11-30T23:59:00', settings ) ).toBe( '30.11.2026 23:59 (site time)' );
+		// A zoned instant is shown in the site's zone.
+		expect( describeSiteDateTime( '2026-10-31T22:00:00Z', settings ) ).toBe( '31.10.2026 22:00 (site time)' );
+	} );
+
+	it( 'is what the summary line shows for a sale date', () => {
+		const lines = describeEdits( { date_on_sale_from: '2026-11-01T00:00:00' }, fields, [ simple( 1, { regular_price: '10' } ) ], settings );
+
+		expect( lines[ 0 ]?.change ).toBe( '→ 1.11.2026 00:00 (site time)' );
 	} );
 } );

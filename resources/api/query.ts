@@ -8,8 +8,16 @@ import { getQueryParamCallbacks } from '../extensions/api';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, QueryParams, Settings } from '../types';
 
-/** Always requested: the row meta the hierarchy and actions need. */
-export const CORE_REQUEST_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list' ] as const;
+/**
+ * Always requested on products: the row meta the hierarchy and actions
+ * need. `featured` is here because the feature/unfeature actions decide on
+ * it ("Mark as featured" must not be offered on a featured product because
+ * the Featured column is hidden); it is one primed term lookup per row.
+ */
+export const CORE_REQUEST_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'featured', 'wc_products_list' ] as const;
+
+/** Always requested on variations (no `featured` there). */
+export const CORE_VARIATION_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list' ] as const;
 
 /** Statuses the "All" tab shows (never trash). */
 export const ALL_STATUSES = [ 'publish', 'draft', 'pending', 'private', 'future' ] as const;
@@ -286,7 +294,7 @@ export function buildProductListQuery( view: View, tab: string, fields: ProductF
 /** `_fields` for variation rows: the core set plus the visible fields that exist on variations. */
 export function variationFieldsParam( view: View, fields: ProductField[] ): string {
 	const ids = new Set< string >( [ ...( view.fields ?? [] ), ...( view.titleField ? [ view.titleField ] : [] ), ...( view.mediaField ? [ view.mediaField ] : [] ) ] );
-	const out = new Set< string >( [ ...CORE_REQUEST_FIELDS, 'name', 'attributes', 'image' ] );
+	const out = new Set< string >( [ ...CORE_VARIATION_FIELDS, 'name', 'attributes', 'image' ] );
 
 	for ( const field of fields ) {
 		if ( ids.has( field.id ) && field.rest.applies.variation ) {
@@ -302,7 +310,7 @@ export function buildVariationsQuery( parentId: number, page: number, fields: Pr
 		page: Math.max( 1, page ),
 		per_page: settings.limits.perPageMax,
 		image_size: 'thumbnail',
-		_fields: view ? variationFieldsParam( view, fields ) : Array.from( new Set( [ ...CORE_REQUEST_FIELDS, 'name', 'attributes', 'image', ...fields.filter( ( f ) => f.rest.applies.variation ).flatMap( ( f ) => f.rest.fields.map( ( x ) => ( x === 'images' ? 'image' : x ) ) ) ] ) ).sort().join( ',' ),
+		_fields: view ? variationFieldsParam( view, fields ) : Array.from( new Set( [ ...CORE_VARIATION_FIELDS, 'name', 'attributes', 'image', ...fields.filter( ( f ) => f.rest.applies.variation ).flatMap( ( f ) => f.rest.fields.map( ( x ) => ( x === 'images' ? 'image' : x ) ) ) ] ) ).sort().join( ',' ),
 	};
 
 	return clean( applyFilters( FILTERS.variationsQuery, params, { parentId, page } ) as QueryParams );

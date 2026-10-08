@@ -5,8 +5,10 @@
  * JavaScript: every language column, filter and action comes through here.
  */
 import { createElement, memo, useState } from '@wordpress/element';
+import { doAction } from '@wordpress/hooks';
 import { __, sprintf } from '@wordpress/i18n';
 import { DataForm } from '../dataviews';
+import { ACTIONS } from './hooks';
 import type {
 	DataViewRenderFieldProps,
 	EditConfig,
@@ -60,8 +62,6 @@ export type ToParams = ( value: unknown, operator: Operator ) => QueryParams;
 /** What `fieldFromDeclarative` / `filterFromDeclarative` return: a ProductField plus the filter mapping. */
 export type DeclarativeProductField = ProductField & {
 	rest: ProductField[ 'rest' ] & { toParams?: ToParams };
-	/** True for a field that exists only to filter (no column, no edit). */
-	filterOnly?: boolean;
 	/** Set on `price` fields: the currency the column and its reference value are in (a language's market currency). */
 	currency?: FieldCurrency;
 };
@@ -285,6 +285,34 @@ function displayValue( value: unknown, def: DeclarativeFieldInput, currency: Fie
 	}
 }
 
+/** A translation's name column is as wide as the name it translates; other text gets room to read, prices their usual width. */
+export const DECLARATIVE_NAME_MIN_WIDTH = 240;
+
+export const DECLARATIVE_TEXT_MIN_WIDTH = 180;
+
+/**
+ * The column's default width: the definition's `width` when given, else by
+ * type. A translated name squeezed to a hundred pixels ("BREJD Skata Chel…")
+ * is unreadable, and the pickers show the column before anyone can resize it.
+ */
+export function defaultColumnStyle( def: DeclarativeField ): ProductField[ 'columnStyle' ] {
+	if ( typeof def.width === 'number' && def.width > 0 ) {
+		return { width: def.width };
+	}
+
+	switch ( def.type ) {
+		case 'price':
+		case 'integer':
+		case 'number':
+			return { width: 120, align: 'end' };
+		case 'text':
+		case 'html':
+			return { minWidth: /(^|[.:_])name$/.test( def.path ) || /(^|[.:_])name$/.test( def.id ) ? DECLARATIVE_NAME_MIN_WIDTH : DECLARATIVE_TEXT_MIN_WIDTH };
+		default:
+			return undefined;
+	}
+}
+
 function toOperators( operators: string[] | undefined ): Operator[] {
 	const list = ( operators ?? [] ).filter( ( operator ): operator is Operator => typeof operator === 'string' && operator !== '' );
 
@@ -407,6 +435,8 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 			: false,
 		reference,
 		source: def.source || 'extension',
+		columnStyle: defaultColumnStyle( def ),
+		columnGroup: def.group ?? undefined,
 	};
 
 	if ( def.type === 'price' ) {
@@ -475,7 +505,8 @@ export function filterFromDeclarative( def: DeclarativeFilter ): DeclarativeProd
 		readOnly: true,
 		enableSorting: false,
 		enableGlobalSearch: false,
-		enableHiding: true,
+		// A filter is not a column: keep it out of the column pickers.
+		enableHiding: false,
 		filterOnly: true,
 		rest: {
 			fields: [],
@@ -610,6 +641,23 @@ function isEligibleFor( scope: DeclarativeAction[ 'scope' ] ) {
  * `run` is the client's `runAction` bound to the action id (and whatever
  * the actions module does with the response: patch rows, notices).
  */
+/**
+ * `wcProductsList.actionPerformed` once the server answered: the rows it
+ * processed leave the selection (list/selection.ts), so a filter the action
+ * just took them out of ("Missing in Svenska") cannot keep offering a bulk
+ * edit on rows that are no longer on any page.
+ */
+export function announceActionPerformed( action: string, response: ActionResponse | undefined ): void {
+	const results = Array.isArray( response?.results ) ? response.results : [];
+
+	doAction( ACTIONS.actionPerformed, {
+		action,
+		ids: results.filter( ( result ) => result.ok ).map( ( result ) => result.id ),
+		batchId: response?.batch_id ?? '',
+		items: Array.isArray( response?.items ) ? response.items : [],
+	} );
+}
+
 export function actionFromDeclarative( def: DeclarativeAction, run: ActionRunner ): ProductAction {
 	const base = {
 		id: def.id,
@@ -627,7 +675,12 @@ export function actionFromDeclarative( def: DeclarativeAction, run: ActionRunner
 		return {
 			...base,
 			callback: ( items, { onActionPerformed } ) => {
-				void run( actionableIds( items ), {} ).then( () => onActionPerformed?.( items ) );
+				void run( actionableIds( items ), {} )
+					.then( ( response ) => {
+						announceActionPerformed( def.id, response );
+						onActionPerformed?.( items );
+					} )
+					.catch( () => {} );
 			},
 		};
 	}
@@ -648,7 +701,8 @@ export function actionFromDeclarative( def: DeclarativeAction, run: ActionRunner
 			setError( null );
 
 			run( ids, data )
-				.then( () => {
+				.then( ( response ) => {
+					announceActionPerformed( def.id, response );
 					closeModal?.();
 					onActionPerformed?.( items );
 				} )

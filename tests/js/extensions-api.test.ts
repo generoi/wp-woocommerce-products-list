@@ -71,7 +71,7 @@ const item = { id: 1, _kind: 'product', _level: 0, _parentId: null, _hasChildren
 describe( 'hook names', () => {
 	it( 'are stable strings under the wcProductsList namespace', () => {
 		expect( Object.values( FILTERS ).every( ( name ) => name.startsWith( 'wcProductsList.' ) ) ).toBe( true );
-		expect( Object.values( ACTIONS ) ).toEqual( [ 'wcProductsList.ready', 'wcProductsList.loaded', 'wcProductsList.saved', 'wcProductsList.deleted' ] );
+		expect( Object.values( ACTIONS ) ).toEqual( [ 'wcProductsList.ready', 'wcProductsList.loaded', 'wcProductsList.saved', 'wcProductsList.deleted', 'wcProductsList.actionPerformed' ] );
 		expect( FILTERS.quickEditTabs ).toBe( 'wcProductsList.quickEdit.tabs' );
 		expect( FILTERS.quickEditLayout ).toBe( 'wcProductsList.quickEdit.layout' );
 		expect( hookNamespace( 'gds-woo-i18n' ) ).toBe( 'gds-woo-i18n/wc-products-list' );

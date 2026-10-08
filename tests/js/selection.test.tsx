@@ -177,3 +177,23 @@ describe( 'useSelection', () => {
 		expect( MAX_SELECT_ALL ).toBeGreaterThan( 1000 );
 	} );
 } );
+
+describe( 'useSelection after a server action', () => {
+	beforeEach( () => setSettings( sampleSettings() ) );
+	afterEach( () => setSettings( undefined ) );
+
+	it( 'drops the rows a declarative action processed, so a filter the action emptied cannot keep a stale bulk edit', () => {
+		const { result, rerender } = renderHook( ( { rows } ) => useSelection( rows, 'all' ), { initialProps: { rows: page1 } } );
+
+		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
+		act( () => {
+			// Copy translations wrote 1 and 2; 3 failed and stays for a retry.
+			doAction( ACTIONS.actionPerformed, { action: 'i18n_copy', ids: [ 1, 2 ], batchId: 'b', items: [] } );
+		} );
+		expect( result.current.selection ).toEqual( [ '3' ] );
+
+		// The list refetched without them: nothing is "on other pages".
+		rerender( { rows: [ product( 3 ) ] } );
+		expect( result.current.offPageCount ).toBe( 0 );
+	} );
+} );

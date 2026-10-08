@@ -159,10 +159,15 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 			] );
 		} );
 		addAction( ACTIONS.deleted, namespace, ( ids: number[] ) => drop( Array.isArray( ids ) ? ids : [] ) );
+		// A server action (Copy translations, an extension's) is done with the
+		// rows it processed: they may have just left the filtered list, and a
+		// selection of rows on no page would still offer "Bulk edit".
+		addAction( ACTIONS.actionPerformed, namespace, ( result: { ids?: number[] } ) => drop( Array.isArray( result?.ids ) ? result.ids : [] ) );
 
 		return () => {
 			removeAction( ACTIONS.saved, namespace );
 			removeAction( ACTIONS.deleted, namespace );
+			removeAction( ACTIONS.actionPerformed, namespace );
 		};
 	}, [] );
 

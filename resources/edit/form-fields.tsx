@@ -27,6 +27,7 @@ import { isVariation, readFieldValue } from './field-value';
 import { mergeReference, MIXED_VALUE, hasOptionList } from './merge';
 import type { MixedState } from './merge';
 import { createMixedBooleanControl } from './mixed-boolean-control';
+import { createMixedTextControl } from './mixed-text-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { leafOf } from './visibility';
 
@@ -99,6 +100,11 @@ function stringElements( elements: Option[] | undefined ): Option[] | undefined 
 }
 
 const INTEGER_PATTERN = /^-?\d+$/;
+
+/** A free-text field rendered by DataForm's text control: no options, no custom control, no numeric op. */
+export function isPlainTextField( field: ProductField ): boolean {
+	return ( field.type === 'text' || field.type === undefined ) && ! field.Edit && ! hasOptionList( field ) && numericKindOf( field ) === null;
+}
 
 function integerMessage( value: unknown ): string | null {
 	if ( value === undefined || value === null || value === '' ) {
@@ -201,6 +207,11 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			formField.Edit = createBulkNumericControl( { kind, settings, placeholder: shared, reference, salePrice: isSalePriceField( field ) } ) as ComponentType< DataFormControlProps< FormData > >;
 		} else if ( bulk && field.type === 'boolean' && isMixed && ! field.Edit ) {
 			formField.Edit = createMixedBooleanControl( reference );
+		} else if ( bulk && isMixed && isPlainTextField( field ) ) {
+			// Rows disagree: "Mixed" until something is typed; erasing it is no change again, and
+			// emptying every row is the explicit "Clear on all rows" choice.
+			formField.type = undefined;
+			formField.Edit = createMixedTextControl();
 		} else if ( bulk && isMixed && hasOptionList( field ) ) {
 			// Rows disagree: the select shows "Mixed" until the user picks a value for all of them.
 			const mixedOption: Option = { value: MIXED_VALUE, label: __( '— Mixed (no change) —', 'wp-woocommerce-products-list' ) };

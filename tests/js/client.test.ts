@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import apiFetch from '@wordpress/api-fetch';
-import { batchProducts, batchVariations } from '../../resources/api/client';
+import { batchProducts, batchVariations, listProducts } from '../../resources/api/client';
 import { setSettings } from '../../resources/settings';
 import { editSettings } from './edit-fixtures';
 
@@ -71,5 +71,66 @@ describe( 'batch writes', () => {
 		const result = await batchProducts( [ { id: 404 } ] );
 
 		expect( result.update?.[ 0 ] ).toMatchObject( { id: 404, error: { code: 'woocommerce_rest_product_invalid_id', message: 'Invalid ID.' } } );
+	} );
+} );
+
+describe( 'list reads', () => {
+	beforeEach( () => {
+		fetchMock.mockReset();
+		setSettings( editSettings() );
+	} );
+
+	afterEach( () => {
+		setSettings( undefined );
+		vi.unstubAllGlobals();
+		delete ( fetchMock as unknown as { nonceEndpoint?: string } ).nonceEndpoint;
+		delete ( fetchMock as unknown as { nonceMiddleware?: unknown } ).nonceMiddleware;
+	} );
+
+	function page( rows: unknown[], total = rows.length ): Response {
+		return new Response( JSON.stringify( rows ), { status: 200, headers: { 'X-WP-Total': String( total ), 'X-WP-TotalPages': '1' } } );
+	}
+
+	it( 'refreshes a stale nonce once and retries the unparsed list request', async () => {
+		const api = fetchMock as unknown as { nonceEndpoint?: string; nonceMiddleware?: { nonce: string } };
+		api.nonceEndpoint = '/wp-admin/admin-ajax.php?action=rest-nonce';
+		api.nonceMiddleware = { nonce: 'stale' };
+		vi.stubGlobal( 'fetch', vi.fn().mockResolvedValue( new Response( 'fresh', { status: 200 } ) ) );
+
+		// apiFetch rejects an unparsed (`parse: false`) failure with the raw Response, which core's own nonce retry does not recognise.
+		fetchMock.mockRejectedValueOnce( new Response( JSON.stringify( { code: 'rest_cookie_invalid_nonce', message: 'Cookie check failed', data: { status: 403 } } ), { status: 403 } ) );
+		fetchMock.mockResolvedValueOnce( page( [ { id: 1, type: 'simple', name: 'A' } ], 1 ) );
+
+		const result = await listProducts( { page: 1 } );
+
+		expect( result.items.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
+		expect( result.total ).toBe( 1 );
+		expect( api.nonceMiddleware.nonce ).toBe( 'fresh' );
+		expect( globalThis.fetch ).toHaveBeenCalledWith( api.nonceEndpoint );
+		expect( fetchMock ).toHaveBeenCalledTimes( 2 );
+	} );
+
+	it( 'gives up after one refresh and surfaces the error, and never refreshes for another 403', async () => {
+		const api = fetchMock as unknown as { nonceEndpoint?: string; nonceMiddleware?: { nonce: string } };
+		api.nonceEndpoint = '/nonce';
+		api.nonceMiddleware = { nonce: 'stale' };
+		const refresh = vi.fn().mockResolvedValue( new Response( 'fresh', { status: 200 } ) );
+		vi.stubGlobal( 'fetch', refresh );
+
+		const stale = () => new Response( JSON.stringify( { code: 'rest_cookie_invalid_nonce', message: 'Cookie check failed', data: { status: 403 } } ), { status: 403 } );
+		fetchMock.mockRejectedValueOnce( stale() ).mockRejectedValueOnce( stale() );
+		await expect( listProducts( { page: 1 } ) ).rejects.toMatchObject( { code: 'rest_cookie_invalid_nonce', status: 403 } );
+		expect( refresh ).toHaveBeenCalledTimes( 1 );
+		expect( fetchMock ).toHaveBeenCalledTimes( 2 );
+
+		fetchMock.mockRejectedValueOnce( new Response( JSON.stringify( { code: 'rest_forbidden', message: 'Sorry', data: { status: 403 } } ), { status: 403 } ) );
+		await expect( listProducts( { page: 1 } ) ).rejects.toMatchObject( { code: 'rest_forbidden', message: 'Sorry' } );
+		expect( refresh ).toHaveBeenCalledTimes( 1 );
+	} );
+
+	it( 'treats a failed Response an older apiFetch resolves with like a thrown one', async () => {
+		fetchMock.mockResolvedValueOnce( new Response( JSON.stringify( { code: 'rest_forbidden', message: 'Sorry', data: { status: 403 } } ), { status: 403 } ) );
+
+		await expect( listProducts( { page: 1 } ) ).rejects.toMatchObject( { code: 'rest_forbidden', status: 403 } );
 	} );
 } );

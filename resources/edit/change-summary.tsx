@@ -56,6 +56,39 @@ function describeOp( op: NumericOp, kind: 'money' | 'integer', settings: Setting
 	}
 }
 
+const ZONED_DATE = /(?:Z|[+-]\d{2}:?\d{2})$/;
+const LOCAL_DATE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)/;
+
+/**
+ * A sale date as it will be stored: the control emits site wall-clock time
+ * (`2026-11-01T00:00:00`, no zone), and that is what wc/v3 writes. Formatting
+ * it as a browser-local instant would show "October 31, 10:00 pm" to a
+ * manager in Helsinki for a site on UTC; the zone-less string is formatted
+ * as the clock reading it is, and labelled as site time.
+ */
+export function describeSiteDateTime( value: string, settings: Pick< Settings, 'dateFormat' | 'timeFormat' | 'timezone' > ): string {
+	const format = `${ settings.dateFormat } ${ settings.timeFormat }`;
+	/* translators: %s: a formatted date and time, shown in the site's timezone */
+	const label = ( text: string ) => sprintf( __( '%s (site time)', 'wp-woocommerce-products-list' ), text );
+
+	try {
+		if ( ZONED_DATE.test( value ) ) {
+			return label( dateI18n( format, value ) );
+		}
+
+		const match = LOCAL_DATE.exec( value );
+
+		if ( match ) {
+			// The wall-clock reading, formatted as UTC so no zone shifts it.
+			return label( dateI18n( format, `${ match[ 1 ] }T${ match[ 2 ] }Z`, 'UTC' ) );
+		}
+
+		return label( dateI18n( format, value ) );
+	} catch {
+		return value;
+	}
+}
+
 function optionLabel( field: ProductField, value: unknown ): string {
 	const elements = Array.isArray( field.elements ) ? ( field.elements as Option[] ) : [];
 
@@ -81,12 +114,8 @@ function describeValue( field: ProductField, value: unknown, settings: Settings 
 		return labels.length > 5 ? `${ labels.slice( 0, 5 ).join( ', ' ) } …` : labels.join( ', ' );
 	}
 
-	if ( field.type === 'datetime' && typeof value === 'string' ) {
-		try {
-			return dateI18n( `${ settings.dateFormat } ${ settings.timeFormat }`, value );
-		} catch {
-			return value;
-		}
+	if ( ( field.type === 'datetime' || field.type === 'date' ) && typeof value === 'string' ) {
+		return describeSiteDateTime( value, settings );
 	}
 
 	if ( numericKindOf( field ) === 'money' ) {

@@ -2,15 +2,24 @@
  * Status changes through wc/v3 batch updates (logged by Rest\Saves), shown
  * before the request returns: publish / move to draft for products,
  * enable / disable for variations.
+ *
+ * Variations of any number of parents go through the cross-parent
+ * `variations/batch` route in chunks of 100 (one or two requests for a
+ * page of them, not one per parent); products through `products/batch`.
+ * The rows a write returns are trimmed to what the list shows (`fields`),
+ * as the edit modal's saves are: a status change on 100 products is tens
+ * of kilobytes back, not the megabytes of full objects.
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { drafts, published } from '@wordpress/icons';
-import { batchProducts, batchVariations, newBatchId, toRow } from '../api/client';
+import { batchProducts, batchVariationsAcross, newBatchId, toRow } from '../api/client';
+import type { BatchOptions, WriteSource } from '../api/client';
 import { invalidateProducts, patchItems } from '../store/products';
 import { isVariation, parentIdOf } from '../edit/field-value';
+import { saveFields } from '../edit/save';
 import { withoutUntouchedImages } from '../edit/save-runner';
 import { isBatchItemError } from '../types';
-import type { BatchResponse, ProductAction, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
+import type { BatchResponse, ProductAction, ProductField, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
 import { canEdit, dropFromSelection, errorMessage, isRealRow, realRows } from './context';
 import { notify } from './notices';
@@ -23,18 +32,34 @@ interface OptimisticOptions {
 	/** Refetch the page after (membership of the status tab changed). */
 	refetch: boolean;
 	success: ( count: number ) => string;
+	/** The wc/v3 fields the returned rows are trimmed to; the field registry's row fields when given as fields. */
+	fields?: string[] | ProductField[];
+	/** Rows the action does not apply to are left out (a product already featured is not "marked as featured" again). */
+	eligible?: ( item: ProductListItem ) => boolean;
+}
+
+function fieldList( fields: OptimisticOptions[ 'fields' ], patch: Record< string, unknown > ): string[] | undefined {
+	if ( ! fields || fields.length === 0 ) {
+		return undefined;
+	}
+
+	if ( typeof fields[ 0 ] === 'string' ) {
+		return fields as string[];
+	}
+
+	return saveFields( fields as ProductField[], patch );
 }
 
 /** Patch now, send the batch, roll back the rows that failed. Resolves with the ids that were updated. */
 export async function optimisticBatch( items: ProductListItem[], options: OptimisticOptions ): Promise< number[] > {
-	const rows = realRows( items );
+	const rows = realRows( items ).filter( ( item ) => ! options.eligible || options.eligible( item ) );
 
 	if ( ! rows.length ) {
 		return [];
 	}
 
 	// One row is a quick change, several are a bulk one: the log's source column says which.
-	const source = rows.length > 1 ? 'bulk' : 'quick';
+	const source: WriteSource = rows.length > 1 ? 'bulk' : 'quick';
 	const okIds: number[] = [];
 
 	const snapshots = new Map< number, Patch >();
@@ -55,6 +80,9 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	patchItems( patches );
 
 	const batchId = newBatchId();
+	const { id: _id, ...sample } = patches[ 0 ] ?? { id: 0 };
+	const fields = fieldList( options.fields, sample );
+	const requestOptions: BatchOptions = { batchId, source, ...( fields ? { fields } : {} ) };
 	const byRowId = new Map( rows.map( ( item ) => [ item.id, item ] ) );
 	const products = patches.filter( ( patch ) => {
 		const item = byRowId.get( patch.id );
@@ -62,20 +90,13 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		return ! item || ! isVariation( item );
 	} );
 	const variations = patches.filter( ( patch ) => ! products.includes( patch ) );
-	const byParent = new Map< number, Patch[] >();
-
-	for ( const patch of variations ) {
-		const item = byRowId.get( patch.id );
-		const parentId = item ? parentIdOf( item ) : 0;
-
-		byParent.set( parentId, [ ...( byParent.get( parentId ) ?? [] ), patch ] );
-	}
 
 	const failed: Array< { id: number; message: string } > = [];
 	let ok = 0;
 
-	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: Patch[], parentId?: number ) => {
+	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: Patch[] ) => {
 		const seen = new Set< number >();
+		const returned: Patch[] = [];
 
 		for ( const row of response.update ?? [] ) {
 			seen.add( row.id );
@@ -85,8 +106,12 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 			} else {
 				ok += 1;
 				okIds.push( row.id );
+
+				const item = byRowId.get( row.id );
+				const parentId = item && isVariation( item ) ? parentIdOf( item ) : undefined;
+
 				// The same normalisation as a list read (hierarchy keys, the `wcProductsList.item` filter), thumbnails kept.
-				patchItems( [ withoutUntouchedImages( toRow( row, parentId ) as unknown as Record< string, unknown >, sent.find( ( patch ) => patch.id === row.id ) ?? {} ) as unknown as Patch ] );
+				returned.push( withoutUntouchedImages( toRow( row, parentId ) as unknown as Record< string, unknown >, sent.find( ( patch ) => patch.id === row.id ) ?? {} ) as unknown as Patch );
 			}
 		}
 
@@ -94,6 +119,11 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 			if ( ! seen.has( patch.id ) ) {
 				failed.push( { id: patch.id, message: __( 'No result returned for this item.', 'wp-woocommerce-products-list' ) } );
 			}
+		}
+
+		// One patch per response, not one per row.
+		if ( returned.length ) {
+			patchItems( returned );
 		}
 	};
 
@@ -103,17 +133,27 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		sent.forEach( ( patch ) => failed.push( { id: patch.id, message } ) );
 	};
 
-	for ( const [ parentId, sent ] of byParent ) {
+	if ( variations.length ) {
 		try {
-			absorb( await batchVariations( parentId, sent, { batchId, source } ), sent, parentId );
+			absorb(
+				await batchVariationsAcross(
+					variations.map( ( patch ) => {
+						const item = byRowId.get( patch.id );
+
+						return { ...patch, parent_id: item ? parentIdOf( item ) : 0 };
+					} ),
+					requestOptions
+				),
+				variations
+			);
 		} catch ( error ) {
-			fail( sent, error );
+			fail( variations, error );
 		}
 	}
 
 	if ( products.length ) {
 		try {
-			absorb( await batchProducts( products, { batchId, source } ), products );
+			absorb( await batchProducts( products, requestOptions ), products );
 		} catch ( error ) {
 			fail( products, error );
 		}
@@ -142,19 +182,23 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	return okIds;
 }
 
-function statusAction( context: ProductActionsContext, id: string, label: string, status: ProductStatus, eligible: ( item: ProductListItem ) => boolean, icon: unknown, success: ( count: number ) => string ): ProductAction {
+function statusAction( context: ProductActionsContext, id: string, label: string, status: ProductStatus, eligible: ( item: ProductListItem ) => boolean, icon: unknown, success: ( count: number ) => string, refetch = true ): ProductAction {
+	const isEligible = ( item: ProductListItem ) => isRealRow( item ) && canEdit( item ) && eligible( item );
+
 	return {
 		id,
 		label,
 		icon,
 		supportsBulk: true,
-		isEligible: ( item ) => isRealRow( item ) && canEdit( item ) && eligible( item ),
+		isEligible,
 		callback: ( items, { onActionPerformed } ) => {
 			void optimisticBatch( items, {
 				patch: ( item ) => ( { id: item.id, status } ),
 				// On a status tab the rows leave the page; on "all" only the counts move.
-				refetch: true,
+				refetch,
 				success,
+				fields: context.fields,
+				eligible: isEligible,
 			} ).then( ( okIds ) => {
 				dropFromSelection( context, okIds );
 				onActionPerformed?.( items );
@@ -218,20 +262,10 @@ export const createEnableVariationAction: ActionFactory = ( context ) => {
 			( item ) => item.status === 'private',
 			published,
 			/* translators: %d: number of variations */
-			( count ) => sprintf( _n( '%d variation enabled.', '%d variations enabled.', count, 'wp-woocommerce-products-list' ), count )
+			( count ) => sprintf( _n( '%d variation enabled.', '%d variations enabled.', count, 'wp-woocommerce-products-list' ), count ),
+			false
 		),
 		scope: 'variation',
-		callback: ( items, { onActionPerformed } ) => {
-			void optimisticBatch( items, {
-				patch: ( item ) => ( { id: item.id, status: 'publish' } ),
-				refetch: false,
-				/* translators: %d: number of variations */
-				success: ( count ) => sprintf( _n( '%d variation enabled.', '%d variations enabled.', count, 'wp-woocommerce-products-list' ), count ),
-			} ).then( ( okIds ) => {
-				dropFromSelection( context, okIds );
-				onActionPerformed?.( items );
-			} );
-		},
 	};
 };
 
@@ -248,19 +282,10 @@ export const createDisableVariationAction: ActionFactory = ( context ) => {
 			'private',
 			( item ) => item.status !== 'private',
 			drafts,
-			() => ''
+			/* translators: %d: number of variations */
+			( count ) => sprintf( _n( '%d variation disabled.', '%d variations disabled.', count, 'wp-woocommerce-products-list' ), count ),
+			false
 		),
 		scope: 'variation',
-		callback: ( items, { onActionPerformed } ) => {
-			void optimisticBatch( items, {
-				patch: ( item ) => ( { id: item.id, status: 'private' } ),
-				refetch: false,
-				/* translators: %d: number of variations */
-				success: ( count ) => sprintf( _n( '%d variation disabled.', '%d variations disabled.', count, 'wp-woocommerce-products-list' ), count ),
-			} ).then( ( okIds ) => {
-				dropFromSelection( context, okIds );
-				onActionPerformed?.( items );
-			} );
-		},
 	};
 };

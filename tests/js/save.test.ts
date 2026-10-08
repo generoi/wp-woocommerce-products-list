@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareSave, runSave } from '../../resources/edit/save-runner';
+import { prepareSave, runConcurrently, runSave } from '../../resources/edit/save-runner';
 import type { SaveDeps } from '../../resources/edit/save-runner';
 import type { BatchResponse, ProductListItem, RawProduct, RawVariation } from '../../resources/types';
 import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
@@ -241,5 +241,45 @@ describe( 'runSave', () => {
 		expect( row.status ).toBe( 'draft' );
 		expect( row.echoed ).toBe( true );
 		expect( row._kind ).toBe( 'product' );
+	} );
+} );
+
+describe( 'runSave concurrency', () => {
+	it( 'sends the cross-parent variation chunks a few at a time, every row patched optimistically up front, parents after all of them', async () => {
+		const d = deps( { variationsBatchSize: 1, concurrency: 2 } );
+		let inFlight = 0;
+		let peak = 0;
+		const across = vi.fn( async ( update: Array< Update & { parent_id: number } > ) => {
+			inFlight += 1;
+			peak = Math.max( peak, inFlight );
+			await new Promise( ( resolve ) => setTimeout( resolve, 5 ) );
+			inFlight -= 1;
+			d.calls.push( `across:${ update.map( ( row ) => row.id ).join( ',' ) }` );
+
+			return { update: update.map( ( { parent_id: _parent, ...row } ) => row ) } as BatchResponse< RawVariation >;
+		} );
+		d.batchVariationsAcross = across;
+		const items = [ variation( 41, 4 ), variation( 42, 4 ), variation( 51, 5 ), variation( 61, 6 ), simple( 1 ) ];
+		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( peak ).toBe( 2 );
+		expect( across ).toHaveBeenCalledTimes( 4 );
+		expect( d.calls[ d.calls.length - 1 ] ).toBe( 'products:1' );
+		expect( result.updated.map( ( row ) => row.id ).sort() ).toEqual( [ 1, 41, 42, 51, 61 ] );
+		expect( result.errors ).toEqual( [] );
+		// The first patch carries all four variations at once.
+		expect( ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 0 ] ).toHaveLength( 4 );
+	} );
+
+	it( 'runConcurrently keeps order of start and bounds what is in flight', async () => {
+		const order: number[] = [];
+		await runConcurrently(
+			[ 1, 2, 3 ].map( ( n ) => async () => {
+				order.push( n );
+				await Promise.resolve();
+			} ),
+			1
+		);
+		expect( order ).toEqual( [ 1, 2, 3 ] );
 	} );
 } );

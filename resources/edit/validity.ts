@@ -31,6 +31,75 @@ function ruleMessage( key: string, rule: Rule ): string {
 	}
 }
 
+/** The subset of a DataForm field a synchronous check reads. */
+export interface ValidatedField {
+	id: string;
+	label?: string;
+	isValid?: {
+		required?: boolean;
+		elements?: boolean;
+		custom?: ( item: Record< string, unknown >, field: unknown ) => unknown;
+	};
+	elements?: Array< { value: unknown } >;
+	getElements?: unknown;
+	isVisible?: ( item: Record< string, unknown > ) => boolean;
+	getValue?: ( args: { item: Record< string, unknown > } ) => unknown;
+}
+
+function isEmpty( value: unknown ): boolean {
+	return value === undefined || value === null || value === '' || ( Array.isArray( value ) && value.length === 0 );
+}
+
+/**
+ * The form's rules applied to the record *now*: DataForm validates in an
+ * effect after each change and only the fields that changed, so at the
+ * moment Save is pressed its tree can still name a field that was just
+ * fixed and miss one that was just broken. This runs the same `required`,
+ * `elements` and (synchronous) `custom` rules against the current values.
+ */
+export function validateFormData( data: Record< string, unknown >, fields: ValidatedField[] ): InvalidField[] {
+	const result: InvalidField[] = [];
+
+	for ( const field of fields ) {
+		if ( ! field.isValid ) {
+			continue;
+		}
+
+		if ( typeof field.isVisible === 'function' && ! field.isVisible( data ) ) {
+			continue;
+		}
+
+		const value = field.getValue ? field.getValue( { item: data } ) : data[ field.id ];
+
+		if ( field.isValid.required && isEmpty( value ) ) {
+			result.push( { field: field.id, message: ruleMessage( 'required', undefined ) } );
+			continue;
+		}
+
+		if ( field.isValid.elements && Array.isArray( field.elements ) && ! isEmpty( value ) && ! field.elements.some( ( element ) => element.value === value ) ) {
+			result.push( { field: field.id, message: ruleMessage( 'elements', undefined ) } );
+			continue;
+		}
+
+		if ( typeof field.isValid.custom === 'function' ) {
+			let message: unknown;
+
+			try {
+				message = field.isValid.custom( data, field );
+			} catch {
+				message = null;
+			}
+
+			// A promise is an async rule DataForm resolves on its own; only a settled message counts here.
+			if ( typeof message === 'string' && message !== '' ) {
+				result.push( { field: field.id, message } );
+			}
+		}
+	}
+
+	return result;
+}
+
 /** Every invalid field in the tree, outermost first; `validating` entries are skipped. */
 export function collectInvalidFields( validity: ValidityTree ): InvalidField[] {
 	const result: InvalidField[] = [];

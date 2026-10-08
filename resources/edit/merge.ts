@@ -32,6 +32,14 @@ export const MIXED_LABEL = __( 'Mixed', 'wp-woocommerce-products-list' );
  */
 export const MIXED_VALUE = '__wc_pl_mixed__';
 
+/**
+ * The form value of a mixed text field the user chose to clear on every
+ * row ("Clear on all rows"). Typing into a mixed field and erasing it
+ * again is no edit (the field shows "Mixed" once more); emptying every row
+ * is this explicit choice, which the save writes as an empty string.
+ */
+export const CLEAR_VALUE = '__wc_pl_clear__';
+
 /** A select/radio field: single value chosen from elements. */
 export function hasOptionList( field: ProductField ): boolean {
 	return ( Array.isArray( field.elements ) || typeof field.getElements === 'function' ) && field.type !== 'array' && field.type !== 'boolean';

@@ -6,15 +6,27 @@
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { LogRow, RevertPlan } from '../api/client';
 
+/** Actions whose rows a revert never writes back; mirrors Revert::NOT_REVERTABLE in src/Log/Revert.php. */
+export const NOT_REVERTABLE_ACTIONS: ReadonlySet< string > = new Set( [ 'trash', 'restore', 'delete', 'duplicate', 'create' ] );
+
+/**
+ * A row a revert puts back: an ok row with a field, of an update or of an
+ * extension action that logged its changes (a translation copy), but never
+ * of trash/restore/delete/duplicate/create.
+ */
+export function isRevertableRow( row: Pick< LogRow, 'action' | 'status' | 'field' > ): boolean {
+	return row.status === 'ok' && row.field !== '' && ! NOT_REVERTABLE_ACTIONS.has( row.action );
+}
+
 export interface BatchScope {
-	/** Update rows in the batch (what the revert puts back). */
+	/** Revertable rows in the batch (what the revert puts back). */
 	changes: number;
 	/** Distinct items among them (first page). */
 	objects: number;
 	fields: string[];
 	/** True when the first page did not hold every row. */
 	partial: boolean;
-	/** Entries the revert leaves alone (trash, delete, duplicate rows). */
+	/** Entries the revert leaves alone (trash, restore, delete, duplicate rows, and rows without a field). */
 	skipped?: number;
 }
 
@@ -24,14 +36,14 @@ export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'ski
 }
 
 /**
- * @param rows  The batch's rows loaded so far (update action).
+ * @param rows  The batch's rows loaded so far.
  * @param total The server's row count for that query; when every row is
- *              here only the successful updates count as changes (an
- *              error row put nothing in place, so there is nothing to put
- *              back), otherwise the count is the server's and marked partial.
+ *              here only the revertable rows count as changes (an error
+ *              row put nothing in place, so there is nothing to put back),
+ *              otherwise the count is the server's and marked partial.
  */
 export function summarizeBatch( rows: LogRow[], total: number ): BatchScope {
-	const updates = rows.filter( ( row ) => row.action === 'update' && row.status === 'ok' );
+	const updates = rows.filter( isRevertableRow );
 	const objects = new Set( updates.map( ( row ) => `${ row.object_type }:${ row.object_id }` ) );
 	const fields = Array.from( new Set( updates.map( ( row ) => row.field ).filter( Boolean ) ) );
 	const partial = rows.length < total;
@@ -66,7 +78,7 @@ export function describeBatchScope( scope: BatchScope ): string {
 
 	return `${ text } ${ sprintf(
 		/* translators: %d: number of log entries the revert leaves alone */
-		_n( '%d entry (trash, delete or duplicate) is not reverted.', '%d entries (trash, delete or duplicate) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
+		_n( '%d entry (trash, restore, delete or duplicate) is not reverted.', '%d entries (trash, restore, delete or duplicate) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
 		scope.skipped
 	) }`;
 }

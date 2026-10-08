@@ -107,8 +107,24 @@ export function sanitizePersisted( persisted: Partial< PersistedView > | undefin
 	const perPage = PER_PAGE_SIZES.includes( persisted.perPage ?? 0 ) ? persisted.perPage : base.perPage;
 	const viewFields = Array.isArray( persisted.fields ) ? persisted.fields.filter( ( id ) => ids.has( id ) ) : base.fields;
 	const sort = persisted.sort && ids.has( persisted.sort.field ) ? persisted.sort : base.sort;
+	const layout = type === 'table' ? mergeTableLayout( base.layout, persisted.layout ) : persisted.layout ?? base.layout;
 
-	return { ...base, ...persisted, type, perPage, fields: viewFields, sort } as PersistedView;
+	return { ...base, ...persisted, type, perPage, fields: viewFields, sort, layout } as PersistedView;
+}
+
+type TableLayout = { styles?: Record< string, unknown > } & Record< string, unknown >;
+
+/**
+ * A saved table layout keeps its column widths, and gets the default width
+ * of every column it has none for: a column added since the view was saved
+ * (a new translation column) must not open at DataViews' fallback width.
+ */
+export function mergeTableLayout( defaults: unknown, saved: unknown ): TableLayout | undefined {
+	const base = ( defaults ?? {} ) as TableLayout;
+	const stored = ( saved ?? {} ) as TableLayout;
+	const styles = { ...( base.styles ?? {} ), ...( stored.styles ?? {} ) };
+
+	return { ...base, ...stored, styles };
 }
 
 function same( a: unknown, b: unknown ): boolean {
@@ -127,7 +143,7 @@ export interface ViewState {
 }
 
 export function useView( fields: ProductField[], settings: Settings ): ViewState {
-	const defaultView = useMemo( () => createDefaultView( settings ), [ settings ] );
+	const defaultView = useMemo( () => createDefaultView( settings, fields ), [ settings, fields ] );
 	const stored = useSelect( ( select ) => select( preferencesStore ).get( PREFERENCES_SCOPE, PREFERENCE_VIEW ) as Partial< PersistedView > | undefined, [] );
 	const { set } = useDispatch( preferencesStore );
 	const [ transient, setTransient ] = useState< Transient >( () => readUrlState() );

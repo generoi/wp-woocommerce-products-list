@@ -6,6 +6,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { runAction } from '../api/client';
 import type { RenderModalProps } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
+import { useReturnFocus } from '../edit/focus';
 import { invalidateProducts, removeItems } from '../store/products';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
@@ -16,6 +17,8 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	const rows = realRows( items );
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
+
+	useReturnFocus();
 
 	const confirm = async () => {
 		const ids = idsOf( rows );

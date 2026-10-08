@@ -5,10 +5,21 @@
  * current values, so the selection is reloaded with the full edit field
  * set when the modal opens: one request per hundred products, one per
  * parent for variations, four at a time.
+ *
+ * The reload is per tab: the General tab's fields come with the modal, a
+ * language tab's fields on the first visit to that tab (a page of 100
+ * products with six languages of descriptions is over a megabyte; the
+ * General tab alone is a few hundred kilobytes).
+ *
+ * The fetched values are merged *into* the cached row, object by object:
+ * a request for `i18n.se.meta_title` answers with `i18n: {se: {meta_title}}`
+ * and must not replace the `i18n.se.name` the list shows.
  */
 import { getVariations, listProducts } from '../api/client';
 import { createLimiter } from '../hierarchy/use-hierarchy';
-import type { ProductField, ProductListItem } from '../types';
+import type { ProductField, ProductListItem, QuickEditTab } from '../types';
+import { isPlainObject } from './field-value';
+import { fieldsOfTab, GENERAL_TAB_ID, tabOf } from './form-layouts';
 import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
 
@@ -21,15 +32,46 @@ export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'o
 /** Every status, trash included: a selection may hold rows of any tab. */
 export const ANY_STATUS = 'publish,future,draft,pending,private,trash';
 
+export interface EditFetchOptions {
+	/** Only the fields of this tab (plus the base keys); every tab when missing. */
+	tab?: string;
+}
+
 /**
  * The `_fields` the modal needs for a selection: the base keys plus the
  * fields the form could show for these rows (with "apply to variations"
- * on, so the sellable fields of variable parents are there too).
+ * on, so the sellable fields of variable parents are there too). With a
+ * `tab`, only that tab's fields: the base keys and the price siblings are
+ * part of the General tab's load.
  */
-export function editFetchFields( fields: ProductField[], items: ProductListItem[], mode: 'quick' | 'bulk' ): string[] {
-	const keys = new Set< string >( [ ...EDIT_BASE_FIELDS, ...PRICE_SIBLING_FIELDS ] );
+export function editFetchFields( fields: ProductField[], items: ProductListItem[], mode: 'quick' | 'bulk', options: EditFetchOptions = {} ): string[] {
+	const general = options.tab === undefined || options.tab === GENERAL_TAB_ID;
+	const keys = new Set< string >( general ? [ ...EDIT_BASE_FIELDS, ...PRICE_SIBLING_FIELDS ] : [ ...EDIT_BASE_FIELDS ] );
 
 	for ( const field of visibleEditFields( fields, items, { mode, applyToVariations: true } ) ) {
+		if ( options.tab !== undefined && tabOf( field ) !== options.tab ) {
+			continue;
+		}
+
+		for ( const key of field.rest?.fields ?? [] ) {
+			keys.add( key );
+		}
+	}
+
+	return Array.from( keys ).sort();
+}
+
+/** The `_fields` of one tab (with `id`), for the load on its first visit; empty when the tab has no fields of its own. */
+export function tabFetchFields( fields: ProductField[], items: ProductListItem[], mode: 'quick' | 'bulk', tab: QuickEditTab ): string[] {
+	const own = fieldsOfTab( visibleEditFields( fields, items, { mode, applyToVariations: true } ), tab );
+
+	if ( own.length === 0 ) {
+		return [];
+	}
+
+	const keys = new Set< string >( [ 'id' ] );
+
+	for ( const field of own ) {
 		for ( const key of field.rest?.fields ?? [] ) {
 			keys.add( key );
 		}
@@ -50,6 +92,25 @@ export interface HydratedSelection {
 	items: ProductListItem[];
 	/** Ids the server no longer returned (deleted since the list loaded). */
 	missing: number[];
+	/** Ids whose row was not in the trash when the list loaded but is now (trashed since). */
+	trashed: number[];
+}
+
+/**
+ * The cached row with the fetched values on top. Plain objects (an
+ * extension's `i18n`, `dimensions`) merge key by key, so a partial fetch
+ * keeps what the row already carried; arrays and scalars are replaced.
+ */
+export function mergeHydrated< Row extends Record< string, unknown > >( cached: Row, fetched: Record< string, unknown > ): Row {
+	const result: Record< string, unknown > = { ...cached };
+
+	for ( const [ key, value ] of Object.entries( fetched ) ) {
+		const current = result[ key ];
+
+		result[ key ] = isPlainObject( current ) && isPlainObject( value ) ? mergeHydrated( current, value ) : value;
+	}
+
+	return result as Row;
 }
 
 /**
@@ -84,7 +145,9 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	}
 
 	const jobs: Array< Promise< void > > = [];
-	const _fields = fields.join( ',' );
+	// `status` tells a row trashed since the list loaded apart from one picked on the Trash tab.
+	const wanted = fields.includes( 'status' ) ? fields : [ ...fields, 'status' ];
+	const _fields = wanted.join( ',' );
 
 	for ( let i = 0; i < products.length; i += chunk ) {
 		const ids = products.slice( i, i + chunk );
@@ -104,7 +167,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 
 			jobs.push(
 				limit( async () => {
-					const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields, params: { include: slice.join( ',' ) } } );
+					const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ) } } );
 
 					result.items.forEach( ( row ) => byId.set( row.id, row ) );
 				} )
@@ -115,6 +178,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	await Promise.all( jobs );
 
 	const missing: number[] = [];
+	const trashed: number[] = [];
 	const merged = items.map( ( item ) => {
 		const full = byId.get( item.id );
 
@@ -122,8 +186,12 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 			missing.push( item.id );
 		}
 
-		return full ? ( { ...item, ...full } as ProductListItem ) : item;
+		if ( full && full.status === 'trash' && item.status !== undefined && item.status !== 'trash' ) {
+			trashed.push( item.id );
+		}
+
+		return full ? ( mergeHydrated( item as Record< string, unknown >, full as Record< string, unknown > ) as ProductListItem ) : item;
 	} );
 
-	return { items: merged, missing };
+	return { items: merged, missing, trashed };
 }

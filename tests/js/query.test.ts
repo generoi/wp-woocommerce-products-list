@@ -26,7 +26,7 @@ describe( 'buildProductListQuery', () => {
 	it( 'requests the fixed core keys plus what the visible columns read', () => {
 		const query = buildProductListQuery( view(), 'all', fields, settings );
 
-		expect( query._fields ).toBe( 'date_on_sale_from,date_on_sale_from_gmt,date_on_sale_to,id,images,name,on_sale,parent_id,permalink,price,regular_price,sale_price,sku,status,type,wc_products_list' );
+		expect( query._fields ).toBe( 'date_on_sale_from,date_on_sale_from_gmt,date_on_sale_to,featured,id,images,name,on_sale,parent_id,permalink,price,regular_price,sale_price,sku,status,type,wc_products_list' );
 		expect( query.image_size ).toBe( 'thumbnail' );
 		expect( query.per_page ).toBe( 20 );
 		expect( query.page ).toBe( 1 );
@@ -35,7 +35,7 @@ describe( 'buildProductListQuery', () => {
 	it( 'leaves hidden columns out and never exceeds the per_page cap', () => {
 		const query = buildProductListQuery( view( { fields: [], showMedia: false, perPage: 500, page: 3 } ), 'all', fields, settings );
 
-		expect( query._fields ).toBe( 'id,name,parent_id,permalink,status,type,wc_products_list' );
+		expect( query._fields ).toBe( 'featured,id,name,parent_id,permalink,status,type,wc_products_list' );
 		expect( query.per_page ).toBe( 100 );
 		expect( query.page ).toBe( 3 );
 	} );
@@ -167,5 +167,18 @@ describe( 'buildVariationsQuery', () => {
 		} finally {
 			removeFilter( 'wcProductsList.variationsQuery', 'test' );
 		}
+	} );
+} );
+
+describe( 'core request fields', () => {
+	beforeEach( () => setSettings( settings ) );
+	afterEach( () => setSettings( undefined ) );
+
+	it( 'always asks products for `featured` (the feature actions decide on it) and never variations', () => {
+		const fields = createProductFields( settings );
+
+		expect( buildProductListQuery( view( { fields: [] } ), 'all', fields, settings )._fields ).toContain( 'featured' );
+		expect( String( buildVariationsQuery( 1, 1, fields, settings, view( { fields: [] } ) )._fields ).split( ',' ) ).not.toContain( 'featured' );
+		expect( String( buildVariationsQuery( 1, 1, fields, settings )._fields ).split( ',' ) ).not.toContain( 'featured' );
 	} );
 } );

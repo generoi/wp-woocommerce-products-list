@@ -4,7 +4,7 @@
  * `window.wcProductsList.getItems()`. Module state, not React state: the
  * extension API exists before the screen mounts and outlives it.
  */
-import { isPlaceholderRow } from '../types/product';
+import { isEditorRow, isPlaceholderRow } from '../types/product';
 import type { ProductListItem } from '../types/product';
 
 const EMPTY: ProductListItem[] = [];
@@ -16,9 +16,9 @@ export function setCurrentRows( rows: ProductListItem[] ): void {
 	current = rows;
 }
 
-/** The real rows on screen, in display order. */
+/** The real rows on screen, in display order (no placeholder or editor rows). */
 export function getCurrentRows(): ProductListItem[] {
-	return current.filter( ( row ) => ! isPlaceholderRow( row ) );
+	return current.filter( ( row ) => ! isPlaceholderRow( row ) && ! isEditorRow( row ) );
 }
 
 /** Tests. */

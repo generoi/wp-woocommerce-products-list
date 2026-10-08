@@ -174,6 +174,20 @@ export interface ProductField< Item = ProductListItem > extends Field< Item > {
 	reference?: ( item: Item ) => unknown;
 	/** Extension fields are tagged with their source id; core fields have 'core'. */
 	source?: string;
+	/** True for a field that exists only to filter (no column, no edit): kept out of the column pickers. */
+	filterOnly?: boolean;
+	/** The table column's default styles (`view.layout.styles[ id ]`), applied when the user's view has none for it. */
+	columnStyle?: ColumnStyle;
+	/** The section of the column picker (`i18n:se` for a language); defaults to `edit.group`, then the field's source. */
+	columnGroup?: string;
+}
+
+/** What DataViews' table layout reads per column (`view.layout.styles[ id ]`). */
+export interface ColumnStyle {
+	width?: number | string;
+	minWidth?: number | string;
+	maxWidth?: number | string;
+	align?: 'start' | 'center' | 'end';
 }
 
 export type ProductAction< Item = ProductListItem > = Action< Item > & {

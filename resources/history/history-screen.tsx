@@ -1,8 +1,9 @@
 /**
  * Catalog → History: every change made through the list, newest first,
  * filterable by time, item, source, action, field and batch, with
- * "Revert batch" (update rows only: trash/delete/duplicate are reported
- * as skipped by the server).
+ * "Revert batch" (rows with a field of an update or of an extension action
+ * such as a translation copy; trash/restore/delete/duplicate rows are
+ * reported as skipped by the server).
  */
 import { Button, Spinner } from '@wordpress/components';
 import { dateI18n } from '@wordpress/date';
@@ -14,13 +15,14 @@ import type { RevertPlan } from '../api/client';
 import { notify } from '../actions/notices';
 import { DataViews } from '../dataviews';
 import type { Action, Filter, RenderModalProps, View } from '../dataviews';
+import { useReturnFocus } from '../edit/focus';
 import { SaveProgress } from '../edit/progress';
 import { getSettings } from '../settings';
 import type { Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { createLogFields, logQueryFromView } from './log-fields';
-import { describeBatchScope, scopeFromPlan } from './batch-scope';
+import { describeBatchScope, isRevertableRow, scopeFromPlan } from './batch-scope';
 import { runRevert } from './revert';
 import type { RevertOutcome } from './revert';
 import { invalidateLog, useLog } from './use-log';
@@ -86,6 +88,8 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	// Set when a pass left conflicts behind: the summary and "Revert anyway".
 	const [ outcome, setOutcome ] = useState< RevertOutcome | null >( null );
 	const batchId = row?.batch_id;
+
+	useReturnFocus();
 
 	useEffect( () => {
 		if ( ! batchId ) {
@@ -194,7 +198,7 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	return (
 		<div className="wc-pl-confirm">
 			<p>
-				{ __( 'Put back the previous values of every field this batch changed? Trash, delete and duplicate entries are not reverted. The revert is logged as a new batch.', 'wp-woocommerce-products-list' ) }
+				{ __( 'Put back the previous values of every field this batch changed? Trash, restore, delete and duplicate entries are not reverted. The revert is logged as a new batch.', 'wp-woocommerce-products-list' ) }
 			</p>
 			{ row ? (
 				<p>
@@ -333,7 +337,7 @@ export function HistoryScreen() {
 				id: 'revert-batch',
 				label: __( 'Revert batch', 'wp-woocommerce-products-list' ),
 				supportsBulk: false,
-				isEligible: ( item ) => item.action === 'update' && item.status === 'ok' && settings.caps.edit,
+				isEligible: ( item ) => isRevertableRow( item ) && settings.caps.edit,
 				RenderModal: RevertModal,
 				modalHeader: __( 'Revert batch', 'wp-woocommerce-products-list' ),
 				modalSize: 'medium',

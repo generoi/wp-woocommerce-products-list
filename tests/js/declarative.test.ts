@@ -1,6 +1,8 @@
 import { createElement } from '@wordpress/element';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { addAction, removeAction } from '@wordpress/hooks';
 import { describe, expect, it, vi } from 'vitest';
+import { ACTIONS } from '../../resources/extensions/hooks';
 import {
 	actionFromDeclarative,
 	actionsFromSettings,
@@ -554,5 +556,44 @@ describe( 'fromSettings', () => {
 		( actions[ 0 ] as { callback: ( items: ProductListItem[], context: { registry: unknown } ) => void } ).callback( [ product() ], { registry: null } );
 		await waitFor( () => expect( runAction ).toHaveBeenCalledWith( 'i18n_copy', [ 10 ], {} ) );
 		expect( 'RenderModal' in ( actions[ 1 ] as object ) ).toBe( true );
+	} );
+} );
+
+describe( 'actionPerformed', () => {
+	it( 'announces the rows a server action processed without error, in the callback and the modal paths', async () => {
+		const seen: unknown[] = [];
+		addAction( ACTIONS.actionPerformed, 'test/action-performed', ( result: unknown ) => seen.push( result ) );
+
+		try {
+			const response: ActionResponse = { batch_id: 'b-9', results: [ { id: 10, ok: true }, { id: 11, ok: false, code: 'forbidden' } ], items: [ product( { id: 10 } ) ] };
+			const run = vi.fn().mockResolvedValue( response );
+			const plain = actionFromDeclarative( makeAction(), run );
+
+			( plain as { callback: ( items: ProductListItem[], context: { registry: unknown } ) => void } ).callback( [ product(), variation() ], { registry: null } );
+			await waitFor( () => expect( seen ).toHaveLength( 1 ) );
+			expect( seen[ 0 ] ).toEqual( { action: 'i18n_copy', ids: [ 10 ], batchId: 'b-9', items: response.items } );
+
+			const modal = actionFromDeclarative( makeAction( { confirm: 'Sure?' } ), run );
+			const { RenderModal } = modal as { RenderModal: ( props: { items: ProductListItem[]; closeModal: () => void } ) => JSX.Element };
+			render( createElement( RenderModal, { items: [ product() ], closeModal: vi.fn() } ) );
+			fireEvent.click( screen.getByRole( 'button', { name: 'Copy default language (1)' } ) );
+			await waitFor( () => expect( seen ).toHaveLength( 2 ) );
+			expect( seen[ 1 ] ).toMatchObject( { action: 'i18n_copy', ids: [ 10 ] } );
+
+			// A failed action announces nothing.
+			const failing = actionFromDeclarative( makeAction(), vi.fn().mockRejectedValue( new Error( 'no' ) ) );
+			( failing as { callback: ( items: ProductListItem[], context: { registry: unknown } ) => void } ).callback( [ product() ], { registry: null } );
+			await new Promise( ( resolve ) => setTimeout( resolve, 0 ) );
+			expect( seen ).toHaveLength( 2 );
+		} finally {
+			removeAction( ACTIONS.actionPerformed, 'test/action-performed' );
+		}
+	} );
+
+	it( 'keeps a declarative filter out of the column pickers', () => {
+		const filter = filterFromDeclarative( { id: 'translation', label: 'Translation', type: 'select', param: null, options: [], operators: [ 'is' ], isPrimary: false, multiple: false, variations: false, order: 0, source: 'x' } );
+
+		expect( filter.enableHiding ).toBe( false );
+		expect( filter.filterOnly ).toBe( true );
 	} );
 } );

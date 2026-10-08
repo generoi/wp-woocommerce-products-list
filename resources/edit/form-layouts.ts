@@ -1,6 +1,7 @@
 /**
- * The quick-edit form: a tab strip (General, one tab per extension group
- * such as a language) with card groups per field `edit.group`, derived from
+ * The inline edit form: a tab strip (General, one tab per extension group
+ * such as a language) with labelled groups per field `edit.group`, laid
+ * out in up to three columns like WooCommerce's quick edit, derived from
  * the fields themselves so extension fields land in the right place without
  * code. `wcProductsList.quickEdit.tabs` and `.layout` can reshape both.
  */
@@ -169,30 +170,137 @@ export function buildTabs( fields: ProductField[], items: ProductListItem[], set
 }
 
 export interface LayoutOptions {
-	/** Omit the card header when the tab holds a single group (a language tab). */
+	/** Omit the group header when the tab holds a single group (a language tab). */
 	collapseSingleGroup?: boolean;
 }
 
-/** The DataForm layout for a tab: one card per group, fields inside in order. */
-export function buildForm( fields: ProductField[], tab: QuickEditTab, items: ProductListItem[], settings: Settings, options: LayoutOptions = {} ): Form {
-	const tabFields = fieldsOfTab( fields, tab );
-	const groups = new Map< string, string[] >();
+/**
+ * The General tab's columns, as WooCommerce lays its quick edit out: 1 the
+ * product itself (name, slug, status, visibility, featured, menu order,
+ * content), 2 how it is organised (terms, shipping class, tax), 3 what it
+ * sells for and how it is stocked (SKU, prices, sale schedule, stock,
+ * weight and dimensions). Groups not listed go to column 2.
+ */
+export const COLUMN_OF_GROUP: Record< string, 1 | 2 | 3 > = {
+	general: 1,
+	visibility: 1,
+	content: 1,
+	external: 1,
+	linked: 1,
+	advanced: 1,
+	downloads: 1,
+	organization: 2,
+	tax: 2,
+	pricing: 3,
+	price: 3,
+	inventory: 3,
+	shipping: 3,
+};
 
-	for ( const field of tabFields ) {
-		const group = groupOf( field );
+/** Fields whose column differs from their group's. */
+export const COLUMN_OF_FIELD: Record< string, 1 | 2 | 3 > = {
+	sku: 3,
+	global_unique_id: 3,
+	shipping_class: 2,
+	virtual: 3,
+	downloadable: 3,
+};
+
+/** The group a column-moved field is shown under (its own group's heading would be out of place in the new column). */
+export const LAYOUT_GROUP_OF_FIELD: Record< string, string > = {
+	sku: 'inventory',
+	global_unique_id: 'inventory',
+	virtual: 'inventory',
+	downloadable: 'inventory',
+	shipping_class: 'shipping',
+};
+
+export function columnOf( field: ProductField ): 1 | 2 | 3 {
+	return COLUMN_OF_FIELD[ field.id ] ?? COLUMN_OF_GROUP[ groupOf( field ) ] ?? 2;
+}
+
+/** The group a field is laid out under in the inline form. */
+export function layoutGroupOf( field: ProductField ): string {
+	return LAYOUT_GROUP_OF_FIELD[ field.id ] ?? groupOf( field );
+}
+
+/** A multi-line control (descriptions): on a language tab these take the second column. */
+function isLongText( field: ProductField ): boolean {
+	const edit = field.Edit as { control?: string } | undefined;
+
+	return ( field.type as string ) === 'html' || ( typeof edit === 'object' && edit !== null && edit.control === 'textarea' );
+}
+
+/** The columns of a tab: the General tab by group and field, other tabs short controls left and long ones right. */
+export function columnsOfTab( fields: ProductField[], tab: QuickEditTab ): ProductField[][] {
+	const tabFields = fieldsOfTab( fields, tab );
+
+	if ( tab.id === GENERAL_TAB_ID ) {
+		const columns: ProductField[][] = [ [], [], [] ];
+
+		for ( const field of tabFields ) {
+			columns[ columnOf( field ) - 1 ]!.push( field );
+		}
+
+		return columns.filter( ( column ) => column.length > 0 );
+	}
+
+	const short = tabFields.filter( ( field ) => ! isLongText( field ) );
+	const long = tabFields.filter( isLongText );
+
+	return [ short, long ].filter( ( column ) => column.length > 0 );
+}
+
+/** One labelled group per `edit.group` in `column`, in the tab's order; the header is dropped when the tab has one group. */
+function groupFields( column: ProductField[], settings: Settings, withHeaders: boolean ): FormField[] {
+	const groups = new Map< string, string[] >();
+	const seen = column.map( layoutGroupOf ).filter( ( group, index, all ) => all.indexOf( group ) === index );
+	const ordered = [ ...column ].sort( ( a, b ) => groupRank( layoutGroupOf( a ), seen ) - groupRank( layoutGroupOf( b ), seen ) );
+
+	for ( const field of ordered ) {
+		const group = layoutGroupOf( field );
 		const ids = groups.get( group ) ?? [];
 
 		ids.push( field.id );
 		groups.set( group, ids );
 	}
 
-	const single = groups.size === 1 && options.collapseSingleGroup !== false && tab.id !== GENERAL_TAB_ID;
-	const formFields: FormField[] = Array.from( groups.entries() ).map( ( [ group, children ] ) => ( {
+	return Array.from( groups.entries() ).map( ( [ group, children ] ) => ( {
 		id: `group:${ group }`,
-		label: groupLabel( group, settings ),
-		layout: single ? { type: 'card', withHeader: false } : { type: 'card', withHeader: true, isCollapsible: false },
+		...( withHeaders ? { label: groupLabel( group, settings ) } : {} ),
+		layout: { type: 'regular', labelPosition: 'top' },
 		children,
 	} ) );
+}
+
+/**
+ * The DataForm layout of a tab for the inline editor: the groups of
+ * `columnsOfTab` side by side (DataForm's row layout, each column a
+ * regular group of its labelled groups), or a single column when the tab
+ * has one. `wcProductsList.quickEdit.layout` runs last.
+ */
+export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, items: ProductListItem[], settings: Settings, options: LayoutOptions = {} ): Form {
+	const tabFields = fieldsOfTab( fields, tab );
+	const groupCount = new Set( tabFields.map( groupOf ) ).size;
+	const withHeaders = ! ( groupCount === 1 && options.collapseSingleGroup !== false && tab.id !== GENERAL_TAB_ID );
+	const columns = columnsOfTab( fields, tab );
+
+	let formFields: FormField[];
+
+	if ( columns.length <= 1 ) {
+		formFields = groupFields( columns[ 0 ] ?? [], settings, withHeaders );
+	} else {
+		const styles: Record< string, { flex?: string } > = {};
+		const children: FormField[] = columns.map( ( column, index ) => {
+			const id = `column:${ index + 1 }`;
+
+			styles[ id ] = { flex: '1 1 0' };
+
+			return { id, layout: { type: 'regular', labelPosition: 'top' }, children: groupFields( column, settings, withHeaders ) };
+		} );
+
+		formFields = [ { id: 'columns', layout: { type: 'row', alignment: 'start', styles }, children } ];
+	}
 
 	const form: Form = {
 		layout: { type: 'regular', labelPosition: 'top' },
@@ -203,3 +311,4 @@ export function buildForm( fields: ProductField[], tab: QuickEditTab, items: Pro
 
 	return filtered && typeof filtered === 'object' ? ( filtered as Form ) : form;
 }
+

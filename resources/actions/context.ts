@@ -18,6 +18,8 @@ export interface ProductActionsContext {
 	/** DataViews selection ids; needed by "Select variations". */
 	selection?: string[];
 	onChangeSelection?( ids: string[] ): void;
+	/** Open the inline editor on these rows: one row is a quick edit, several a bulk edit. */
+	openEditor?( items: ProductListItem[] ): void;
 }
 
 export type ActionFactory = ( context: ProductActionsContext ) => ProductAction | null;

@@ -13,9 +13,10 @@
  *
  * Speed rules (the table re-renders every row on every store change):
  * - load progress is published through one coalesced emit per short window,
- *   so an "expand all" whose responses trickle in produces a few renders,
- *   not one per response; user gestures (expand, collapse, patches) emit
- *   at once;
+ *   so a parent whose pages trickle in produces a few renders, not one per
+ *   response; user gestures (expand, collapse, patches) emit at once;
+ * - "expand all" publishes in bounded commits (every BULK_PUBLISH_ROWS loaded
+ *   rows, one per frame), never one render of the whole page at the end;
  * - every load carries an AbortController: collapsing a parent, paging away
  *   from it or unmounting aborts the request and drops it from the limiter
  *   queue, so the page the user looks at is never queued behind the one
@@ -69,14 +70,19 @@ export const MAX_CACHED_PARENTS = 60;
 export const EMIT_WINDOW = 40;
 
 /**
- * While `expandAll` runs nothing is published at all: a 100-parent page
- * becomes one ~1,500-row table, and every render of the growing table
- * costs more than any request (a table re-render is O(rows) even with
- * memoised rows), so the responses are collected and the table is
- * rendered once when the last load finishes. Progress goes through its
- * own tiny store (`useExpandAllProgress`), read by a component outside
- * the table, so the counter never re-renders a row.
+ * While `expandAll` runs, loaded rows are published in commits of about
+ * this many rows, one per animation frame, instead of once at the end: a
+ * single commit of a 1,000-row table blocks the renderer for seconds (16 s
+ * measured with the development React build), while a commit of 150 rows
+ * on top of memoised ones is short enough for the page to stay responsive
+ * and show the counter between commits. Per-parent loading markers are
+ * still not published (the expanded ids already show every parent as
+ * loading). Progress goes through its own tiny store
+ * (`useExpandAllProgress`), read by a component outside the table, so the
+ * counter never re-renders a row.
  */
+export const BULK_PUBLISH_ROWS = 150;
+
 export interface ExpandAllProgress {
 	done: number;
 	total: number;
@@ -179,13 +185,48 @@ let currentParents: ReadonlySet< number > = new Set();
 let emitTimer: ReturnType< typeof setTimeout > | undefined;
 let emitWaiters: Array< () => void > = [];
 
-/** Running `expandAll` calls; while above zero, nothing is published until the last one ends. */
+/** Running `expandAll` calls; while above zero, loads are published in bounded commits (BULK_PUBLISH_ROWS). */
 let bulkLoads = 0;
 /** A change happened while a bulk load held the publishes back. */
 let pendingEmit = false;
+/** Rows loaded by the running bulk loads since their last commit. */
+let bulkUnpublishedRows = 0;
+let bulkCommitScheduled = false;
 
 function inBulkLoad(): boolean {
 	return bulkLoads > 0;
+}
+
+/**
+ * On the next macrotask: the event loop handles the input and paints the
+ * frame queued during the previous commit first. A timer, not
+ * requestAnimationFrame, which never fires in a background tab.
+ */
+function afterFrame( callback: () => void ): void {
+	setTimeout( callback, 0 );
+}
+
+/**
+ * A bulk load finished a parent: once BULK_PUBLISH_ROWS rows wait, publish
+ * them on the next frame. One commit at a time; what arrives while it is
+ * scheduled goes into the same commit.
+ */
+function noteBulkRows( count: number ): void {
+	bulkUnpublishedRows += count;
+
+	if ( bulkUnpublishedRows < BULK_PUBLISH_ROWS || bulkCommitScheduled ) {
+		return;
+	}
+
+	bulkCommitScheduled = true;
+	afterFrame( () => {
+		bulkCommitScheduled = false;
+
+		if ( inBulkLoad() && bulkUnpublishedRows > 0 ) {
+			bulkUnpublishedRows = 0;
+			emit();
+		}
+	} );
 }
 
 function emit(): void {
@@ -608,7 +649,12 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 			}
 
 			evict();
-			await setChildren( parentId, { status: 'loaded', items: pages.flat(), total }, false );
+			const items = pages.flat();
+			await setChildren( parentId, { status: 'loaded', items, total }, false );
+
+			if ( inBulkLoad() ) {
+				noteBulkRows( items.length );
+			}
 		} catch ( error ) {
 			if ( signal.aborted || isAbortError( error ) ) {
 				// Collapsed or paged away: back to idle, the next expand
@@ -983,7 +1029,7 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 			setExpandAllProgress( { done, total } );
 
 			try {
-				// One render now (every parent gets its loading row), one when all are in.
+				// One render now (every parent gets its loading row), then one per BULK_PUBLISH_ROWS loaded rows, one when all are in.
 				setExpanded( [ ...current, ...fit.map( ( parent ) => parent.id ) ] );
 				await Promise.all(
 					fit.map( ( parent ) =>
@@ -997,6 +1043,7 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 				bulkLoads -= 1;
 
 				if ( ! inBulkLoad() ) {
+					bulkUnpublishedRows = 0;
 					setExpandAllProgress( null );
 
 					if ( pendingEmit ) {
@@ -1064,6 +1111,8 @@ export function resetHierarchyStore(): void {
 	abortLoads();
 	bulkLoads = 0;
 	pendingEmit = false;
+	bulkUnpublishedRows = 0;
+	bulkCommitScheduled = false;
 	expandAllProgress = null;
 	children = new Map();
 	inflight.clear();

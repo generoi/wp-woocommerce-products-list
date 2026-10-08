@@ -11,6 +11,7 @@ import { trash } from '@wordpress/icons';
 import { runAction } from '../api/client';
 import type { RenderModalProps } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
+import { captureFocusOrigin, restoreFocus, useReturnFocus } from '../edit/focus';
 import { invalidateProducts, removeItems } from '../store/products';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
@@ -50,6 +51,9 @@ export function trashRows( rows: ProductListItem[] ): void {
 							{
 								label: __( 'Undo', 'wp-woocommerce-products-list' ),
 								onClick: () => {
+									// The snackbar (and the Undo button with it) goes away: focus must not fall to <body>.
+									const origin = captureFocusOrigin();
+
 									notify.remove( `wc-pl-trash-${ response.batch_id }` );
 									void runAction( 'restore', ok, {}, { fields: [ 'id', 'status' ] } )
 										.then( ( restored ) => {
@@ -63,7 +67,8 @@ export function trashRows( rows: ProductListItem[] ): void {
 												notify.success( __( 'Restored.', 'wp-woocommerce-products-list' ) );
 											}
 										} )
-										.catch( ( error: unknown ) => notify.error( errorMessage( error ) ) );
+										.catch( ( error: unknown ) => notify.error( errorMessage( error ) ) )
+										.finally( () => setTimeout( () => restoreFocus( origin ), 0 ) );
 								},
 							},
 						],
@@ -86,6 +91,8 @@ function TrashModal( { items, closeModal, onActionPerformed }: RenderModalProps<
 	const [ rows ] = useState( () => realRows( items ) );
 	const ranRef = useRef( false );
 	const confirm = needsConfirm( rows );
+
+	useReturnFocus();
 
 	const run = () => {
 		if ( ranRef.current ) {

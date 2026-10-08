@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { isGoneCode } from '../../resources/edit/errors';
 import { hydrateSelection } from '../../resources/edit/hydrate';
 import type { HydrateDeps } from '../../resources/edit/hydrate';
-import { listNames, saveLabelFor, successMessage } from '../../resources/edit/product-edit-modal';
+import { listNames, saveLabelFor, successMessage } from '../../resources/edit/inline-editor';
 import { planSave, runSave } from '../../resources/edit/save-runner';
 import type { SaveDeps, SavePlan, SaveResult } from '../../resources/edit/save-runner';
 import type { BatchResponse, RawProduct } from '../../resources/types';
@@ -52,11 +52,12 @@ describe( 'planSave', () => {
 
 describe( 'saveLabelFor', () => {
 	it( 'says what will be written', () => {
-		expect( saveLabelFor( plan( { variations: 158 } ) ) ).toBe( 'Save 158 variations' );
-		expect( saveLabelFor( plan( { products: 3, variations: 31 } ) ) ).toBe( 'Save 3 products, 31 variations' );
-		expect( saveLabelFor( plan( { products: 1 } ) ) ).toBe( 'Save 1 product' );
-		expect( saveLabelFor( plan( { products: 90 } ) ) ).toBe( 'Save 90 products' );
-		expect( saveLabelFor( plan( {} ) ) ).toBe( 'Nothing to save' );
+		expect( saveLabelFor( plan( { variations: 158 } ) ) ).toBe( 'Update 158 variations' );
+		expect( saveLabelFor( plan( { products: 3, variations: 31 } ) ) ).toBe( 'Update 3 products, 31 variations' );
+		expect( saveLabelFor( plan( { products: 1, variations: 36 } ) ) ).toBe( 'Update 1 product, 36 variations' );
+		expect( saveLabelFor( plan( { products: 1 } ) ) ).toBe( 'Update 1 product' );
+		expect( saveLabelFor( plan( { products: 90 } ) ) ).toBe( 'Update 90 products' );
+		expect( saveLabelFor( plan( {} ) ) ).toBe( 'Nothing to update' );
 	} );
 } );
 

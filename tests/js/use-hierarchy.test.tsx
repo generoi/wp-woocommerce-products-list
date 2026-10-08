@@ -3,6 +3,7 @@ import { doAction } from '@wordpress/hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HierarchicalDataViews, HierarchyProvider, HierarchyViewProvider, NameCell, useHierarchyContext, withoutPlaceholderIds } from '../../resources/hierarchy';
 import {
+	BULK_PUBLISH_ROWS,
 	EXPANDED_STORAGE_KEY,
 	EXPAND_ALL_MAX_ROWS,
 	EXPAND_ALL_WARN_ROWS,
@@ -898,5 +899,40 @@ describe( 'HierarchicalDataViews', () => {
 
 		await waitFor( () => expect( screen.getAllByRole( 'row' ) ).toHaveLength( 5 ) );
 		expect( screen.getByText( '1', { selector: '.wc-pl-name__content' } ) ).toBeInTheDocument();
+	} );
+} );
+
+describe( 'expandAll progressive commits', () => {
+	it( 'publishes the loaded rows in bounded commits while the loads run, not once at the end', async () => {
+		const counts: Record< number, number > = {};
+		const parents: ProductRow[] = [];
+
+		// 20 x 50 rows: above EXPAND_ALL_WARN_ROWS (answered), well under EXPAND_ALL_MAX_ROWS;
+		// MAX_CONCURRENT_REQUESTS slots make the loads arrive in waves.
+		for ( let id = 1; id <= 20; id++ ) {
+			counts[ id ] = 50;
+			parents.push( parent( id, 50 ) );
+		}
+
+		const { fetch } = fakeFetch( counts, { delay: 30 } );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: () => true } ) );
+		const loadedAtEmit: number[] = [];
+		const unsubscribe = subscribeChildren( () => loadedAtEmit.push( Array.from( getChildrenState().values() ).filter( ( state ) => state.status === 'loaded' ).length ) );
+
+		await act( async () => {
+			await result.current.expandAll();
+		} );
+		unsubscribe();
+
+		expect( result.current.rows ).toHaveLength( 20 + 1000 );
+		// About one commit per BULK_PUBLISH_ROWS rows: several, never one per parent.
+		expect( loadedAtEmit.length ).toBeGreaterThanOrEqual( 3 );
+		expect( loadedAtEmit.length ).toBeLessThanOrEqual( 10 );
+		// The first commit came while parents were still loading; each later one had more.
+		expect( loadedAtEmit[ 0 ] ).toBeGreaterThan( 0 );
+		expect( loadedAtEmit[ 0 ] ).toBeLessThan( 20 );
+		expect( loadedAtEmit.at( -1 ) ).toBe( 20 );
+		expect( [ ...loadedAtEmit ].sort( ( a, b ) => a - b ) ).toEqual( loadedAtEmit );
+		expect( Math.ceil( 1000 / BULK_PUBLISH_ROWS ) ).toBeGreaterThanOrEqual( loadedAtEmit.length - 1 );
 	} );
 } );

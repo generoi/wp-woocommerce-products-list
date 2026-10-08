@@ -15,8 +15,18 @@ export interface SaveProgressProps {
 }
 
 export function SaveProgress( { done, total, saving, label }: SaveProgressProps ) {
-	if ( ! saving || total === 0 ) {
+	if ( ! saving ) {
 		return null;
+	}
+
+	// Before the plan knows how many rows: an indeterminate bar, so Save is seen to have taken.
+	if ( total === 0 ) {
+		return (
+			<div className="wc-pl-edit__progress" role="status" aria-live="polite">
+				<ProgressBar />
+				<span className="wc-pl-edit__progress-label">{ label ? label( 0, 0 ) : __( 'Saving…', 'wp-woocommerce-products-list' ) }</span>
+			</div>
+		);
 	}
 
 	const value = Math.round( ( done / total ) * 100 );

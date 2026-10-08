@@ -7,7 +7,10 @@
  */
 import { useEffect, useMemo, useRef } from '@wordpress/element';
 import { applyFilters } from '@wordpress/hooks';
+import { __, _n, sprintf } from '@wordpress/i18n';
 import { runAction } from '../api/client';
+import type { ActionResponse, ActionResult } from '../api/client';
+import { undoBatch } from '../edit/undo';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
 import { actionsFromSettings } from '../extensions/declarative';
@@ -60,31 +63,117 @@ function allowed( action: ProductAction, settings: Settings ): boolean {
 	return settings.caps[ action.capability as keyof Settings[ 'caps' ] ] === true;
 }
 
-/** Declarative (PHP) actions run on the server; returned rows refresh the cache. */
+/** Fields the handler changed on one ok result; an older PHP side without `changed` counts as a change, so Undo is still offered. */
+function changedFields( result: ActionResult ): number {
+	return typeof result.changed === 'number' ? result.changed : 1;
+}
+
+/** "Copy translations: 2 items updated, 1 already had these values." */
+export function declarativeSummary( label: string, changed: number, unchanged: number ): string {
+	let summary: string;
+
+	if ( changed === 0 ) {
+		summary = sprintf(
+			/* translators: %d: number of items the action left as they were */
+			_n( 'nothing changed, %d item already had these values.', 'nothing changed, %d items already had these values.', unchanged, 'wp-woocommerce-products-list' ),
+			unchanged
+		);
+	} else if ( unchanged === 0 ) {
+		summary = sprintf(
+			/* translators: %d: number of items updated */
+			_n( '%d item updated.', '%d items updated.', changed, 'wp-woocommerce-products-list' ),
+			changed
+		);
+	} else {
+		summary = sprintf(
+			/* translators: 1: items updated, 2: items the action left as they were */
+			__( '%1$d updated, %2$d already had these values.', 'wp-woocommerce-products-list' ),
+			changed,
+			unchanged
+		);
+	}
+
+	/* translators: 1: action label, 2: what happened ("2 items updated.") */
+	return sprintf( __( '%1$s: %2$s', 'wp-woocommerce-products-list' ), label, summary );
+}
+
+/**
+ * Runs a declarative (PHP) action on the server and reports it like a bulk
+ * save: the returned rows patch the cache, the counts refresh, a snackbar
+ * says how many items changed and offers Undo (the log's revert of the
+ * action's batch), and a failure names the first error. Rejects on a
+ * request error so the action's modal can stay open and show it.
+ */
+export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[] ): Promise< ActionResponse > {
+	let response: ActionResponse;
+
+	try {
+		response = await runAction( action, ids, args, { fields } );
+	} catch ( error ) {
+		notify.error( errorMessage( error ) );
+		throw error;
+	}
+
+	const { ok, failed } = summarize( response );
+
+	if ( response.items.length ) {
+		patchItems( response.items );
+	}
+
+	if ( ok.length ) {
+		invalidateProducts( { counts: true } );
+	}
+
+	if ( failed.length ) {
+		notify.error(
+			ok.length
+				? sprintf(
+						/* translators: 1: items updated, 2: items that failed, 3: the first failure's message */
+						__( '%1$d updated, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
+						ok.length,
+						failed.length,
+						failed[ 0 ]?.message ?? ''
+				  )
+				: failed[ 0 ]?.message ?? ''
+		);
+
+		return response;
+	}
+
+	if ( ! ok.length ) {
+		return response;
+	}
+
+	const changed = response.results.filter( ( result ) => result.ok && changedFields( result ) > 0 ).length;
+	const id = `wc-pl-action-${ response.batch_id }`;
+
+	notify.success(
+		declarativeSummary( label, changed, ok.length - changed ),
+		changed > 0
+			? {
+					id,
+					actions: [
+						{
+							label: __( 'Undo', 'wp-woocommerce-products-list' ),
+							onClick: () => {
+								notify.remove( id );
+								void undoBatch( response.batch_id );
+							},
+						},
+					],
+			  }
+			: { id }
+	);
+
+	return response;
+}
+
+/** Declarative (PHP) actions run on the server; returned rows refresh the cache, a snackbar with Undo reports the outcome. */
 function declarativeActions( context: ProductActionsContext ): ProductAction[] {
 	const fields = rowFields( context.fields );
+	const labels = new Map( context.settings.actions.map( ( def ) => [ def.id, def.label || def.id ] ) );
 
-	return actionsFromSettings( context.settings, async ( action, ids, args ) => {
-		try {
-			const response = await runAction( action, ids, args, { fields } );
-			const { ok, failed } = summarize( response );
-
-			if ( response.items.length ) {
-				patchItems( response.items );
-			}
-
-			if ( failed.length ) {
-				notify.error( failed[ 0 ]?.message ?? '' );
-			} else if ( ok.length ) {
-				invalidateProducts( { counts: true } );
-			}
-
-			return response;
-		} catch ( error ) {
-			notify.error( errorMessage( error ) );
-			throw error;
-		}
-	} );
+	return actionsFromSettings( context.settings, ( action, ids, args ) => runDeclarativeAction( action, labels.get( action ) ?? action, ids, args, fields ) );
 }
 
 export function buildProductActions( context: ProductActionsContext ): ProductAction[] {
@@ -141,15 +230,20 @@ function useStableHierarchy( hierarchy: Hierarchy ): Hierarchy {
 
 export function useProductActions( context: ProductActionsContext ): ProductAction[] {
 	const version = useRegistryVersion();
-	const { fields, settings, view, tab, selection, onChangeSelection } = context;
+	const { fields, settings, view, tab, selection, onChangeSelection, openEditor } = context;
 	const hierarchy = useStableHierarchy( context.hierarchy );
 	const selectionRef = useRef( selection );
+	const viewRef = useRef( view );
 	const changeSelectionRef = useRef( onChangeSelection );
+	const openEditorRef = useRef( openEditor );
 	const hasSelectionHandler = typeof onChangeSelection === 'function';
+	const hasEditor = typeof openEditor === 'function';
 
 	useEffect( () => {
 		selectionRef.current = selection;
+		viewRef.current = view;
 		changeSelectionRef.current = onChangeSelection;
+		openEditorRef.current = openEditor;
 	} );
 
 	return useMemo(
@@ -157,18 +251,22 @@ export function useProductActions( context: ProductActionsContext ): ProductActi
 			buildProductActions( {
 				fields,
 				settings,
-				view,
+				// Read at call time too: the quick edit opens on the tab the current filter points at.
+				get view() {
+					return viewRef.current;
+				},
 				tab,
 				hierarchy,
 				get selection() {
 					return selectionRef.current;
 				},
 				onChangeSelection: hasSelectionHandler ? ( ids ) => changeSelectionRef.current?.( ids ) : undefined,
+				openEditor: hasEditor ? ( items ) => openEditorRef.current?.( items ) : undefined,
 			} ),
 		// `version` re-derives the list when an extension registers an action after mount;
-		// view and tab do not change what the actions do, selection is read through the ref.
+		// view and tab do not change what the actions do, selection and the editor are read through refs.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ fields, settings, hierarchy, hasSelectionHandler, version ]
+		[ fields, settings, hierarchy, hasSelectionHandler, hasEditor, version ]
 	);
 }
 

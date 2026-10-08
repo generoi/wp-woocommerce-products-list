@@ -2,12 +2,12 @@
  * The selection controls in the toolbar: what is selected (with how many
  * of them sit on other pages), "Select all N" for the whole list, "Bulk
  * edit" over the whole selection (DataViews' own footer only reaches the
- * page), and "Clear". The bulk edit opens the quick-edit action's modal
- * with every selected row.
+ * page), and "Clear". The bulk edit opens the inline editor above the first
+ * row with every selected row (`onEdit`).
  */
-import { useCallback, useMemo, useState } from '@wordpress/element';
+import { useMemo } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
-import { Button, Modal } from '../ui';
+import { Button } from '../ui';
 import type { ProductAction, ProductListItem, QueryParams } from '../types';
 import type { SelectionApi } from './selection';
 
@@ -19,7 +19,10 @@ export interface SelectionBarProps {
 	pageProducts: number;
 	/** The current list request, for "Select all". */
 	query: QueryParams;
+	/** The list's actions: "Bulk edit" shows when the quick-edit action is among them (the user may edit). */
 	actions: ProductAction[];
+	/** Open the inline editor on these rows. */
+	onEdit( rows: ProductListItem[] ): void;
 }
 
 /** "12 selected (4 on other pages)". */
@@ -38,20 +41,16 @@ export function selectionLabel( count: number, offPage: number ): string {
 	) })`;
 }
 
-export function SelectionBar( { selection, total, pageProducts, query, actions }: SelectionBarProps ) {
-	const [ editing, setEditing ] = useState( false );
-	const edit = useMemo( () => actions.find( ( action ) => action.id === 'quick-edit' ), [ actions ] );
+export function SelectionBar( { selection, total, pageProducts, query, actions, onEdit }: SelectionBarProps ) {
+	const canEdit = useMemo( () => actions.some( ( action ) => action.id === 'quick-edit' ), [ actions ] );
 	const count = selection.selection.length;
 	const progress = selection.selectAllProgress;
 	// Offered once something is selected, like the header checkbox's "select all on this page" it extends.
 	const canSelectAll = ! progress && count > 0 && total > pageProducts && count < total;
-	const close = useCallback( () => setEditing( false ), [] );
 
 	if ( ! count && ! progress && ! selection.selectAllError && ! canSelectAll ) {
 		return null;
 	}
-
-	const modalHeader = edit && 'RenderModal' in edit ? ( typeof edit.modalHeader === 'function' ? edit.modalHeader( selection.rows ) : edit.modalHeader ) : undefined;
 
 	return (
 		<div className="wc-products-list__selection" role="group" aria-label={ __( 'Selection', 'wp-woocommerce-products-list' ) }>
@@ -87,8 +86,8 @@ export function SelectionBar( { selection, total, pageProducts, query, actions }
 					{ selection.selectAllError }
 				</span>
 			) }
-			{ count > 0 && edit && 'RenderModal' in edit && (
-				<Button size="compact" variant="primary" onClick={ () => setEditing( true ) }>
+			{ count > 0 && canEdit && (
+				<Button size="compact" variant="primary" onClick={ () => onEdit( selection.rows ) }>
 					{ count > 1 ? __( 'Bulk edit', 'wp-woocommerce-products-list' ) : __( 'Quick edit', 'wp-woocommerce-products-list' ) }
 				</Button>
 			) }
@@ -96,17 +95,6 @@ export function SelectionBar( { selection, total, pageProducts, query, actions }
 				<Button size="compact" variant="tertiary" onClick={ selection.clear }>
 					{ __( 'Clear selection', 'wp-woocommerce-products-list' ) }
 				</Button>
-			) }
-			{ editing && edit && 'RenderModal' in edit && (
-				<Modal
-					title={ modalHeader || ( typeof edit.label === 'function' ? edit.label( selection.rows ) : edit.label ) }
-					onRequestClose={ close }
-					focusOnMount={ edit.modalFocusOnMount ?? true }
-					size={ edit.modalSize ?? 'medium' }
-					overlayClassName="dataviews-action-modal dataviews-action-modal__quick-edit wc-products-list__selection-modal"
-				>
-					<edit.RenderModal items={ selection.rows as ProductListItem[] } closeModal={ close } onActionPerformed={ () => {} } />
-				</Modal>
 			) }
 		</div>
 	);

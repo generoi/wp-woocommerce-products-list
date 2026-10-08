@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { editFetchFields, hydrateItems } from '../../resources/edit/hydrate';
+import { editFetchFields, hydrateItems, hydrateSelection, tabFetchFields } from '../../resources/edit/hydrate';
 import type { HydrateDeps } from '../../resources/edit/hydrate';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { createCoreFields } from '../../resources/fields/registry';
@@ -64,7 +64,8 @@ describe( 'hydrateItems', () => {
 
 		expect( result.map( ( row ) => row.id ) ).toEqual( [ 11, 2, 12, 21, 1 ] );
 		expect( d.listProducts ).toHaveBeenCalledTimes( 1 );
-		expect( d.listProducts.mock.calls[ 0 ]![ 0 ] ).toMatchObject( { include: '2,1', per_page: 2, _fields: 'id,regular_price' } );
+		// `status` rides along: a row trashed since the list loaded is told apart from one picked on the Trash tab.
+		expect( d.listProducts.mock.calls[ 0 ]![ 0 ] ).toMatchObject( { include: '2,1', per_page: 2, _fields: 'id,regular_price,status' } );
 		expect( d.getVariations ).toHaveBeenCalledTimes( 2 );
 		expect( d.getVariations.mock.calls.map( ( call ) => [ call[ 0 ], call[ 2 ].params.include ] ) ).toEqual( [ [ 1, '11,12' ], [ 3, '21' ] ] );
 		expect( ( result[ 1 ] as { regular_price?: string } ).regular_price ).toBe( '100' );
@@ -91,5 +92,62 @@ describe( 'hydrateItems', () => {
 		expect( result ).toHaveLength( 150 );
 		expect( ( result[ 6 ] as { regular_price?: string } ).regular_price ).toBe( ( rows[ 6 ] as { regular_price?: string } ).regular_price );
 		expect( ( result[ 7 ] as { regular_price?: string } ).regular_price ).toBe( '1' );
+	} );
+} );
+
+describe( 'hydrateSelection merging', () => {
+	it( 'merges nested objects key by key, so a partial i18n fetch keeps the name the list shows', async () => {
+		const cached = product( { id: 1, i18n: { se: { name: { value: 'Ullsockor', source: 'Villasukat' } } }, dimensions: { length: '1', width: '2' } } );
+		const listProducts = vi.fn( async () => ( {
+			items: [ product( { id: 1, i18n: { se: { meta_title: { value: '', source: '' } }, de: { meta_title: { value: 'T', source: '' } } }, dimensions: { length: '5', width: '2', height: '3' }, categories: [ { id: 9 } ] } ) ],
+			total: 0,
+			totalPages: 1,
+		} ) );
+		const deps = { listProducts, getVariations: vi.fn() } as unknown as HydrateDeps;
+
+		const { items } = await hydrateSelection( [ cached ], [ 'id', 'i18n.se.meta_title' ], deps );
+		const row = items[ 0 ] as unknown as { i18n: Record< string, Record< string, unknown > >; dimensions: Record< string, string >; categories: unknown[] };
+
+		expect( row.i18n.se ).toEqual( { name: { value: 'Ullsockor', source: 'Villasukat' }, meta_title: { value: '', source: '' } } );
+		expect( row.i18n.de ).toEqual( { meta_title: { value: 'T', source: '' } } );
+		expect( row.dimensions ).toEqual( { length: '5', width: '2', height: '3' } );
+		// Arrays and scalars are replaced, not merged.
+		expect( row.categories ).toEqual( [ { id: 9 } ] );
+	} );
+
+	it( 'names the rows trashed since the list loaded, and leaves rows picked on the Trash tab alone', async () => {
+		const listProducts = vi.fn( async ( query: Record< string, unknown > ) => ( {
+			items: String( query.include )
+				.split( ',' )
+				.map( ( id ) => product( { id: Number( id ), status: id === '3' ? 'publish' : 'trash' } ) ),
+			total: 0,
+			totalPages: 1,
+		} ) );
+		const deps = { listProducts, getVariations: vi.fn() } as unknown as HydrateDeps;
+
+		const { trashed, missing } = await hydrateSelection( [ product( { id: 1, status: 'publish' } ), product( { id: 2, status: 'trash' } ), product( { id: 3, status: 'publish' } ) ], [ 'id', 'name' ], deps );
+
+		expect( trashed ).toEqual( [ 1 ] );
+		expect( missing ).toEqual( [] );
+		expect( listProducts.mock.calls[ 0 ]?.[ 0 ] ).toMatchObject( { _fields: 'id,name,status' } );
+	} );
+} );
+
+describe( 'per-tab field lists', () => {
+	it( 'loads one tab at a time: the General load has no language fields, the language tab only its own', () => {
+		const items = [ product( { id: 1 } ) ];
+		const general = editFetchFields( fields, items, 'quick', { tab: 'general' } );
+		const all = editFetchFields( fields, items, 'quick' );
+
+		expect( general ).toContain( 'regular_price' );
+		expect( general ).toContain( 'description' );
+		expect( general.some( ( key ) => key.startsWith( 'i18n' ) ) ).toBe( false );
+		expect( all.length ).toBeGreaterThanOrEqual( general.length );
+
+		const se = tabFetchFields( fields, items, 'quick', { id: 'i18n:se', label: 'Svenska' } );
+
+		// The core registry has no language fields of its own; the i18n integration adds them.
+		expect( se ).toEqual( [] );
+		expect( tabFetchFields( fields, items, 'quick', { id: 'general', label: 'General' } ) ).toContain( 'regular_price' );
 	} );
 } );

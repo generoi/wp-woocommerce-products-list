@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
 import { runRevert, splitResults } from '../../resources/history/revert';
-import { describeBatchScope, scopeFromPlan } from '../../resources/history/batch-scope';
+import { describeBatchScope, isRevertableRow, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
+import type { LogRow } from '../../resources/api/client';
 
 vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: () => 'revert-1',
@@ -54,7 +55,37 @@ describe( 'scopeFromPlan', () => {
 		const scope = scopeFromPlan( { rows: 160, objects: 158, skipped: [ { id: 9, object_type: 'product', action: 'trash' }, { id: 10, object_type: 'product', action: 'delete' } ] } );
 
 		expect( scope ).toEqual( { changes: 158, objects: 158, fields: [], partial: false, skipped: 2 } );
-		expect( describeBatchScope( scope ) ).toBe( 'This will put back 158 changes on 158 items. 2 entries (trash, delete or duplicate) are not reverted.' );
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 158 changes on 158 items. 2 entries (trash, restore, delete or duplicate) are not reverted.' );
 		expect( describeBatchScope( scopeFromPlan( { rows: 1, objects: 1, skipped: [] } ) ) ).toBe( 'This will put back 1 change on 1 item.' );
+	} );
+} );
+
+describe( 'isRevertableRow', () => {
+	const row = ( overrides: Partial< LogRow > ): LogRow =>
+		( { id: 1, batch_id: 'b', created_at: '', created_at_gmt: '', user: { id: 1, name: '' }, source: 'action', action: 'update', object_type: 'product', object_id: 10, parent_id: 0, object_name: '', edit_link: null, field: 'name', old_value: 'a', new_value: 'b', status: 'ok', message: '', ...overrides } ) as LogRow;
+
+	it( 'accepts ok rows with a field of an update or of an extension action, not the built-in ones with their own way back', () => {
+		expect( isRevertableRow( row( {} ) ) ).toBe( true );
+		expect( isRevertableRow( row( { action: 'i18n_copy', field: 'i18n.se.name', old_value: '' } ) ) ).toBe( true );
+		expect( isRevertableRow( row( { action: 'i18n_clear', field: 'i18n.se.name', new_value: null } ) ) ).toBe( true );
+		expect( isRevertableRow( row( { action: 'feature', field: 'featured' } ) ) ).toBe( true );
+		expect( isRevertableRow( row( { action: 'i18n_copy', field: '' } ) ) ).toBe( false );
+		expect( isRevertableRow( row( { status: 'error' } ) ) ).toBe( false );
+
+		for ( const action of [ 'trash', 'restore', 'delete', 'duplicate', 'create' ] ) {
+			expect( isRevertableRow( row( { action, field: 'status' } ) ) ).toBe( false );
+		}
+	} );
+
+	it( 'counts an extension action batch like an update batch in the revert confirm', () => {
+		const rows = [
+			row( { id: 1, action: 'i18n_copy', field: 'i18n.se.name', object_id: 10 } ),
+			row( { id: 2, action: 'i18n_copy', field: 'i18n.se.slug', object_id: 10 } ),
+			row( { id: 3, action: 'i18n_copy', field: 'i18n.se.name', object_id: 11 } ),
+			row( { id: 4, action: 'i18n_copy', field: '', object_id: 12 } ),
+		];
+
+		expect( summarizeBatch( rows, 4 ) ).toEqual( { changes: 3, objects: 2, fields: [ 'i18n.se.name', 'i18n.se.slug' ], partial: false } );
+		expect( describeBatchScope( { changes: 3, objects: 2, fields: [], partial: false, skipped: 1 } ) ).toBe( 'This will put back 3 changes on 2 items. 1 entry (trash, restore, delete or duplicate) is not reverted.' );
 	} );
 } );

@@ -38,6 +38,12 @@ export const ACTIONS = {
 	saved: 'wcProductsList.saved',
 	/** ( ids: number[], context: { action: 'trash' | 'delete'; batchId: string } ) */
 	deleted: 'wcProductsList.deleted',
+	/**
+	 * ( result: { action: string; ids: number[]; batchId: string; items: ProductListItem[] } )
+	 * — a declarative (server) action finished; `ids` are the rows it
+	 * processed without error, `items` the refreshed rows it returned.
+	 */
+	actionPerformed: 'wcProductsList.actionPerformed',
 } as const;
 
 export type FilterName = ( typeof FILTERS )[ keyof typeof FILTERS ];

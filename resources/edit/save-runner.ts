@@ -45,6 +45,25 @@ export interface SaveDeps {
 	variationsBatchSize?: number;
 	/** Normalise a wc/v3 object a write returned the way list reads are (toRow: hierarchy keys, `wcProductsList.item` filter). */
 	normalizeRow?( raw: RawProduct | RawVariation, parentId?: number ): ProductListItem;
+	/** Cross-parent variation requests in flight at once (they are independent per chunk); `DEFAULT_CONCURRENCY` when missing. */
+	concurrency?: number;
+}
+
+/** Variation chunks sent side by side: a 500-variation campaign is three requests at a time, not five in a row. */
+export const DEFAULT_CONCURRENCY = 3;
+
+/** Run `tasks` with at most `limit` in flight, starting them in order. */
+export async function runConcurrently( tasks: Array< () => Promise< void > >, limit: number ): Promise< void > {
+	const queue = [ ...tasks ];
+	const worker = async () => {
+		while ( queue.length ) {
+			const task = queue.shift()!;
+
+			await task();
+		}
+	};
+
+	await Promise.all( Array.from( { length: Math.max( 1, Math.min( limit, queue.length ) ) }, worker ) );
 }
 
 export interface SaveOptions extends RowEditOptions {
@@ -337,26 +356,33 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 	if ( deps.batchVariationsAcross ) {
 		// Grouped by parent so each request touches as few parents as possible
-		// (the server syncs a parent once per request it appears in).
+		// (the server syncs a parent once per request it appears in). The
+		// chunks are independent, so a few go out side by side.
 		const ordered = Array.from( byParent.values() ).flat();
+		const across = deps.batchVariationsAcross;
+		const groups = chunk( ordered, deps.variationsBatchSize ?? deps.batchSize );
 
-		for ( const group of chunk( ordered, deps.variationsBatchSize ?? deps.batchSize ) ) {
-			deps.patchItems( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+		// Every row shows its new value at once, not chunk by chunk.
+		deps.patchItems( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
-			try {
-				const response = await deps.batchVariationsAcross(
-					group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
-					requestOptions
-				);
+		await runConcurrently(
+			groups.map( ( group ) => async () => {
+				try {
+					const response = await across(
+						group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
+						requestOptions
+					);
 
-				applyResponse( group, response );
-			} catch ( error ) {
-				failGroup( group, error );
-			}
+					applyResponse( group, response );
+				} catch ( error ) {
+					failGroup( group, error );
+				}
 
-			done += group.length;
-			options.onProgress?.( done, total );
-		}
+				done += group.length;
+				options.onProgress?.( done, total );
+			} ),
+			deps.concurrency ?? DEFAULT_CONCURRENCY
+		);
 	} else {
 		for ( const [ parentId, entries ] of byParent ) {
 			for ( const group of chunk( entries, deps.batchSize ) ) {

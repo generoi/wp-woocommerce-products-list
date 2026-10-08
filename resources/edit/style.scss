@@ -1,9 +1,8 @@
-/* The quick/bulk edit modal (rendered inside the DataViews action modal). */
+/* The quick/bulk edit form, inline in the table (edit/inline-editor.tsx). */
 .wc-pl-edit {
 	display: flex;
 	flex-direction: column;
 	gap: 16px;
-	min-width: min( 720px, 90vw );
 
 	&__summary {
 		margin: 0;
@@ -34,7 +33,7 @@
 	}
 
 	&__form {
-		min-height: 200px;
+		min-height: 80px;
 	}
 
 	&__summary-box {
@@ -95,25 +94,253 @@
 		}
 	}
 
+	&__mixed-text {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	&__clear-all {
+		font-size: 12px;
+	}
+
+	// Update, Cancel, Update & next, then the progress: bottom left, as in the classic quick edit.
 	&__footer {
 		display: flex;
-		justify-content: flex-end;
+		align-items: center;
+		justify-content: flex-start;
+		flex-wrap: wrap;
 		gap: 8px;
-		padding-top: 8px;
+		padding-top: 12px;
 		border-top: 1px solid var( --wp-components-color-gray-300, #ddd );
-		// Stays in view when an error list or a long form pushes the modal body past the fold.
-		position: sticky;
-		bottom: 0;
-		background: var( --wp-components-color-background, #fff );
-		padding-bottom: 4px;
-		z-index: 1;
+
+		.wc-pl-edit__progress {
+			flex: 1;
+			min-width: 160px;
+			max-width: 360px;
+			margin-inline-start: 8px;
+		}
 	}
 }
 
-// The DataViews action modal clips at its bottom edge; the sticky footer needs the body to scroll, not overflow.
-.dataviews-action-modal .components-modal__content:has( .wc-pl-edit ) {
-	display: flex;
-	flex-direction: column;
+// The editor row: its host cell spans the row (editor-context.tsx sets colSpan
+// and hides the sibling cells); the row reads as a panel, not as a product.
+.wc-products-list .dataviews-view-table tr.wc-pl-editor-row,
+.wc-products-list .dataviews-view-table tr:has( .wc-pl-inline-edit-host ) {
+	background: #f6f7f7;
+
+	> td {
+		vertical-align: top;
+		border-top: 2px solid var( --wp-admin-theme-color, #3858e9 );
+		border-bottom: 2px solid var( --wp-admin-theme-color, #3858e9 );
+	}
+
+	> td[hidden],
+	> td:not( :has( .wc-pl-inline-edit-host ) ) {
+		display: none;
+	}
+
+	&:hover {
+		background: #f6f7f7;
+	}
+}
+
+.wc-products-list .dataviews-view-table td.wc-pl-editor-cell {
+	padding: 16px 20px 20px;
+
+	// The primary column's media slot (the thumbnail of a product row) has no image here.
+	.dataviews-column-primary__media {
+		display: none;
+	}
+
+	// The primary column's Stack (media + title) must not lay the editor out as a flex child of fixed width.
+	> div,
+	.dataviews-view-table__primary-column-content,
+	.dataviews-title-field {
+		display: block;
+		width: 100%;
+		max-width: none;
+	}
+}
+
+.wc-pl-inline-edit-host {
+	width: 100%;
+
+	// A variation's quick edit keeps the row's indentation.
+	&.is-level-1 {
+		padding-inline-start: 24px;
+	}
+}
+
+.wc-pl-inline-edit {
+	outline: 0;
+
+	&__title {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
+		line-height: 1.4;
+	}
+
+	&__head {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 16px;
+		min-height: 24px;
+	}
+
+	&__name {
+		font-weight: 400;
+		color: #3c434a;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	&__main {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		min-width: 0;
+	}
+
+	// Bulk: the selected items on the left, the form on the right.
+	&.is-bulk {
+		display: grid;
+		grid-template-columns: minmax( 200px, 260px ) minmax( 0, 1fr );
+		gap: 24px;
+		align-items: start;
+
+		@media ( max-width: 960px ) {
+			grid-template-columns: minmax( 0, 1fr );
+		}
+	}
+
+	&__items {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
+	}
+
+	&__whole,
+	&__more {
+		margin: 0;
+		font-size: 12px;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+	}
+
+	&__list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		max-height: 60vh;
+		overflow: auto;
+		border: 1px solid var( --wp-components-color-gray-300, #ddd );
+		border-radius: 4px;
+		background: #fff;
+	}
+
+	&__item {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin: 0;
+		padding: 4px 4px 4px 10px;
+		border-bottom: 1px solid var( --wp-components-color-gray-100, #f0f0f0 );
+		font-size: 13px;
+
+		&:last-child {
+			border-bottom: 0;
+		}
+	}
+
+	&__item-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	&__item-kind {
+		flex: none;
+		padding: 0 5px;
+		border-radius: 8px;
+		background: #f0f0f1;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+		font-size: 11px;
+		line-height: 16px;
+	}
+
+	&__item-remove {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		margin: 0;
+		padding: 0;
+		border: 0;
+		border-radius: 2px;
+		background: transparent;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+		cursor: pointer;
+
+		&:hover,
+		&:focus-visible {
+			color: #1e1e1e;
+			background: rgba( 0, 0, 0, 0.05 );
+		}
+
+		&:focus-visible {
+			outline: 2px solid var( --wp-admin-theme-color, #3858e9 );
+			outline-offset: -2px;
+		}
+
+		&[disabled] {
+			opacity: 0.4;
+			cursor: default;
+		}
+
+		svg {
+			fill: currentColor;
+		}
+	}
+
+	// The columns of the General tab (DataForm's row layout) wrap on narrow screens.
+	.dataforms-layouts-row__field > :first-child {
+		flex-wrap: wrap;
+	}
+
+	.dataforms-layouts-row__field-control {
+		min-width: min( 100%, 240px );
+	}
+
+	// Group headings inside the columns: small, like WooCommerce's quick edit legends.
+	.dataforms-layouts-regular__header h2 {
+		margin: 0;
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.02em;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+	}
+
+}
+
+// "Opening the editor…" (the chunk) and "Loading current values…" (the request).
+.wc-pl-inline-edit__loading {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var( --wp-components-color-foreground-muted, #757575 );
 }
 
 .wc-pl-bulk-numeric {

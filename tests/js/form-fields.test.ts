@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { referenceText, toFormFields, VARIATION_STATUS_ELEMENTS, variationShippingClassElements } from '../../resources/edit/form-fields';
+import { isPlainTextField, referenceText, toFormFields, VARIATION_STATUS_ELEMENTS, variationShippingClassElements } from '../../resources/edit/form-fields';
 import { mergeItems, MIXED_VALUE } from '../../resources/edit/merge';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
@@ -143,5 +143,23 @@ describe( 'reference entities', () => {
 
 		expect( referenceText( text, '<b>Knitido Cotton &amp; Merino Tabi</b>&nbsp;on suosittu varvassukka', settings ) ).toBe( 'Knitido Cotton & Merino Tabi on suosittu varvassukka' );
 		expect( referenceText( text, 'Tom &amp; Jerry', settings ) ).toBe( 'Tom & Jerry' );
+	} );
+} );
+
+describe( 'mixed text fields in bulk', () => {
+	const fields = coreFields();
+
+	it( 'get the Mixed text control with a "Clear on all rows" choice; agreeing rows and quick edit keep the plain control', () => {
+		const mixed = formFor( fields, [ simple( 1, { dimensions: 'a' } ), simple( 2, { dimensions: 'b' } ) ] );
+		const same = formFor( fields, [ simple( 1, { dimensions: 'a' } ), simple( 2, { dimensions: 'a' } ) ] );
+		const quick = formFor( fields, [ simple( 1, { dimensions: 'a' } ) ] );
+
+		expect( typeof mixed.get( 'dimensions' ).Edit ).toBe( 'function' );
+		expect( mixed.get( 'dimensions' ).type ).toBeUndefined();
+		expect( same.get( 'dimensions' ).Edit ).toBeUndefined();
+		expect( quick.get( 'dimensions' ).Edit ).toBeUndefined();
+		// Numeric ops and selects have their own controls.
+		expect( isPlainTextField( fields.find( ( field ) => field.id === 'regular_price' )! ) ).toBe( false );
+		expect( isPlainTextField( fields.find( ( field ) => field.id === 'featured' )! ) ).toBe( false );
 	} );
 } );
