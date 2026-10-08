@@ -66,6 +66,8 @@ describe( 'createProductFields', () => {
 
 		expect( getField( fields, 'sale_price' )?.edit ).toMatchObject( { group: 'pricing', bulk: 'money' } );
 		expect( getField( fields, 'stock_quantity' )?.edit ).toMatchObject( { bulk: 'integer' } );
+		// The Stock column sorts by the managed quantity (the server knows orderby=stock_quantity, not stock_status).
+		expect( getField( fields, 'stock_status' ) ).toMatchObject( { enableSorting: true, rest: { sortParam: 'stock_quantity' } } );
 		expect( getField( fields, 'name' )?.enableHiding ).toBe( false );
 		expect( fields.every( ( f ) => f.source === 'core' ) ).toBe( true );
 	} );

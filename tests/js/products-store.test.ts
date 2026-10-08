@@ -1,10 +1,12 @@
-import { doAction } from '@wordpress/hooks';
+import { renderHook, waitFor } from '@testing-library/react';
+import { addAction, doAction, removeAction } from '@wordpress/hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { resetHierarchyStore } from '../../resources/hierarchy/use-hierarchy';
 import { setSettings } from '../../resources/settings';
-import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, patchItems, refreshParentsOf } from '../../resources/store/products';
+import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, patchItems, refreshParentsOf, useProductList } from '../../resources/store/products';
+import type { View } from '../../resources/dataviews';
 import { cache } from '../../resources/store/query-cache';
 import type { ListResult } from '../../resources/api/client';
 import type { ProductListItem } from '../../resources/types';
@@ -84,5 +86,36 @@ describe( 'cachedProductIds / patchItems', () => {
 
 		patchItems( [ { id: 11, name: 'Renamed' } ] );
 		expect( cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data?.items[ 1 ]?.name ).toBe( 'Renamed' );
+	} );
+} );
+
+describe( 'useProductList', () => {
+	setup();
+
+	it( 'fires wcProductsList.loaded once per completed request, not on optimistic patches', async () => {
+		listProducts.mockResolvedValue( { items: [ parent( 10 ) ], total: 1, totalPages: 1 } );
+		const loaded = vi.fn();
+		addAction( ACTIONS.loaded, 'test/loaded', loaded );
+		const view: View = { type: 'table', page: 1, perPage: 20, fields: [] };
+
+		const { result, rerender, unmount } = renderHook( ( { v } ) => useProductList( v, 'all', [] ), { initialProps: { v: view } } );
+		await waitFor( () => expect( result.current.items ).toHaveLength( 1 ) );
+		expect( loaded ).toHaveBeenCalledTimes( 1 );
+		expect( loaded.mock.calls[ 0 ]?.[ 1 ] ).toMatchObject( { tab: 'all', total: 1 } );
+
+		// A bulk save patches the row several times: no new "load".
+		patchItems( [ { id: 10, name: 'A' } ] );
+		patchItems( [ { id: 10, name: 'B' } ] );
+		await waitFor( () => expect( result.current.items[ 0 ]?.name ).toBe( 'B' ) );
+		rerender( { v: view } );
+		expect( loaded ).toHaveBeenCalledTimes( 1 );
+
+		// A refetch is a load.
+		await result.current.refetch();
+		await waitFor( () => expect( loaded ).toHaveBeenCalledTimes( 2 ) );
+
+		// Before afterEach drops the settings and clears the cache (both re-render the hook).
+		unmount();
+		removeAction( ACTIONS.loaded, 'test/loaded' );
 	} );
 } );

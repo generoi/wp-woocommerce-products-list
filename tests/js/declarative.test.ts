@@ -300,6 +300,14 @@ describe( 'fieldFromDeclarative', () => {
 		expect( bool.type ).toBe( 'boolean' );
 	} );
 
+	it( 'carries the field currency so the edit form can format a reference in it', () => {
+		const settings = makeSettings( { languages: { default: 'fi', others: [ 'se' ], labels: { se: 'Svenska' }, currencies: { se: 'SEK' } } } );
+		const field = fieldFromDeclarative( makeField( { id: 'i18n_se_regular_price', type: 'price', group: 'i18n:se', path: 'i18n.se.regular_price.value' } ), settings );
+
+		expect( field.currency ).toEqual( { code: 'SEK', symbol: 'kr', decimals: settings.currency.decimals } );
+		expect( fieldFromDeclarative( makeField( { id: 'name_se', type: 'text' } ), settings ).currency ).toBeUndefined();
+	} );
+
 	it( 'gives price fields a currency-suffixed text control, locale parsing on write and validation', () => {
 		const field = fieldFromDeclarative(
 			makeField( { id: 'i18n:se.regular_price', type: 'price', path: 'i18n.se.regular_price.value', reference: 'i18n.se.regular_price.source', writePath: 'i18n.se.regular_price', bulk: 'money' } ),

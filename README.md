@@ -27,6 +27,10 @@ A role that has `edit_products` but not `edit_others_products` can browse and qu
 
 Every change made through the list is logged. The History screen is the Catalog page with `&screen=history`: `edit.php?post_type=product&page=wc-products-list&screen=history` (the **History** button in the Catalog toolbar, `links.history` in the settings payload). `&object_id=<id>` scopes it to one product, `&batch=<uuid>` to one save; a row's **History** action opens the same screen for that row. There is no separate submenu slug.
 
+### Personal data and retention
+
+Every log row stores who made the change (`user_id`) and, in its `context` column, the request's IP address and user agent, so an unexpected change can be traced to a session. The REST API never returns `context`; it is only in the database table. Rows are pruned after 180 days by a daily cron (`wc_products_list/log_retention_days` changes the period). Mention the log in the site's privacy policy if the store has several editors, and shorten the retention if 180 days is more than the store needs.
+
 ## Measuring
 
 The speed budgets in `docs/contracts.md` §9 are measured on a production-like build: `SCRIPT_DEBUG` off (Bedrock's development environment turns it on, which loads the development builds of React and the components and makes rendering several times slower) and Query Monitor deactivated (its per-query backtraces double the REST timings). Activate either for a diagnosis, not for a measurement.

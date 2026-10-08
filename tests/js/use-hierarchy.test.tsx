@@ -4,8 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HierarchicalDataViews, HierarchyProvider, HierarchyViewProvider, NameCell, useHierarchyContext, withoutPlaceholderIds } from '../../resources/hierarchy';
 import {
 	EXPANDED_STORAGE_KEY,
+	EXPAND_ALL_MAX_ROWS,
+	EXPAND_ALL_WARN_ROWS,
 	MAX_CACHED_PARENTS,
 	MAX_CONCURRENT_REQUESTS,
+	boundExpanded,
 	createLimiter,
 	getChildrenState,
 	invalidateVariations,
@@ -14,6 +17,8 @@ import {
 	removeVariationRows,
 	resetHierarchyStore,
 	subscribeChildren,
+	subscribeExpandAllProgress,
+	getExpandAllProgress,
 	useHierarchy,
 } from '../../resources/hierarchy/use-hierarchy';
 import type { FetchVariations, VariationsResult } from '../../resources/hierarchy/use-hierarchy';
@@ -276,7 +281,8 @@ describe( 'useHierarchy', () => {
 	} );
 
 	it( 'asks before expanding more than EXPAND_ALL_WARN_ROWS rows and respects the answer', async () => {
-		const parents = Array.from( { length: 30 }, ( _, i ) => parent( i + 1, 100 ) );
+		// 10 parents + 1,000 rows: above the warning, under the hard limit.
+		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, 100 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls } = fakeFetch( counts );
 		const confirm = vi.fn( async () => false );
@@ -288,7 +294,7 @@ describe( 'useHierarchy', () => {
 		} );
 
 		expect( ok ).toBe( false );
-		expect( confirm ).toHaveBeenCalledWith( 30 + 3000 );
+		expect( confirm ).toHaveBeenCalledWith( 10 + 1000 );
 		expect( calls ).toHaveLength( 0 );
 		expect( result.current.expandedItemIds ).toEqual( [] );
 
@@ -297,7 +303,7 @@ describe( 'useHierarchy', () => {
 			ok = await result.current.expandAll();
 		} );
 		expect( ok ).toBe( true );
-		expect( result.current.rows ).toHaveLength( 3030 );
+		expect( result.current.rows ).toHaveLength( 1010 );
 
 		// force skips the question.
 		act( () => result.current.collapseAll() );
@@ -306,6 +312,78 @@ describe( 'useHierarchy', () => {
 			await result.current.expandAll( { force: true } );
 		} );
 		expect( confirm ).not.toHaveBeenCalled();
+	} );
+
+	it( 'expandAll stops at EXPAND_ALL_MAX_ROWS, in page order, and reports what it skipped', async () => {
+		const parents = Array.from( { length: 30 }, ( _, i ) => parent( i + 1, 100 ) );
+		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
+		const { fetch, calls } = fakeFetch( counts );
+		const onExpandAllLimit = vi.fn();
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: () => true, onExpandAllLimit } ) );
+
+		let ok: boolean | undefined;
+		await act( async () => {
+			ok = await result.current.expandAll();
+		} );
+
+		// 30 parents + 14 x 100 = 1,430 rows; the 15th would make 1,530.
+		const fit = Math.floor( ( EXPAND_ALL_MAX_ROWS - 30 ) / 100 );
+		expect( ok ).toBe( true );
+		expect( result.current.expandedItemIds ).toEqual( Array.from( { length: fit }, ( _, i ) => i + 1 ) );
+		expect( calls ).toHaveLength( fit );
+		expect( result.current.rows ).toHaveLength( 30 + fit * 100 );
+		expect( onExpandAllLimit ).toHaveBeenCalledWith( { expanded: fit, skipped: 30 - fit, rows: 30 + fit * 100 } );
+
+		// Nothing more fits: expandAll says so and expands nothing.
+		onExpandAllLimit.mockClear();
+		await act( async () => {
+			ok = await result.current.expandAll();
+		} );
+		expect( ok ).toBe( false );
+		expect( onExpandAllLimit ).toHaveBeenCalledWith( { expanded: 0, skipped: 30 - fit, rows: 30 + fit * 100 } );
+		expect( calls ).toHaveLength( fit );
+	} );
+
+	it( 'bounds a restored expansion to EXPAND_ALL_WARN_ROWS on load and rewrites the stored ids', async () => {
+		const parents = Array.from( { length: 20 }, ( _, i ) => parent( i + 1, 100 ) );
+		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
+		const { fetch, calls } = fakeFetch( counts );
+		const storage = memoryStorage();
+		// 99 is on another page and must survive.
+		storage.setItem( EXPANDED_STORAGE_KEY, JSON.stringify( [ 99, ...parents.map( ( p ) => p.id ) ] ) );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage } ) );
+
+		// 20 parents + 5 x 100 = 520 rows; a 6th would make 620.
+		const fit = Math.floor( ( EXPAND_ALL_WARN_ROWS - 20 ) / 100 );
+		const kept = [ 99, ...Array.from( { length: fit }, ( _, i ) => i + 1 ) ];
+		await waitFor( () => expect( result.current.expandedItemIds ).toEqual( kept ) );
+		await waitFor( () => expect( result.current.rows ).toHaveLength( 20 + fit * 100 ) );
+		expect( new Set( calls.map( ( c ) => c.parentId ) ) ).toEqual( new Set( kept.slice( 1 ) ) );
+		expect( JSON.parse( storage.dump()[ EXPANDED_STORAGE_KEY ]! ) ).toEqual( kept );
+	} );
+
+	it( 'bounds the expansion of a page it lands on to EXPAND_ALL_MAX_ROWS, and leaves a confirmed one alone', async () => {
+		const page1 = Array.from( { length: 30 }, ( _, i ) => parent( i + 1, 100 ) );
+		const page2 = Array.from( { length: 30 }, ( _, i ) => parent( 100 + i + 1, 100 ) );
+		const counts = Object.fromEntries( [ ...page1, ...page2 ].map( ( p ) => [ p.id, p._childCount ] ) );
+		const { fetch } = fakeFetch( counts );
+		const { result, rerender } = renderHook( ( { parents } ) => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: () => true } ), {
+			initialProps: { parents: page1 },
+		} );
+
+		// The contract's setter accepts any ids; the page they belong to is bounded when it shows.
+		act( () => result.current.onChangeExpandedItemIds( page2.map( ( p ) => p.id ) ) );
+		expect( result.current.expandedItemIds ).toHaveLength( 30 );
+
+		rerender( { parents: page2 } );
+		const fit = Math.floor( ( EXPAND_ALL_MAX_ROWS - 30 ) / 100 );
+		await waitFor( () => expect( result.current.expandedItemIds ).toEqual( page2.slice( 0, fit ).map( ( p ) => p.id ) ) );
+		await waitFor( () => expect( result.current.rows ).toHaveLength( 30 + fit * 100 ) );
+
+		// A save re-creates the parent rows (same ids): nothing is trimmed again.
+		rerender( { parents: page2.map( ( p ) => ( { ...p } ) ) } );
+		await act( async () => {} );
+		expect( result.current.expandedItemIds ).toHaveLength( fit );
 	} );
 
 	it( 'variationIdsOf uses loaded children or fetches only ids', async () => {
@@ -407,6 +485,22 @@ describe( 'useHierarchy', () => {
 		expect( result.current.rows ).toHaveLength( 251 );
 	} );
 
+	it( 'expandAll reports its progress through the progress store and clears it at the end', async () => {
+		const parents = [ parent( 1, 2 ), parent( 2, 2 ), parent( 3, 2 ) ];
+		const { fetch } = fakeFetch( { 1: 2, 2: 2, 3: 2 }, { delay: 10 } );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ) );
+		const seen: Array< { done: number; total: number } | null > = [];
+		const unsubscribe = subscribeExpandAllProgress( () => seen.push( getExpandAllProgress() ) );
+
+		await act( async () => {
+			await result.current.expandAll();
+		} );
+		unsubscribe();
+
+		expect( seen ).toEqual( [ { done: 0, total: 3 }, { done: 1, total: 3 }, { done: 2, total: 3 }, { done: 3, total: 3 }, null ] );
+		expect( result.current.rows ).toHaveLength( 9 );
+	} );
+
 	it( 'expandAll publishes a handful of renders, not one per parent', async () => {
 		const counts: Record< number, number > = {};
 		const parents: ProductRow[] = [];
@@ -428,8 +522,9 @@ describe( 'useHierarchy', () => {
 
 		expect( calls ).toHaveLength( 12 );
 		expect( result.current.rows ).toHaveLength( 12 + 36 );
-		// Without the bulk window: 12 immediate "loading" emits plus one per response window.
-		expect( emits.length ).toBeLessThanOrEqual( 2 );
+		// Nothing is published while the loads run: one emit when the last one is in.
+		expect( emits ).toHaveLength( 1 );
+		expect( getExpandAllProgress() ).toBeNull();
 
 		// A single expand still shows its loading marker at once.
 		const single = fakeFetch( { 99: 2 }, { delay: 30 } );
@@ -560,6 +655,17 @@ describe( 'useHierarchy', () => {
 
 		act( () => result.current.onChangeExpandedItemIds( [ 3, 3, 0, -2, 1.5, 4 ] ) );
 		expect( result.current.expandedItemIds ).toEqual( [ 3, 4 ] );
+	} );
+} );
+
+describe( 'boundExpanded', () => {
+	it( 'keeps ids of other pages and the first on-page ids that fit', () => {
+		const parents = [ parent( 1, 50 ), parent( 2, 0 ), parent( 3, 50 ), parent( 4, 50 ) ];
+
+		expect( boundExpanded( [ 9, 4, 1, 3 ], parents, new Map(), 1000, 104 ) ).toEqual( [ 9, 1, 3 ] );
+		expect( boundExpanded( [ 9, 1 ], parents, new Map(), 1000, 10 ) ).toEqual( [ 9 ] );
+		const unchanged = [ 1, 3 ];
+		expect( boundExpanded( unchanged, parents, new Map(), 1000, 1000 ) ).toBe( unchanged );
 	} );
 } );
 

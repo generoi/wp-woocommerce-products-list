@@ -3,27 +3,31 @@
  * the current page of products, and the snackbar stack. Rows come from the
  * query cache (previous page stays visible while the next loads), the
  * hierarchy splices expanded variations in, actions come from actions/.
+ * The selection lives in list/selection.ts and spans pages; DataViews sees
+ * the page's part of it and its bulk actions are widened to the whole.
  */
-import { useCallback, useEffect, useMemo, useState } from '@wordpress/element';
-import { addAction, removeAction } from '@wordpress/hooks';
-import { __ } from '@wordpress/i18n';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from '@wordpress/element';
+import { __, sprintf } from '@wordpress/i18n';
 import useProductActions from '../actions';
 import { ApiError } from '../api/errors';
 import type { View } from '../dataviews';
-import { ACTIONS } from '../extensions/hooks';
 import { HierarchyProvider } from '../hierarchy/context';
 import { footerCountLabel } from '../hierarchy/footer-count';
 import { HierarchicalDataViews } from '../hierarchy/hierarchical-dataviews';
-import { useHierarchy } from '../hierarchy/use-hierarchy';
+import { useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
 import { useCounts, useProductList } from '../store/products';
-import { setCurrentRows } from '../store/rows';
+import { setCurrentRows, setVisibleFieldIds } from '../store/rows';
 import { useView } from '../store/view';
 import { getItemId, isProductRow } from '../types';
-import type { BatchResult, ProductField, ProductListItem, ProductRow, Settings } from '../types';
+import type { ProductField, ProductListItem, ProductRow, Settings } from '../types';
 import { Button, Notice, Notices, Spinner } from '../ui';
 import { DEFAULT_LAYOUTS, PER_PAGE_SIZES } from './default-view';
 import { EmptyState } from './empty-state';
+import { useSelection } from './selection';
+import { SelectionBar } from './selection-bar';
 import { StatusTabs } from './status-tabs';
+import { withWholeSelection } from './whole-selection';
+import type { WholeSelection } from './whole-selection';
 
 export interface ProductsScreenProps {
 	fields: ProductField[];
@@ -31,6 +35,8 @@ export interface ProductsScreenProps {
 }
 
 const PANEL_ID = 'wc-products-list-panel';
+
+const TABLE_ID = 'wc-products-list-table';
 
 function getItemLevel( item: ProductListItem ): number {
 	return item._level;
@@ -45,6 +51,33 @@ export function listErrorMessage( error: Error ): { message: string; reload: boo
 	return { message: error.message || __( 'The products could not be loaded.', 'wp-woocommerce-products-list' ), reload: false };
 }
 
+/**
+ * "Expand all", and while it loads "Loading variations… 37 of 100". Reads
+ * the progress from its own store so the counter re-renders this button,
+ * never the table.
+ */
+function ExpandAllButton( { onClick }: { onClick: () => void } ) {
+	const progress = useExpandAllProgress();
+
+	return (
+		<>
+			<Button size="compact" variant="tertiary" onClick={ onClick } disabled={ progress !== null } isBusy={ progress !== null }>
+				{ __( 'Expand all', 'wp-woocommerce-products-list' ) }
+			</Button>
+			{ progress ? (
+				<span className="wc-products-list__expand-progress" role="status" aria-live="polite">
+					{ sprintf(
+						/* translators: 1: products loaded so far, 2: products being expanded */
+						__( 'Loading variations… %1$d of %2$d', 'wp-woocommerce-products-list' ),
+						progress.done,
+						progress.total
+					) }
+				</span>
+			) : null }
+		</>
+	);
+}
+
 export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const { view, setView, tab, setTab, isModified, resetView } = useView( fields, settings );
 	const list = useProductList( view, tab, fields );
@@ -57,73 +90,50 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		return fields.filter( ( field ) => ids.has( field.id ) );
 	}, [ fields, view.fields, view.titleField, view.mediaField, view.descriptionField ] );
 	const hierarchy = useHierarchy( parents, visibleFields );
-	const [ selection, setSelection ] = useState< string[] >( [] );
-	const actions = useProductActions( { fields, settings, view, tab, hierarchy, selection, onChangeSelection: setSelection } );
+	// The selection spans pages, searches, filters and sorts; a status tab is another list.
+	const selected = useSelection( hierarchy.rows, tab );
+	const { selection } = selected;
+	const baseActions = useProductActions( { fields, settings, view, tab, hierarchy, selection, onChangeSelection: selected.set } );
 
-	// Rows that left the page (new page, tab, filter, trash) leave the selection too.
-	useEffect( () => {
-		const ids = new Set( hierarchy.rows.map( getItemId ) );
-		setSelection( ( current ) => {
-			const kept = current.filter( ( id ) => ids.has( id ) );
+	// DataViews' bulk actions see the page's selected rows; widen them to the
+	// whole selection, read at call time (the actions list is built once).
+	const whole = useMemo< WholeSelection >( () => {
+		const onPage = selection.slice( 0, selection.length - selected.offPageCount );
 
-			return kept.length === current.length ? current : kept;
-		} );
-	}, [ hierarchy.rows ] );
-
-	// A new page, tab, search, filter or sort is a new list: nothing stays
-	// selected across it, as in the classic list table. The previous rows
-	// remain visible while the next load, so this cannot wait for them.
-	const listKey = JSON.stringify( [ view.page, view.perPage, tab, view.search ?? '', view.filters ?? [], view.sort ?? null ] );
-	useEffect( () => {
-		setSelection( ( current ) => ( current.length ? [] : current ) );
-	}, [ listKey ] );
-
-	// Saved rows leave the selection, so the next bulk action cannot
-	// silently target what the last one already changed; rows that failed
-	// stay selected for a retry.
-	useEffect( () => {
-		const namespace = 'wcProductsList/screen-selection';
-		const onSaved = ( result: BatchResult ) => {
-			const saved = new Set( ( result?.updated ?? [] ).map( ( row ) => String( row.id ) ) );
-
-			if ( saved.size ) {
-				setSelection( ( current ) => {
-					const kept = current.filter( ( id ) => ! saved.has( id ) );
-
-					return kept.length === current.length ? current : kept;
-				} );
-			}
-		};
-
-		addAction( ACTIONS.saved, namespace, onSaved );
-
-		return () => {
-			removeAction( ACTIONS.saved, namespace );
-		};
-	}, [] );
+		return { onPage, offPage: selected.rows.slice( onPage.length ) };
+	}, [ selection, selected.offPageCount, selected.rows ] );
+	const wholeRef = useRef( whole );
+	useLayoutEffect( () => {
+		wholeRef.current = whole;
+	} );
+	const actions = useMemo( () => withWholeSelection( baseActions, () => wholeRef.current ), [ baseActions ] );
 
 	// `window.wcProductsList.getItems()` reads what is on screen.
 	useEffect( () => {
 		setCurrentRows( hierarchy.rows );
 	}, [ hierarchy.rows ] );
 	useEffect( () => () => setCurrentRows( [] ), [] );
+	// A save asks the server for the visible columns only (edit/save.ts).
+	useEffect( () => {
+		setVisibleFieldIds( visibleFields.map( ( field ) => field.id ) );
+	}, [ visibleFields ] );
+	useEffect( () => () => setVisibleFieldIds( [] ), [] );
 
 	const hasQuery = Boolean( view.search ) || ( view.filters?.length ?? 0 ) > 0;
 	const clearQuery = useCallback( () => setView( { ...view, search: '', filters: [], page: 1 } as View ), [ setView, view ] );
 
 	const hasExpandable = parents.some( ( item ) => item._hasChildren );
-	const countLabel = useMemo( () => footerCountLabel( { data: hierarchy.rows, selection, totalItems: list.total } ), [ hierarchy.rows, selection, list.total ] );
+	const countLabel = useMemo( () => footerCountLabel( { data: hierarchy.rows, selection: [], totalItems: list.total } ), [ hierarchy.rows, list.total ] );
 	const header = (
 		<div className="wc-products-list__header">
 			<span className="wc-products-list__count" aria-live="polite">
 				{ countLabel }
 			</span>
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
+			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } />
 			{ hasExpandable && (
 				<>
-					<Button size="compact" variant="tertiary" onClick={ () => void hierarchy.expandAll() }>
-						{ __( 'Expand all', 'wp-woocommerce-products-list' ) }
-					</Button>
+					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } />
 					<Button size="compact" variant="tertiary" onClick={ () => hierarchy.collapseAll() } disabled={ hierarchy.expandedItemIds.length === 0 }>
 						{ __( 'Collapse all', 'wp-woocommerce-products-list' ) }
 					</Button>
@@ -145,10 +155,15 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	// A failed request while the previous rows are still on screen: say so
 	// (the table's empty state only shows when there is nothing to show).
 	const staleError = list.error && list.items.length > 0 ? listErrorMessage( list.error ) : null;
+	// DataViews shows its bulk-actions footer for the page's selected rows; snackbars move above it.
+	const hasPageSelection = selection.length > selected.offPageCount;
 
 	return (
 		<HierarchyProvider value={ hierarchy }>
-			<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }` }>
+			<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
+				<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>
+					{ __( 'Skip to products', 'wp-woocommerce-products-list' ) }
+				</a>
 				<StatusTabs tab={ tab } onChange={ setTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />
 				{ staleError && (
 					<Notice
@@ -166,6 +181,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 					</Notice>
 				) }
 				<div id={ PANEL_ID } role="tabpanel" aria-labelledby={ `wc-products-list-tab-${ tab }` } className="wc-products-list__panel">
+					<div id={ TABLE_ID } tabIndex={ -1 } className="wc-products-list__table-anchor" />
 					<HierarchicalDataViews
 						data={ hierarchy.rows }
 						fields={ fields }
@@ -176,7 +192,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						paginationInfo={ { totalItems: list.total, totalPages: list.totalPages } }
 						defaultLayouts={ DEFAULT_LAYOUTS }
 						selection={ selection }
-						onChangeSelection={ setSelection }
+						onChangeSelection={ selected.onPageSelectionChange }
 						getItemId={ getItemId }
 						getItemLevel={ getItemLevel }
 						config={ { perPageSizes: PER_PAGE_SIZES } }

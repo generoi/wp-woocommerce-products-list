@@ -35,15 +35,18 @@ describe( 'PriceCell', () => {
 		setSettings( sampleSettings( { timezone: '+00:00' } ) );
 		render( <PriceCell item={ row( { price: '105', regular_price: '105', sale_price: '84', on_sale: false, date_on_sale_from: '2036-11-01T00:00:00', date_on_sale_from_gmt: '2036-11-01T00:00:00', date_on_sale_to: '2036-11-30T23:59:00', date_on_sale_to_gmt: '2036-11-30T23:59:00' } ) } /> );
 
-		expect( screen.getByText( /^84,00 € from/ ) ).toHaveTextContent( '84,00 € from 1.11.2036' );
-		expect( screen.getByTitle( /^Sale/ ) ).toHaveAttribute( 'title', 'Sale 84,00 € from 1.11.2036 to 30.11.2036' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 84,00 € 1.11.2036 – 30.11.2036' );
+		expect( screen.getByTitle( /^Scheduled sale/ ) ).toHaveAttribute( 'title', 'Scheduled sale: 84,00 €, 1.11.2036 – 30.11.2036' );
+		// The current price stays the price; the scheduled one is never struck through or shown as in force.
+		expect( screen.getByText( /^105,00 €/ ) ).toHaveClass( 'wc-products-list__price--scheduled' );
+		expect( document.querySelector( 'del, ins' ) ).toBeNull();
 	} );
 
 	it( 'reads a site-local string without its gmt twin in the site zone', () => {
 		setSettings( sampleSettings( { timezone: '+00:00' } ) );
 		render( <PriceCell item={ row( { price: '105', regular_price: '105', sale_price: '84', on_sale: false, date_on_sale_from: '2036-11-01T00:00:00' } ) } /> );
 
-		expect( screen.getByText( /^84,00 € from/ ) ).toHaveTextContent( '84,00 € from 1.11.2036' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 84,00 € from 1.11.2036' );
 	} );
 
 	it( 'shows the current price with the scheduled sale beneath it', () => {
@@ -51,7 +54,8 @@ describe( 'PriceCell', () => {
 		render( <PriceCell item={ row( { price: '180', regular_price: '180', sale_price: '99', on_sale: false, date_on_sale_from: future, date_on_sale_from_gmt: future } ) } /> );
 
 		expect( screen.getByText( /180,00 €/ ) ).toHaveClass( 'wc-products-list__price--scheduled' );
-		expect( screen.getByText( /^99,00 € from/ ) ).toHaveClass( 'wc-products-list__price-scheduled' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveClass( 'wc-products-list__price-scheduled' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( /99,00 € from/ );
 	} );
 
 	it( 'strikes the regular price through while on sale', () => {

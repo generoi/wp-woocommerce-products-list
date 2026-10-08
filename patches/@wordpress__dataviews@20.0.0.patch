@@ -1,0 +1,173 @@
+diff --git a/build-wp/index.js b/build-wp/index.js
+index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8c8b6bdeb 100644
+--- a/build-wp/index.js
++++ b/build-wp/index.js
+@@ -21000,7 +21000,7 @@ function DataViewsSelectionCheckbox({
+           return;
+         }
+         onChangeSelection(
+-          isInSelectionArray ? selection.filter((itemId) => id !== itemId) : [...selection, id]
++          (current) => current.includes(id) ? current.filter((itemId) => id !== itemId) : [...current, id]
+         );
+       },
+       ...extraProps
+@@ -22187,6 +22187,8 @@ function useSelectionProps({
+   const selectableIdSet = new Set(selectableIds);
+   const hasSelectableItems = selectableIds.length > 0;
+   const hasRangeGesture = hasSelectableItems && isMultiselect;
++  const liveRef = useRef(null);
++  liveRef.current = { selection, onChangeSelection, selectableIds, selectableIdSet, hasRangeGesture };
+   const getSelectionProps = (id) => {
+     const isSelectable = selectableIdSet.has(id);
+     return {
+@@ -22195,6 +22197,7 @@ function useSelectionProps({
+       // reach here: `onClickCapture` stops them.
+       ...shouldSelectOnClick && {
+         onClick: () => {
++          const { selection, onChangeSelection } = liveRef.current;
+           if (allowDeselect && selection.includes(id)) {
+             onChangeSelection(
+               selection.filter((itemId) => id !== itemId)
+@@ -22208,11 +22211,13 @@ function useSelectionProps({
+         }
+       },
+       onMouseDown: (event) => {
++        const { hasRangeGesture } = liveRef.current;
+         if (event.button === 0 && event.shiftKey && hasRangeGesture) {
+           event.preventDefault();
+         }
+       },
+       onClickCapture: (event) => {
++        const { selection, onChangeSelection, selectableIds, selectableIdSet, hasRangeGesture } = liveRef.current;
+         if (!hasRangeGesture) {
+           return;
+         }
+@@ -22420,7 +22425,25 @@ function TableColumnField({
+   });
+   return /* @__PURE__ */ jsx102("div", { className, children: /* @__PURE__ */ jsx102(field.render, { item, field }) });
+ }
+-function TableRow({
++var TABLE_ROW_LIVE_PROPS = /* @__PURE__ */ new Set(["selection", "onChangeSelection", "onMouseDown", "onClickCapture", "onClick"]);
++function areTableRowPropsEqual(prev, next) {
++  const prevKeys = Object.keys(prev);
++  const nextKeys = Object.keys(next);
++  if (prevKeys.length !== nextKeys.length) {
++    return false;
++  }
++  for (const key of nextKeys) {
++    if (TABLE_ROW_LIVE_PROPS.has(key)) {
++      continue;
++    }
++    if (!Object.is(prev[key], next[key])) {
++      return false;
++    }
++  }
++  return prev.selection.includes(next.id) === next.selection.includes(next.id);
++}
++var TableRow = /* @__PURE__ */ memo(TableRowBase, areTableRowPropsEqual);
++function TableRowBase({
+   hasBulkActions,
+   item,
+   level,
+@@ -22441,9 +22464,9 @@ function TableRow({
+   onMouseDown,
+   onClickCapture,
+   isActionsColumnSticky,
+-  posinset
++  posinset,
++  totalItems
+ }) {
+-  const { paginationInfo } = useContext(dataviews_context_default);
+   const hasPossibleBulkAction = useHasAPossibleBulkAction(actions, item);
+   const isSelected = hasPossibleBulkAction && selection.includes(id);
+   const {
+@@ -22461,7 +22484,7 @@ function TableRow({
+         "is-selected": hasPossibleBulkAction && isSelected,
+         "has-bulk-actions": hasPossibleBulkAction
+       }),
+-      "aria-setsize": infiniteScrollEnabled ? paginationInfo.totalItems : void 0,
++      "aria-setsize": infiniteScrollEnabled ? totalItems : void 0,
+       "aria-posinset": posinset,
+       role: infiniteScrollEnabled ? "article" : void 0,
+       onClickCapture,
+@@ -22561,7 +22584,7 @@ function ViewTable({
+   className,
+   empty
+ }) {
+-  const { containerRef } = useContext(dataviews_context_default);
++  const { containerRef, paginationInfo } = useContext(dataviews_context_default);
+   const isDelayedLoading = useDelayedLoading(isLoading);
+   const groupField = view.groupBy?.field ? fields.find((f) => f.id === view.groupBy?.field) : null;
+   const dataByGroup = groupField ? getDataByGroup(data, groupField) : null;
+@@ -22836,6 +22859,7 @@ function ViewTable({
+                     selection,
+                     getItemId,
+                     onChangeSelection,
++                    totalItems: paginationInfo.totalItems,
+                     ...getSelectionProps(id),
+                     onClickItem,
+                     renderItemLink,
+@@ -22865,6 +22889,7 @@ function ViewTable({
+                 selection,
+                 getItemId,
+                 onChangeSelection,
++                totalItems: paginationInfo.totalItems,
+                 ...getSelectionProps(id),
+                 onClickItem,
+                 renderItemLink,
+@@ -31944,13 +31969,25 @@ function useData({
+     selection,
+     getItemId
+   ]);
++  const plainBase = !isInfiniteScrollEnabled && isLoading && previousDataRef.current?.length ? previousDataRef.current : shownData;
++  const plainCloneCacheRef = useRef(/* @__PURE__ */ new WeakMap());
++  const plainData = useMemo(() => {
++    const cache = plainCloneCacheRef.current;
++    return plainBase.map((item) => {
++      if (item === null || typeof item !== "object") {
++        return { ...item, position: void 0 };
++      }
++      let clone = cache.get(item);
++      if (!clone) {
++        clone = { ...item, position: void 0 };
++        cache.set(item, clone);
++      }
++      return clone;
++    });
++  }, [plainBase]);
+   if (!isInfiniteScrollEnabled) {
+-    const dataToReturn = isLoading && previousDataRef.current?.length ? previousDataRef.current : shownData;
+     return {
+-      data: dataToReturn.map((item) => ({
+-        ...item,
+-        position: void 0
+-      })),
++      data: plainData,
+       paginationInfo: isLoading && previousDataRef.current?.length ? previousPaginationInfoRef.current : paginationInfo,
+       hasInitiallyLoaded,
+       setVisibleEntries: void 0
+@@ -32261,15 +32298,18 @@ function DataViews({
+   const containerRef = useRef(null);
+   const [containerWidth, resizeObserverRef] = useContainerWidth();
+   const [openedFilter, setOpenedFilter] = useState(null);
+-  function setSelectionWithChange(value) {
+-    const newValue = typeof value === "function" ? value(selection) : value;
+-    if (isUncontrolled) {
++  const selectionLiveRef = useRef({ selection, isUncontrolled, onChangeSelection });
++  selectionLiveRef.current = { selection, isUncontrolled, onChangeSelection };
++  const setSelectionWithChange = useCallback((value) => {
++    const live = selectionLiveRef.current;
++    const newValue = typeof value === "function" ? value(live.selection) : value;
++    if (live.isUncontrolled) {
+       setSelectionState(newValue);
+     }
+-    if (onChangeSelection) {
+-      onChangeSelection(newValue);
++    if (live.onChangeSelection) {
++      live.onChangeSelection(newValue);
+     }
+-  }
++  }, []);
+   const _fields = useMemo(() => normalizeFields(fields), [fields]);
+   const _selection = useMemo(() => {
+     if (view.infiniteScrollEnabled) {

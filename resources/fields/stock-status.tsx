@@ -15,7 +15,9 @@ export function createStockStatusField( settings: Settings ): ProductField {
 		elements: settings.stockStatuses,
 		// wc/v3 validates `stock_status` against its enum: one value at a time.
 		filterBy: { operators: [ 'is' ], isPrimary: true },
-		enableSorting: false,
+		// Sorted by the managed quantity (Rest\ListQuery `orderby=stock_quantity`):
+		// ascending puts what is out and what is low first, the restock view.
+		enableSorting: true,
 		render: ( { item } ) => {
 			const managed = item.manage_stock === true && typeof item.stock_quantity === 'number';
 
@@ -31,7 +33,7 @@ export function createStockStatusField( settings: Settings ): ProductField {
 			);
 		},
 		getValue: ( { item } ) => item.stock_status ?? '',
-		rest: { fields: [ 'stock_status', 'stock_quantity', 'manage_stock' ], param: 'stock_status', applies: { product: true, variation: true } },
+		rest: { fields: [ 'stock_status', 'stock_quantity', 'manage_stock' ], param: 'stock_status', sortParam: 'stock_quantity', applies: { product: true, variation: true } },
 		edit: { group: 'inventory', bulk: 'default', order: 30 },
 	} );
 }

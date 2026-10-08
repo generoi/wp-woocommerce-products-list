@@ -68,6 +68,12 @@ export interface DeclarativeField {
 	filter: { param: string; operators: string[] } | null;
 	width: number | null;
 	source: string;
+	/** What the muted `reference` companion is ("Not translated to Svenska; showing the Suomi value"); the cell's title. */
+	referenceLabel?: string;
+	/** `price` fields: the ISO code of the currency the column is in, when not the shop's. */
+	currency?: string;
+	/** `price` fields: decimals of that currency when not the shop's. */
+	precision?: number;
 }
 
 export type DeclarativeFilterType = 'select' | 'text' | 'boolean' | 'number' | 'date';
@@ -204,6 +210,8 @@ export interface NoticeOptions {
 	type?: 'snackbar' | 'default';
 	isDismissible?: boolean;
 	actions?: Array< { label: string; onClick?: () => void; url?: string } >;
+	/** Stay until dismissed. Defaults to true for a snackbar with `actions` (an Undo must not expire), false otherwise. */
+	explicitDismiss?: boolean;
 }
 
 /** `window.wcProductsList`. Created before `wcProductsList.ready` fires. */

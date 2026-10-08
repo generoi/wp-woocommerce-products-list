@@ -42,8 +42,10 @@ function shortDate( value: string, gmt: string | undefined, settings: Settings )
 /**
  * The computed price: the sale price with the regular one struck through
  * while on sale; "From X" for a variable parent (wc/v3 `price` is its
- * lowest variation price); a "Sale … from …" badge when a sale is
- * scheduled but not on yet, so campaign prep is visible before it goes live.
+ * lowest variation price); a "Scheduled 99,00 € 20.11.2026 – 30.11.2026"
+ * line under the current price when a sale is scheduled but not on yet, so
+ * campaign prep is visible before it goes live and is never read as the
+ * price in force.
  */
 export function PriceCell( { item }: { item: ProductListItem } ) {
 	const settings = getSettings();
@@ -70,30 +72,37 @@ export function PriceCell( { item }: { item: ProductListItem } ) {
 	if ( scheduled ) {
 		const sale = formatPrice( item.sale_price ?? '', settings );
 		const from = shortDate( scheduled.from, scheduled.fromGmt, settings );
-		const label = scheduled.to
+		const to = scheduled.to ? shortDate( scheduled.to, scheduled.toGmt, settings ) : '';
+		const window = to
 			? sprintf(
-					/* translators: 1: sale price, 2: start date, 3: end date */
-					__( 'Sale %1$s from %2$s to %3$s', 'wp-woocommerce-products-list' ),
-					sale,
+					/* translators: 1: start date, 2: end date */
+					__( '%1$s – %2$s', 'wp-woocommerce-products-list' ),
 					from,
-					shortDate( scheduled.to, scheduled.toGmt, settings )
+					to
 			  )
 			: sprintf(
-					/* translators: 1: sale price, 2: start date */
-					__( 'Sale %1$s from %2$s', 'wp-woocommerce-products-list' ),
-					sale,
+					/* translators: %s: start date */
+					__( 'from %s', 'wp-woocommerce-products-list' ),
 					from
 			  );
+		const label = sprintf(
+			/* translators: 1: sale price, 2: the sale window ("20.11.2026 – 30.11.2026" or "from 20.11.2026") */
+			__( 'Scheduled sale: %1$s, %2$s', 'wp-woocommerce-products-list' ),
+			sale,
+			window
+		);
 
 		return (
 			<span className="wc-products-list__price wc-products-list__price--scheduled">
 				{ price }
 				<span className="wc-products-list__price-scheduled" title={ label }>
+					<span className="wc-products-list__price-scheduled-badge">{ __( 'Scheduled', 'wp-woocommerce-products-list' ) }</span>
+					{ ' ' }
 					{ sprintf(
-						/* translators: 1: sale price, 2: start date */
-						__( '%1$s from %2$s', 'wp-woocommerce-products-list' ),
+						/* translators: 1: sale price, 2: the sale window */
+						__( '%1$s %2$s', 'wp-woocommerce-products-list' ),
 						sale,
-						from
+						window
 					) }
 				</span>
 			</span>

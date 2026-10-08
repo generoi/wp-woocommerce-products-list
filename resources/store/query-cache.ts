@@ -1,6 +1,7 @@
 /**
  * A small request cache: one entry per key, in-flight dedupe, abort of a
- * superseded fetch, `patch` for optimistic updates, `invalidate(prefix)`
+ * superseded fetch, `patch` for optimistic updates (re-applied on top of a
+ * response that was in flight when they were made), `invalidate(prefix)`
  * that refetches whatever is still on screen. Components read it through
  * `useQuery` (useSyncExternalStore), so a patch re-renders every list that
  * shows the row. No @wordpress/data: the shapes here are simple and the
@@ -28,6 +29,8 @@ interface Internal< T > {
 	controller?: AbortController;
 	promise?: Promise< T >;
 	listeners: Set< () => void >;
+	/** Updaters applied while a fetch was in flight: re-applied on top of its response (optimistic patches survive the refetch). */
+	pendingPatches: Array< ( data: T ) => T >;
 }
 
 export interface FetchOptions {
@@ -61,7 +64,7 @@ export function createQueryCache(): QueryCache {
 		let item = store.get( key ) as Internal< T > | undefined;
 
 		if ( ! item ) {
-			item = { entry: emptyEntry< T >( key ), listeners: new Set() };
+			item = { entry: emptyEntry< T >( key ), listeners: new Set(), pendingPatches: [] };
 			store.set( key, item as Internal< unknown > );
 		}
 
@@ -92,14 +95,21 @@ export function createQueryCache(): QueryCache {
 		const controller = new AbortController();
 		item.controller = controller;
 		item.fetcher = fetcher;
+		item.pendingPatches = [];
 		update( item, { isFetching: true, error: undefined } );
 
 		const promise = fetcher( controller.signal ).then(
-			( data ) => {
+			( response ) => {
 				if ( item.controller !== controller ) {
 					// Superseded: a newer fetch of the same key owns the entry.
-					return data;
+					return response;
 				}
+
+				// A patch made while the request ran (an optimistic save, a
+				// trash) is newer than the response: apply it on top.
+				const patches = item.pendingPatches;
+				item.pendingPatches = [];
+				const data = patches.reduce( ( current, patch ) => patch( current ), response );
 
 				item.controller = undefined;
 				item.promise = undefined;
@@ -155,6 +165,10 @@ export function createQueryCache(): QueryCache {
 
 			const next = updater( item.entry.data );
 
+			if ( item.controller ) {
+				item.pendingPatches.push( updater );
+			}
+
 			if ( next !== item.entry.data ) {
 				update( item, { data: next } );
 			}
@@ -188,6 +202,7 @@ export function createQueryCache(): QueryCache {
 					item.controller.abort();
 					item.controller = undefined;
 					item.promise = undefined;
+					item.pendingPatches = [];
 					item.entry = { ...item.entry, isFetching: false };
 				}
 			};
@@ -205,6 +220,7 @@ export function createQueryCache(): QueryCache {
 			}
 
 			item.controller?.abort();
+			item.pendingPatches = [];
 			store.delete( key );
 			update( item, emptyEntry( key ) );
 		},
@@ -234,6 +250,8 @@ export interface UseQueryResult< T > {
 	isLoading: boolean;
 	/** A request is in flight (also during background refetches). */
 	isFetching: boolean;
+	/** When the key's data last came back from a request (0 before the first); patches do not move it. */
+	updatedAt: number;
 	refetch: () => Promise< T >;
 }
 
@@ -293,6 +311,7 @@ export function useQuery< T >( key: string | null, fetcher: Fetcher< T >, option
 		error: entry.error,
 		isLoading: data === undefined && isFetching,
 		isFetching,
+		updatedAt: entry.updatedAt,
 		refetch,
 	};
 }

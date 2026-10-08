@@ -62,6 +62,8 @@ export type DeclarativeProductField = ProductField & {
 	rest: ProductField[ 'rest' ] & { toParams?: ToParams };
 	/** True for a field that exists only to filter (no column, no edit). */
 	filterOnly?: boolean;
+	/** Set on `price` fields: the currency the column and its reference value are in (a language's market currency). */
+	currency?: FieldCurrency;
 };
 
 export interface ActionResult {
@@ -408,6 +410,7 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 	};
 
 	if ( def.type === 'price' ) {
+		field.currency = currency;
 		field.isValid = {
 			custom: ( item, normalized ) => {
 				const value = normalized.getValue( { item } );

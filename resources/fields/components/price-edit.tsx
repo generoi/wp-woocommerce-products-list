@@ -2,8 +2,13 @@
  * The DataForm control for money fields: a text input in the shop's
  * notation, stored as a dot-decimal string. Bulk edit wraps it with the
  * set/increase/decrease operation (edit/bulk-numeric-control.tsx).
+ *
+ * The text is the user's while the input has focus: every keystroke is
+ * parsed and emitted, but the stored value is only formatted back into
+ * the input when it changes from outside (a reset, another row) or on
+ * blur. Formatting on every change turned "149" into "1,0049".
  */
-import { useEffect, useId, useState } from '@wordpress/element';
+import { useEffect, useId, useRef, useState } from '@wordpress/element';
 import { InputControl } from '../../ui';
 import { getSettings } from '../../settings';
 import type { ProductListItem, Settings } from '../../types';
@@ -14,12 +19,15 @@ export function PriceEdit( { data, field, onChange, hideLabelFromVision, validit
 	const settings = getSettings();
 	const stored = field.getValue( { item: data } );
 	const [ text, setText ] = useState( () => toInput( stored, settings ) );
+	const focusedRef = useRef( false );
 	// Core wp-components and dataviews' inlined copy each count instances from 1,
 	// so their generated ids collide across the form; React's are unique per tree.
 	const id = `wc-pl-price-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }-${ useId().replace( /:/g, '' ) }`;
 
 	useEffect( () => {
-		setText( toInput( stored, settings ) );
+		if ( ! focusedRef.current ) {
+			setText( toInput( stored, settings ) );
+		}
 		// Only the stored value and the currency settings matter; `settings` is a stable singleton.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [ stored, settings.currency.decimalSeparator, settings.currency.decimals ] );
@@ -34,6 +42,8 @@ export function PriceEdit( { data, field, onChange, hideLabelFromVision, validit
 			hideLabelFromVision={ hideLabelFromVision }
 			placeholder={ field.placeholder }
 			help={ message }
+			inputMode="decimal"
+			aria-invalid={ message ? true : undefined }
 			className={ message ? 'wc-products-list__price-edit is-invalid' : 'wc-products-list__price-edit' }
 			value={ text }
 			suffix={ <span className="wc-products-list__price-edit-suffix">{ settings.currency.symbol }</span> }
@@ -46,7 +56,13 @@ export function PriceEdit( { data, field, onChange, hideLabelFromVision, validit
 					onChange( field.setValue( { item: data, value: parsed } ) );
 				}
 			} }
-			onBlur={ () => setText( toInput( parsePrice( text, settings ) ?? '', settings ) ) }
+			onFocus={ () => {
+				focusedRef.current = true;
+			} }
+			onBlur={ () => {
+				focusedRef.current = false;
+				setText( toInput( parsePrice( text, settings ) ?? '', settings ) );
+			} }
 		/>
 	);
 }

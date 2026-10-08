@@ -4,7 +4,7 @@
  * (products and variations) that holds the row changes at once, before the
  * request is made; `invalidateProducts` is the slow, certain path.
  */
-import { useCallback, useEffect, useMemo } from '@wordpress/element';
+import { useCallback, useEffect, useMemo, useRef } from '@wordpress/element';
 import { addAction, doAction } from '@wordpress/hooks';
 import { getCounts, listProducts } from '../api/client';
 import type { ListResult } from '../api/client';
@@ -48,11 +48,24 @@ export function useProductList( view: View, tab: string, fields: ProductField[] 
 	const result = useQuery< ListResult< ProductListItem > >( key, ( signal ) => listProducts( query, { signal } ), { keepPreviousData: true } );
 	const data = result.data;
 
+	// `wcProductsList.loaded` once per completed list request: the cache's
+	// `updatedAt` moves on a fetch, not on the optimistic patches that give
+	// `data` a new identity after every save.
+	const loadedAt = result.updatedAt;
+	const announcedRef = useRef< { key: string; at: number } | null >( null );
+
 	useEffect( () => {
-		if ( data && ! result.isFetching ) {
-			doAction( ACTIONS.loaded, data.items, { tab, view, total: data.total } );
+		if ( ! data || result.isFetching || ! loadedAt ) {
+			return;
 		}
-	}, [ data, result.isFetching, tab, view ] );
+
+		if ( announcedRef.current?.key === key && announcedRef.current.at === loadedAt ) {
+			return;
+		}
+
+		announcedRef.current = { key, at: loadedAt };
+		doAction( ACTIONS.loaded, data.items, { tab, view, total: data.total } );
+	}, [ data, result.isFetching, loadedAt, key, tab, view ] );
 
 	const refetch = useCallback( async () => {
 		await result.refetch();

@@ -26,15 +26,16 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
 import { addAction } from '@wordpress/hooks';
-import { __, sprintf } from '@wordpress/i18n';
+import { __, _n, sprintf } from '@wordpress/i18n';
 import { getVariations } from '../api/client';
 import { isAbortError } from '../api/errors';
 import { getSettings } from '../settings';
+import { notify } from '../actions/notices';
 import { ACTIONS } from '../extensions/hooks';
 import { getItemId } from '../types/product';
 import type { BatchResult, ProductField } from '../types/extension';
 import type { ProductListItem, ProductRow, RawVariation, VariationRow } from '../types/product';
-import { flattenHierarchy, projectedChildRows } from './flatten';
+import { flattenHierarchy } from './flatten';
 import type { ChildrenState } from './flatten';
 import { normalizeVariation } from './normalize';
 
@@ -47,6 +48,16 @@ export const EXPANDED_STORAGE_KEY = 'wcProductsList.expanded';
  */
 export const EXPAND_ALL_WARN_ROWS = 600;
 
+/**
+ * Rows a page never grows beyond through expandAll or a restored expansion:
+ * a 2,500-row table froze the renderer for most of a minute. expandAll stops
+ * at the parent that would cross it (the rest stay collapsed, with a notice);
+ * expanded ids restored from storage or revisited on a later page are trimmed
+ * to it in page order (to EXPAND_ALL_WARN_ROWS when restored on load, where
+ * nobody asked for a large table).
+ */
+export const EXPAND_ALL_MAX_ROWS = 1500;
+
 export const VARIATIONS_PER_PAGE = 100;
 
 export const MAX_CONCURRENT_REQUESTS = 6;
@@ -58,12 +69,18 @@ export const MAX_CACHED_PARENTS = 60;
 export const EMIT_WINDOW = 40;
 
 /**
- * The window while `expandAll` runs (ms). A 100-parent page becomes one
- * ~1,800-row table, and every render of it costs more than any request, so
- * progress is published about once a second and once more when the last
- * load finishes, instead of after each of the ~100 responses.
+ * While `expandAll` runs nothing is published at all: a 100-parent page
+ * becomes one ~1,500-row table, and every render of the growing table
+ * costs more than any request (a table re-render is O(rows) even with
+ * memoised rows), so the responses are collected and the table is
+ * rendered once when the last load finishes. Progress goes through its
+ * own tiny store (`useExpandAllProgress`), read by a component outside
+ * the table, so the counter never re-renders a row.
  */
-export const EMIT_WINDOW_BULK = 1000;
+export interface ExpandAllProgress {
+	done: number;
+	total: number;
+}
 
 /** The `_fields` every variation request carries, whatever the view shows. */
 export const VARIATION_BASE_FIELDS = [ 'id', 'name', 'status', 'parent_id', 'attributes', 'image', 'sku', 'wc_products_list' ] as const;
@@ -76,6 +93,15 @@ export type FetchVariations = (
 	options: { perPage: number; fields: string[]; signal?: AbortSignal }
 ) => Promise< VariationsResult >;
 
+export interface ExpandAllLimit {
+	/** Parents expanded by this call. */
+	expanded: number;
+	/** Parents left collapsed because the page would pass EXPAND_ALL_MAX_ROWS. */
+	skipped: number;
+	/** Rows on the page after the call. */
+	rows: number;
+}
+
 export interface HierarchyOptions {
 	/** Defaults to `api/client` `getVariations`; tests inject a stub. */
 	fetchVariations?: FetchVariations;
@@ -83,6 +109,8 @@ export interface HierarchyOptions {
 	maxChildren?: number;
 	/** Asked before expandAll adds more than EXPAND_ALL_WARN_ROWS rows; defaults to window.confirm. */
 	confirmExpandAll?: ( rows: number ) => boolean | Promise< boolean >;
+	/** Called when expandAll left parents collapsed to stay under EXPAND_ALL_MAX_ROWS; defaults to an info notice. */
+	onExpandAllLimit?: ( limit: ExpandAllLimit ) => void;
 	/** Defaults to window.sessionStorage. */
 	storage?: Pick< Storage, 'getItem' | 'setItem' > | null;
 }
@@ -99,7 +127,11 @@ export interface Hierarchy {
 	collapse( id: number ): void;
 	/** Reload a parent's variations (after an error, or to refresh). */
 	retry( id: number ): Promise< void >;
-	/** Expand every variable product on the page. Resolves to false when the user declined the warning. */
+	/**
+	 * Expand the variable products on the page, in page order, as far as
+	 * EXPAND_ALL_MAX_ROWS allows. Resolves to false when the user declined the
+	 * warning or nothing could be expanded.
+	 */
 	expandAll( options?: { force?: boolean } ): Promise< boolean >;
 	collapseAll(): void;
 	getItemParentId( item: ProductListItem ): number | null;
@@ -147,8 +179,10 @@ let currentParents: ReadonlySet< number > = new Set();
 let emitTimer: ReturnType< typeof setTimeout > | undefined;
 let emitWaiters: Array< () => void > = [];
 
-/** Running `expandAll` calls; while above zero, publishes use the bulk window. */
+/** Running `expandAll` calls; while above zero, nothing is published until the last one ends. */
 let bulkLoads = 0;
+/** A change happened while a bulk load held the publishes back. */
+let pendingEmit = false;
 
 function inBulkLoad(): boolean {
 	return bulkLoads > 0;
@@ -160,6 +194,8 @@ function emit(): void {
 		emitTimer = undefined;
 	}
 
+	pendingEmit = false;
+
 	const waiters = emitWaiters;
 	emitWaiters = [];
 
@@ -170,15 +206,52 @@ function emit(): void {
 	waiters.forEach( ( resolve ) => resolve() );
 }
 
-/** Publish on the next window; resolves once the listeners ran. */
+/**
+ * Publish on the next window; resolves once the listeners ran. During a
+ * bulk load the change is only noted (the bulk's end publishes) and the
+ * promise resolves at once, so a load never waits for a render that will
+ * not come before it ends.
+ */
 function scheduleEmit(): Promise< void > {
+	if ( inBulkLoad() ) {
+		pendingEmit = true;
+
+		return Promise.resolve();
+	}
+
 	return new Promise< void >( ( resolve ) => {
 		emitWaiters.push( resolve );
 
 		if ( emitTimer === undefined ) {
-			emitTimer = setTimeout( emit, inBulkLoad() ? EMIT_WINDOW_BULK : EMIT_WINDOW );
+			emitTimer = setTimeout( emit, EMIT_WINDOW );
 		}
 	} );
+}
+
+/* Expand-all progress: its own store, so the counter never touches the table. */
+let expandAllProgress: ExpandAllProgress | null = null;
+const progressListeners = new Set< Listener >();
+
+function setExpandAllProgress( next: ExpandAllProgress | null ): void {
+	expandAllProgress = next;
+	progressListeners.forEach( ( listener ) => listener() );
+}
+
+export function subscribeExpandAllProgress( listener: Listener ): () => void {
+	progressListeners.add( listener );
+
+	return () => {
+		progressListeners.delete( listener );
+	};
+}
+
+export function getExpandAllProgress(): ExpandAllProgress | null {
+	return expandAllProgress;
+}
+
+/** `{done, total}` while an expandAll is loading, else null. */
+export function useExpandAllProgress(): ExpandAllProgress | null {
+	return useSyncExternalStore( subscribeExpandAllProgress, getExpandAllProgress, getExpandAllProgress );
 }
 
 function setChildren( parentId: number, state: ChildrenState, immediate = true ): Promise< void > {
@@ -504,7 +577,7 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 	const entry: Inflight = { controller, promise: Promise.resolve() };
 	const isCancelled = () => signal.aborted;
 
-	// The loading marker shows at once for a single expand; during expandAll the markers share the bulk window too.
+	// The loading marker shows at once for a single expand; during expandAll the expanded ids already show every parent loading.
 	void setChildren( parentId, { status: 'loading', items: previous?.items ?? [], total: previous?.total ?? 0 }, ! inBulkLoad() );
 
 	const perPage = VARIATIONS_PER_PAGE;
@@ -642,6 +715,78 @@ function sameIds( a: number[], b: number[] ): boolean {
 	return a.length === b.length && a.every( ( id, index ) => id === b[ index ] );
 }
 
+function childRowsOf( parent: ProductRow, state: ChildrenState | undefined, cap: number ): number {
+	const count = state?.status === 'loaded' ? Math.max( state.total, state.items.length ) : parent._childCount;
+
+	return Math.min( count, cap );
+}
+
+/**
+ * Which of `parents` (in page order) fit on a page of at most `maxRows` rows
+ * on top of `baseRows`: the first ones whose variations keep the total under
+ * the limit; the first parent that would cross it stops the walk.
+ */
+export function parentsWithinRows( parents: ProductRow[], baseRows: number, children: ReadonlyMap< number, ChildrenState >, maxChildren: number, maxRows: number ): { fit: ProductRow[]; rows: number } {
+	const cap = maxChildren > 0 ? maxChildren : Infinity;
+	const fit: ProductRow[] = [];
+	let rows = baseRows;
+
+	for ( const parent of parents ) {
+		if ( ! parent._hasChildren ) {
+			continue;
+		}
+
+		const added = childRowsOf( parent, children.get( parent.id ), cap );
+
+		if ( rows + added > maxRows ) {
+			break;
+		}
+
+		rows += added;
+		fit.push( parent );
+	}
+
+	return { fit, rows };
+}
+
+/**
+ * `expanded` trimmed so the page stays within `maxRows`: ids not on the page
+ * are kept (they belong to other pages), ids on the page are kept in page
+ * order while they fit. Order of the result follows `expanded`.
+ */
+export function boundExpanded( expanded: number[], parents: ProductRow[], children: ReadonlyMap< number, ChildrenState >, maxChildren: number, maxRows: number ): number[] {
+	const expandedSet = new Set( expanded );
+	const onPage = parents.filter( ( parent ) => expandedSet.has( parent.id ) );
+
+	if ( ! onPage.length ) {
+		return expanded;
+	}
+
+	const { fit } = parentsWithinRows( onPage, parents.length, children, maxChildren, maxRows );
+	const keep = new Set( fit.map( ( parent ) => parent.id ) );
+	const pageIds = new Set( parents.map( ( parent ) => parent.id ) );
+	const next = expanded.filter( ( id ) => ! pageIds.has( id ) || keep.has( id ) );
+
+	return next.length === expanded.length ? expanded : next;
+}
+
+function defaultOnExpandAllLimit( { expanded, skipped, rows }: ExpandAllLimit ): void {
+	notify.info(
+		sprintf(
+			/* translators: 1: number of products expanded, 2: number left collapsed, 3: number of rows on the page */
+			_n(
+				'Expanded %1$d product; %2$d more left collapsed so the page stays under %3$d rows. Use a smaller page size or a filter to see the rest.',
+				'Expanded %1$d products; %2$d more left collapsed so the page stays under %3$d rows. Use a smaller page size or a filter to see the rest.',
+				expanded,
+				'wp-woocommerce-products-list'
+			),
+			expanded,
+			skipped,
+			rows
+		)
+	);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Hook                                                                      */
 /* ------------------------------------------------------------------------ */
@@ -654,9 +799,14 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 	const fetch = options.fetchVariations ?? ( getVariations as unknown as FetchVariations );
 	const maxChildren = options.maxChildren ?? getSettings().limits.maxChildrenPerParent;
 	const confirmExpandAll = options.confirmExpandAll ?? defaultConfirm;
+	const onExpandAllLimit = options.onExpandAllLimit ?? defaultOnExpandAllLimit;
 	const storage = options.storage === undefined ? defaultStorage() : options.storage;
 
 	const [ expandedItemIds, setExpandedState ] = useState< number[] >( () => readExpanded( storage ) );
+	// Ids read from storage are bounded harder (EXPAND_ALL_WARN_ROWS) when the first page arrives: a reload must not rebuild a table nobody asked for.
+	const restoringRef = useRef( expandedItemIds.length > 0 );
+	const pageKey = useMemo( () => parents.map( ( parent ) => parent.id ).join( ',' ), [ parents ] );
+	const boundedPageRef = useRef( '' );
 	const expandedSet = useMemo( () => new Set( expandedItemIds ), [ expandedItemIds ] );
 	const childrenState = useSyncExternalStore( subscribeChildren, getChildrenState, getChildrenState );
 
@@ -730,7 +880,22 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 
 	// Expanded parents on this page without loaded children: fetch them.
 	// Covers the session restore, a toggle, expandAll and invalidation.
+	// A new page (new set of parent ids) is first bounded to the row limit,
+	// so a restored or revisited expansion never loads what it will not show.
 	useEffect( () => {
+		if ( parents.length && boundedPageRef.current !== pageKey ) {
+			boundedPageRef.current = pageKey;
+			const limit = restoringRef.current ? EXPAND_ALL_WARN_ROWS : EXPAND_ALL_MAX_ROWS;
+			restoringRef.current = false;
+			const bounded = boundExpanded( expandedItemIds, parents, children, maxChildren, limit );
+
+			if ( ! sameIds( bounded, expandedItemIds ) ) {
+				setExpanded( bounded );
+
+				return;
+			}
+		}
+
 		for ( const id of expandedItemIds ) {
 			const parent = parentsById.get( id );
 			const state = children.get( id );
@@ -739,7 +904,7 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 				void load( id );
 			}
 		}
-	}, [ expandedItemIds, parentsById, childrenState, load ] );
+	}, [ expandedItemIds, parentsById, childrenState, load, pageKey, parents, maxChildren, setExpanded ] );
 
 	const rows = useMemo(
 		() => flattenHierarchy( parents, expandedSet, childrenState, maxChildren ),
@@ -798,29 +963,55 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 				return true;
 			}
 
-			const projected = rows.length + projectedChildRows( missing, children, maxChildren );
+			// In page order, as many as keep the page under the hard limit.
+			const { fit, rows: projected } = parentsWithinRows( missing, rows.length, children, maxChildren, EXPAND_ALL_MAX_ROWS );
+			const skipped = missing.length - fit.length;
+
+			if ( ! fit.length ) {
+				onExpandAllLimit( { expanded: 0, skipped, rows: rows.length } );
+
+				return false;
+			}
 
 			if ( ! force && projected > EXPAND_ALL_WARN_ROWS && ! ( await confirmExpandAll( projected ) ) ) {
 				return false;
 			}
 
 			bulkLoads += 1;
+			let done = 0;
+			const total = fit.length;
+			setExpandAllProgress( { done, total } );
 
 			try {
-				setExpanded( [ ...current, ...missing.map( ( parent ) => parent.id ) ] );
-				await Promise.all( missing.map( ( parent ) => load( parent.id ) ) );
+				// One render now (every parent gets its loading row), one when all are in.
+				setExpanded( [ ...current, ...fit.map( ( parent ) => parent.id ) ] );
+				await Promise.all(
+					fit.map( ( parent ) =>
+						load( parent.id ).then( () => {
+							done += 1;
+							setExpandAllProgress( { done, total } );
+						} )
+					)
+				);
 			} finally {
 				bulkLoads -= 1;
 
-				// The last responses do not wait for the bulk window.
-				if ( ! inBulkLoad() && emitTimer !== undefined ) {
-					emit();
+				if ( ! inBulkLoad() ) {
+					setExpandAllProgress( null );
+
+					if ( pendingEmit ) {
+						emit();
+					}
 				}
+			}
+
+			if ( skipped > 0 ) {
+				onExpandAllLimit( { expanded: fit.length, skipped, rows: projected } );
 			}
 
 			return true;
 		},
-		[ parents, rows.length, maxChildren, confirmExpandAll, setExpanded, load ]
+		[ parents, rows.length, maxChildren, confirmExpandAll, onExpandAllLimit, setExpanded, load ]
 	);
 
 	const collapseAll = useCallback( () => setExpanded( [] ), [ setExpanded ] );
@@ -871,6 +1062,9 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 /** Tests: reset the module store. */
 export function resetHierarchyStore(): void {
 	abortLoads();
+	bulkLoads = 0;
+	pendingEmit = false;
+	expandAllProgress = null;
 	children = new Map();
 	inflight.clear();
 	idCache.clear();

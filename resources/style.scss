@@ -265,9 +265,11 @@ $link: #2271b1;
 	}
 }
 
+// Snackbars sit above DataViews' bulk-actions footer (which is sticky at the
+// bottom of the table), so a notice never covers "Bulk edit".
 .wc-products-list__notices {
 	position: fixed;
-	bottom: 24px;
+	bottom: calc(24px + var(--wc-pl-footer-height, 0px));
 	left: calc(160px + 24px);
 	z-index: 100000;
 
@@ -278,6 +280,79 @@ $link: #2271b1;
 	@media (max-width: 782px) {
 		left: 16px;
 	}
+}
+
+.wc-products-list.has-footer {
+	--wc-pl-footer-height: 56px;
+}
+
+// A reference value (the default language's name shown where a translation
+// is missing) reads as a fallback, not as a translation.
+.wc-products-list-field--reference {
+	color: $muted;
+	font-style: italic;
+}
+
+.wc-products-list__skip {
+	&:focus {
+		position: absolute;
+		top: 8px;
+		left: 8px;
+		width: auto;
+		height: auto;
+		padding: 8px 12px;
+		clip: auto;
+		clip-path: none;
+		background: #fff;
+		color: $link;
+		border: 1px solid $link;
+		border-radius: 2px;
+		z-index: 100001;
+	}
+}
+
+.wc-products-list__table-anchor {
+	outline: 0;
+}
+
+.wc-products-list__selection {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-wrap: wrap;
+	margin-inline-start: 4px;
+	padding-inline-start: 8px;
+	border-inline-start: 1px solid $border;
+}
+
+.wc-products-list__selection-count {
+	font-size: 12px;
+	color: #1e1e1e;
+	white-space: nowrap;
+}
+
+.wc-products-list__selection-progress {
+	font-size: 12px;
+	color: $muted;
+	white-space: nowrap;
+}
+
+.wc-products-list__selection-error {
+	font-size: 12px;
+	color: #d63638;
+}
+
+.wc-products-list__price-scheduled-badge {
+	display: inline-block;
+	padding: 0 4px;
+	border-radius: 2px;
+	background: #fcf9e8;
+	border: 1px solid #f0c33c;
+	color: #614200;
+	font-size: 10px;
+	line-height: 14px;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
 }
 
 .wc-products-list__price-edit {
@@ -314,4 +389,11 @@ $link: #2271b1;
 .wc-products-list__placeholder {
 	padding: 24px;
 	color: $muted;
+}
+
+// "Loading variations… 37 of 100" next to Expand all.
+.wc-products-list__expand-progress {
+	color: $muted;
+	font-size: 12px;
+	white-space: nowrap;
 }

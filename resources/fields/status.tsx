@@ -15,12 +15,12 @@ export function createStatusField( settings: Settings ): ProductField {
 		type: 'text',
 		label: __( 'Status', 'wp-woocommerce-products-list' ),
 		elements: settings.statuses,
-		// The status tabs are the filter.
+		// The status tabs are the filter; sorting groups the "All" tab by status.
 		filterBy: false,
-		enableSorting: false,
+		enableSorting: true,
 		render: ( { item } ) => <OptionCell value={ item.status } options={ item._kind === 'variation' ? VARIATION_STATUSES : settings.statuses } />,
 		getValue: ( { item } ) => item.status ?? '',
-		rest: { applies: { product: true, variation: true } },
+		rest: { sortParam: 'post_status', applies: { product: true, variation: true } },
 		edit: { group: 'general', bulk: 'default', order: 90 },
 	} );
 }

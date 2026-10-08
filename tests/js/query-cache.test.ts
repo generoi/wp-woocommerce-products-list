@@ -86,6 +86,28 @@ describe( 'createQueryCache', () => {
 		cache.patch( 'missing', ( data ) => data );
 	} );
 
+	it( 're-applies a patch made while a fetch was in flight on top of the response', async () => {
+		const cache = createQueryCache();
+		type Data = { items: Array< { id: number; featured: boolean } > };
+		await cache.fetch< Data >( 'k', async () => ( { items: [ { id: 1, featured: false } ] } ) );
+
+		// A background refetch (Undo) is running when "Mark as featured" patches the row.
+		const d = deferred< Data >();
+		const refetch = cache.fetch< Data >( 'k', () => d.promise, { dedupe: false } );
+		cache.patch< Data >( 'k', ( data ) => ( { items: data.items.map( ( item ) => ( { ...item, featured: true } ) ) } ) );
+		expect( cache.get< Data >( 'k' )?.data?.items[ 0 ]?.featured ).toBe( true );
+
+		// The stale response says not featured; the patch wins.
+		d.resolve( { items: [ { id: 1, featured: false } ] } );
+		expect( ( await refetch ).items[ 0 ]?.featured ).toBe( true );
+		expect( cache.get< Data >( 'k' )?.data?.items[ 0 ]?.featured ).toBe( true );
+		expect( cache.get( 'k' )?.isFetching ).toBe( false );
+
+		// A patch after the response is not kept around for the next fetch.
+		await cache.fetch< Data >( 'k', async () => ( { items: [ { id: 1, featured: false } ] } ), { dedupe: false } );
+		expect( cache.get< Data >( 'k' )?.data?.items[ 0 ]?.featured ).toBe( false );
+	} );
+
 	it( 'invalidate drops idle entries and refetches subscribed ones', async () => {
 		const cache = createQueryCache();
 		let version = 0;

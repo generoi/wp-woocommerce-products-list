@@ -1,0 +1,85 @@
+import { fireEvent, render, screen } from '@testing-library/react';
+import { useState } from '@wordpress/element';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { PriceEdit } from '../../resources/fields/components/price-edit';
+import { setSettings } from '../../resources/settings';
+import type { ProductListItem } from '../../resources/types';
+import type { DataFormControlProps } from '../../resources/dataviews';
+import { sampleSettings } from './settings.test';
+
+type Props = DataFormControlProps< ProductListItem >;
+
+const field = {
+	id: 'regular_price',
+	label: 'Regular price',
+	getValue: ( { item }: { item: ProductListItem } ) => ( item as { regular_price?: string } ).regular_price ?? '',
+	setValue: ( { value }: { item: ProductListItem; value: unknown } ) => ( { regular_price: value } ),
+} as unknown as Props[ 'field' ];
+
+/** The form around the control: every change lands in the data the control reads back. */
+function Harness( { initial, message }: { initial: string; message?: string } ) {
+	const [ data, setData ] = useState( { id: 1, regular_price: initial } as unknown as ProductListItem );
+	const validity = message ? { custom: { type: 'invalid', message } } : undefined;
+
+	return <PriceEdit data={ data } field={ field } onChange={ ( patch ) => setData( ( current ) => ( { ...current, ...patch } ) ) } validity={ validity as Props[ 'validity' ] } hideLabelFromVision={ false } />;
+}
+
+describe( 'PriceEdit', () => {
+	beforeEach( () => setSettings( sampleSettings() ) );
+	afterEach( () => setSettings( undefined ) );
+
+	it( 'keeps the typed text while focused and formats it on blur', () => {
+		render( <Harness initial="" /> );
+		const input = screen.getByLabelText( 'Regular price' ) as HTMLInputElement;
+
+		fireEvent.focus( input );
+
+		for ( const typed of [ '1', '14', '149' ] ) {
+			fireEvent.change( input, { target: { value: typed } } );
+			expect( input.value ).toBe( typed );
+		}
+
+		fireEvent.blur( input );
+		expect( input.value ).toBe( '149,00' );
+	} );
+
+	it( 'accepts the shop notation and a trailing decimal mark while typing', () => {
+		render( <Harness initial="10" /> );
+		const input = screen.getByLabelText( 'Regular price' ) as HTMLInputElement;
+
+		expect( input.value ).toBe( '10,00' );
+		fireEvent.focus( input );
+		fireEvent.change( input, { target: { value: '12,' } } );
+		expect( input.value ).toBe( '12,' );
+		fireEvent.change( input, { target: { value: '12,5' } } );
+		expect( input.value ).toBe( '12,5' );
+		fireEvent.blur( input );
+		expect( input.value ).toBe( '12,50' );
+	} );
+
+	it( 'follows a stored value that changes while the input is not focused', () => {
+		function Outer() {
+			const [ value, setValue ] = useState( '5' );
+
+			return (
+				<>
+					<button onClick={ () => setValue( '7' ) }>reset</button>
+					<Harness key={ value } initial={ value } />
+				</>
+			);
+		}
+
+		render( <Outer /> );
+		expect( ( screen.getByLabelText( 'Regular price' ) as HTMLInputElement ).value ).toBe( '5,00' );
+		fireEvent.click( screen.getByText( 'reset' ) );
+		expect( ( screen.getByLabelText( 'Regular price' ) as HTMLInputElement ).value ).toBe( '7,00' );
+	} );
+
+	it( 'marks the input invalid when the form reports a problem', () => {
+		render( <Harness initial="10" message="The sale price must be lower than the regular price." /> );
+		const input = screen.getByLabelText( 'Regular price' );
+
+		expect( input ).toHaveAttribute( 'aria-invalid', 'true' );
+		expect( input ).toHaveAttribute( 'inputmode', 'decimal' );
+	} );
+} );

@@ -32,13 +32,19 @@ export {
 	invalidateVariations,
 	getChildrenState,
 	subscribeChildren,
+	subscribeExpandAllProgress,
+	getExpandAllProgress,
+	useExpandAllProgress,
 	createLimiter,
+	boundExpanded,
+	parentsWithinRows,
 	EXPANDED_STORAGE_KEY,
 	EXPAND_ALL_WARN_ROWS,
+	EXPAND_ALL_MAX_ROWS,
 	VARIATIONS_PER_PAGE,
 	VARIATION_BASE_FIELDS,
 } from './use-hierarchy';
-export type { Hierarchy, HierarchyOptions, FetchVariations, VariationsResult } from './use-hierarchy';
+export type { Hierarchy, HierarchyOptions, ExpandAllLimit, ExpandAllProgress, FetchVariations, VariationsResult } from './use-hierarchy';
 export { HierarchyProvider, useHierarchyContext, useOptionalHierarchyContext, HierarchyViewProvider, useHierarchyView } from './context';
 export type { HierarchyViewValue } from './context';
 export { HierarchicalDataViews, withoutPlaceholderIds, isActionableRow } from './hierarchical-dataviews';
