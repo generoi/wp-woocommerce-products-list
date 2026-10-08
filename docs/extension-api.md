@@ -85,7 +85,7 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 | `refresh( { counts? } )` | refetches the current page (and counts) |
 | `patchItems( [ { id, …partial } ] )` | merges partial rows into every cached list without a request (for optimistic updates) |
 | `batchUpdate( { products?, variations? }, { source? } )` | saves through the bulk-edit path: variations first (per parent), then parents, under one batch id, logged; resolves `{ updated, errors, batchId }` |
-| `notices.success / error / info( message, options? )` | snackbar (default) or panel notices |
+| `notices.success / error / info( message, options? )` | snackbar (default) or panel notices; `options.actions` (e.g. an Undo) keeps the snackbar on screen until dismissed (always: core/notices cannot express an opt-out), `explicitDismiss: true` keeps one without actions too |
 | `getItems()` | the rows currently on screen, parents and expanded variations in display order (placeholder rows excluded; empty before the Catalog mounts and on the History screen) |
 | `hooks` | `wp.hooks` plus the names: `hooks.filters.query`, `hooks.actions.loaded`, `hooks.hookNamespace( 'my-plugin' )` |
 
@@ -155,7 +155,7 @@ Names are exported from `resources/extensions/hooks.ts` and available as `api.ho
 | Action | Payload |
 | --- | --- |
 | `wcProductsList.ready` | `api` |
-| `wcProductsList.loaded` | `items, { tab, view, total }` |
+| `wcProductsList.loaded` | `items, { tab, view, total }` — once per completed list request; optimistic patches (a save, a trash) do not fire it |
 | `wcProductsList.saved` | `{ updated, errors, batchId }, { source }` |
 | `wcProductsList.deleted` | `ids, { action: 'trash' | 'delete', batchId }` |
 
