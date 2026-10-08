@@ -60,20 +60,23 @@ jobs:
       - name: Build is committed
         run: git diff --exit-code build/
 
-      # dataviews' /wp entry inlines its own @wordpress/components, which is
-      # most of the 1.9 MB (380 KB gzipped). Lazy-load edit/ before raising this.
+      # dataviews' /wp entry inlines its own @wordpress/components (with
+      # date-fns, react-day-picker, @base-ui, ariakit, framer-motion), which is
+      # ~1.95 MB of the 2.1 MB (420 KB gzipped); the plugin's own code is
+      # ~100 KB minified. edit/ and history/ are already lazy chunks. Raise
+      # only with a note of what grew.
       - name: Size budget
         run: |
           size=$(wc -c < build/index.js)
           echo "build/index.js: $size bytes"
-          test "$size" -le 2097152
+          test "$size" -le 2306867
 
   integration:
     runs-on: ubuntu-latest
-    # Boots WordPress and WooCommerce in wp-env. Allowed to fail while the
-    # suite is being built up; flip continue-on-error once it is stable.
+    # Boots WordPress and WooCommerce in wp-env. Blocking: the suite is
+    # the only check of the REST hooks the plugin is built on.
     timeout-minutes: 20
-    continue-on-error: true
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
 

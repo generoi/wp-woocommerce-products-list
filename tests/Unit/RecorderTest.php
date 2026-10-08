@@ -132,6 +132,55 @@ class RecorderTest extends TestCase
         $this->assertSame(['se' => ['name' => 'Saga', 'sale_price' => ''], 'en' => ['name' => 'Boot']], $body['i18n']);
     }
 
+    public function test_passwords_are_logged_as_a_marker_not_a_value(): void
+    {
+        $this->assertNull(Recorder::mask(null));
+        $this->assertSame('', Recorder::mask(''));
+
+        $masked = Recorder::mask('open sesame');
+        $this->assertStringStartsWith(Recorder::MASK_PREFIX, $masked);
+        $this->assertSame(11, strlen($masked));
+        $this->assertStringNotContainsString('sesame', $masked);
+        // Same input, same marker; another input, another marker: a change still yields a row.
+        $this->assertSame($masked, Recorder::mask('open sesame'));
+        $this->assertNotSame($masked, Recorder::mask('open sesam'));
+
+        $this->assertTrue(Recorder::isMasked('post_password'));
+        $this->assertFalse(Recorder::isMasked('name'));
+        $this->assertContains('post_password', Recorder::MASKED_KEYS);
+    }
+
+    public function test_revert_plan_skips_masked_fields(): void
+    {
+        $plan = Revert::plan([
+            ['id' => 1, 'object_type' => 'product', 'object_id' => 10, 'parent_id' => 0, 'action' => 'update', 'status' => 'ok', 'field' => 'post_password', 'old_value' => '', 'new_value' => '***abcdef12'],
+            ['id' => 2, 'object_type' => 'product', 'object_id' => 11, 'parent_id' => 0, 'action' => 'update', 'status' => 'ok', 'field' => 'post_password', 'old_value' => '***abcdef12', 'new_value' => ''],
+            ['id' => 3, 'object_type' => 'product', 'object_id' => 11, 'parent_id' => 0, 'action' => 'update', 'status' => 'ok', 'field' => 'name', 'old_value' => 'A', 'new_value' => 'B'],
+        ]);
+
+        // Nothing is ever posted back for the password; 11 is still reverted for its name.
+        $this->assertSame([11 => ['name' => 'A']], $plan['products']);
+        $this->assertSame([['id' => 10, 'object_type' => 'product', 'action' => 'masked']], $plan['skipped']);
+    }
+
+    public function test_revert_body_deletes_meta_that_did_not_exist_before(): void
+    {
+        $body = Revert::body(10, [
+            'meta_data._added' => null,
+            'meta_data._emptied' => '',
+            'meta_data._changed' => 'before',
+        ]);
+
+        $this->assertSame([
+            ['key' => '_added', 'value' => null],
+            ['key' => '_emptied', 'value' => ''],
+            ['key' => '_changed', 'value' => 'before'],
+        ], $body['meta_data']);
+
+        // Top-level fields still clear with '' (how wc/v3 clears a price or a date).
+        $this->assertSame('', Revert::body(10, ['sale_price' => null])['sale_price']);
+    }
+
     public function test_revert_decode_leaves_non_json_strings_alone(): void
     {
         $this->assertSame('[not json', Revert::decode('[not json'));

@@ -58,6 +58,13 @@ final class Revert
                 continue;
             }
 
+            // The log holds a marker of the old value, not the value.
+            if (Recorder::isMasked($field)) {
+                $skipped[$type.':'.$id] ??= ['id' => $id, 'object_type' => $type, 'action' => 'masked'];
+
+                continue;
+            }
+
             $old = isset($row['old_value']) ? (string) $row['old_value'] : null;
 
             if ($type === 'variation') {
@@ -96,6 +103,10 @@ final class Revert
      * values. `meta_data.{key}` rows become `meta_data` entries, nested
      * extension paths are rebuilt, everything else is a top-level key.
      *
+     * A meta key whose old value is null did not exist before the change:
+     * its entry carries `value: null`, which WC_Data turns into a delete of
+     * the key on save, where `''` would leave an empty row behind.
+     *
      * @param  array<string, ?string>  $fields
      * @return array<string, mixed>
      */
@@ -108,7 +119,10 @@ final class Revert
             $value = self::decode($stored);
 
             if ($segments[0] === 'meta_data') {
-                $body['meta_data'][] = ['key' => implode('.', array_slice($segments, 1)), 'value' => $value];
+                $body['meta_data'][] = [
+                    'key' => implode('.', array_slice($segments, 1)),
+                    'value' => $stored === null ? null : $value,
+                ];
 
                 continue;
             }
@@ -176,13 +190,15 @@ final class Revert
                 'id' => $item['id'],
                 'ok' => false,
                 'code' => 'skipped',
-                'message' => $item['action'] === 'delete'
-                    ? __('Permanently deleted products cannot be restored.', 'wp-woocommerce-products-list')
-                    : sprintf(
+                'message' => match ($item['action']) {
+                    'delete' => __('Permanently deleted products cannot be restored.', 'wp-woocommerce-products-list'),
+                    'masked' => __('Passwords are not stored in the log and cannot be reverted.', 'wp-woocommerce-products-list'),
+                    default => sprintf(
                         /* translators: %s: action name */
                         __('"%s" rows are not reverted.', 'wp-woocommerce-products-list'),
                         $item['action']
                     ),
+                },
             ];
         }
 

@@ -184,7 +184,8 @@ final class ActionsController
         $fail = static function (string $code, string $message) use ($id, $base): array {
             return [
                 ['id' => $id, 'ok' => false, 'code' => $code, 'message' => $message],
-                [$base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'error', 'message' => $message, 'context' => $base['context'] + ['code' => $code]]],
+                // array_merge, not +: the row's context carries the code on top of the base context.
+                [array_merge($base, ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'error', 'message' => $message, 'context' => $base['context'] + ['code' => $code]])],
                 null,
             ];
         };
@@ -245,9 +246,18 @@ final class ActionsController
     }
 
     /**
-     * The current wc/v3 rows (list-mode shape) of the ids that still exist,
-     * in one list request per status group: a trashed product is only found
-     * with `status=trash`, and variations live under their parent.
+     * The current wc/v3 rows (list-mode shape) of the ids that still exist.
+     *
+     * Products: one list request per status group (a trashed product is
+     * only found with `status=trash`), at most one per status. Variations
+     * live under their parent, and wc/v3 has no cross-parent list, so a
+     * request per (parent, status) could mean a hundred nested requests
+     * for "select all variations" across a page; instead each variation
+     * is serialised directly by the wc/v3 variations controller, with one
+     * request object per parent that is never dispatched. Same rows, same
+     * hooks (`woocommerce_rest_prepare_product_variation_object`, so the
+     * list-mode enrichment and the integrations' keys apply), no query
+     * per group. Cost is bounded by the number of ids.
      *
      * @param  array<int, int>  $ids
      * @return array<int, mixed>
@@ -260,7 +270,8 @@ final class ActionsController
 
         _prime_post_caches($ids, false, false);
 
-        $groups = [];
+        $byStatus = [];
+        $variations = [];
 
         foreach ($ids as $id) {
             $post = get_post($id);
@@ -269,43 +280,88 @@ final class ActionsController
                 continue;
             }
 
-            $parent = $post->post_type === 'product_variation' ? (int) $post->post_parent : 0;
-            $groups[$parent][$post->post_status][] = $id;
+            if ($post->post_type === 'product_variation') {
+                $variations[(int) $post->post_parent][] = $id;
+            } else {
+                $byStatus[$post->post_status][] = $id;
+            }
         }
 
         $items = [];
 
-        foreach ($groups as $parent => $byStatus) {
-            foreach ($byStatus as $status => $groupIds) {
-                $route = $parent > 0 ? '/wc/v3/products/'.$parent.'/variations' : '/wc/v3/products';
+        foreach ($byStatus as $status => $groupIds) {
+            $request = new WP_REST_Request('GET', '/wc/v3/products');
+            $request->set_header(ListMode::HEADER, '1');
+            $request->set_query_params(array_filter([
+                'include' => $groupIds,
+                'status' => $status,
+                'per_page' => Bootstrap::PER_PAGE_MAX,
+                'image_size' => 'thumbnail',
+                '_fields' => $fields,
+            ]));
 
-                $request = new WP_REST_Request('GET', $route);
-                $request->set_header(ListMode::HEADER, '1');
-                $request->set_query_params(array_filter([
-                    'include' => $groupIds,
-                    'status' => $status,
-                    'per_page' => Bootstrap::PER_PAGE_MAX,
-                    'image_size' => 'thumbnail',
-                    '_fields' => $fields,
-                ]));
+            $response = rest_do_request($request);
 
-                $response = rest_do_request($request);
+            if ($response->is_error()) {
+                continue;
+            }
 
-                if ($response->is_error()) {
-                    continue;
-                }
-
-                // get_data(), not response_to_data(): the rows without _links.
-                // wc/v3 skips the fields it is not asked for, but keys that
-                // filters add (brands, i18n, wc_products_list) still need trimming.
-                foreach ((array) $response->get_data() as $row) {
-                    if (is_array($row)) {
-                        $items[] = Rows::trim($row, $fields);
-                    }
+            // get_data(), not response_to_data(): the rows without _links.
+            // wc/v3 skips the fields it is not asked for, but keys that
+            // filters add (brands, i18n, wc_products_list) still need trimming.
+            foreach ((array) $response->get_data() as $row) {
+                if (is_array($row)) {
+                    $items[] = Rows::trim($row, $fields);
                 }
             }
         }
 
+        foreach ($this->variationRows($variations, $fields) as $row) {
+            $items[] = $row;
+        }
+
         return $items;
+    }
+
+    /**
+     * @param  array<int, array<int, int>>  $byParent  variation ids per parent id
+     * @return array<int, array<string, mixed>>
+     */
+    private function variationRows(array $byParent, ?string $fields): array
+    {
+        if ($byParent === []) {
+            return [];
+        }
+
+        $controller = new \WC_REST_Product_Variations_Controller;
+        $rows = [];
+
+        foreach ($byParent as $parent => $ids) {
+            $request = new WP_REST_Request('GET', '/wc/v3/products/'.$parent.'/variations');
+            $request->set_header(ListMode::HEADER, '1');
+            $request->set_url_params(['product_id' => $parent]);
+            $request->set_query_params(array_filter([
+                'product_id' => $parent,
+                'context' => 'view',
+                'image_size' => 'thumbnail',
+                '_fields' => $fields,
+            ]));
+
+            foreach ($ids as $id) {
+                $variation = wc_get_product($id);
+
+                if (! $variation instanceof WC_Product_Variation) {
+                    continue;
+                }
+
+                $row = $controller->prepare_object_for_response($variation, $request)->get_data();
+
+                if (is_array($row)) {
+                    $rows[] = Rows::trim($row, $fields);
+                }
+            }
+        }
+
+        return $rows;
     }
 }

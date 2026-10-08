@@ -5,6 +5,8 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Prune;
 use GeneroWP\ProductsList\Log\Table;
+use GeneroWP\ProductsList\Modules\Log;
+use GeneroWP\ProductsList\Plugin;
 
 /**
  * The log table, the logger and GET /log, GET /log/batches.
@@ -24,6 +26,107 @@ class LogTest extends RestTestCase
         // Idempotent.
         Table::install();
         $this->assertTrue(Table::exists());
+    }
+
+    /**
+     * @return array<int, string> the queries run while `$run` executes that match `$pattern`
+     */
+    private function queriesMatching(string $pattern, callable $run): array
+    {
+        $seen = [];
+        $filter = static function (string $query) use (&$seen, $pattern): string {
+            if (preg_match($pattern, $query)) {
+                $seen[] = $query;
+            }
+
+            return $query;
+        };
+
+        add_filter('query', $filter);
+        $run();
+        remove_filter('query', $filter);
+
+        return $seen;
+    }
+
+    public function test_upgrade_is_a_version_compare_on_the_hot_path(): void
+    {
+        // Installed: no SHOW TABLES, no dbDelta (which starts with SHOW TABLES and DESCRIBE).
+        $queries = $this->queriesMatching('/SHOW TABLES|DESCRIBE|CREATE TABLE|ALTER TABLE/i', static function (): void {
+            Table::maybeInstall();
+            (new Log)->maybeUpgrade();
+        });
+        $this->assertSame([], $queries);
+
+        // A plugin update bumped the schema version: dbDelta runs once and the option follows.
+        update_option(Table::OPTION, '0');
+        $this->assertFalse(Table::installed());
+
+        $queries = $this->queriesMatching('/DESCRIBE|CREATE TABLE|ALTER TABLE/i', static function (): void {
+            Table::maybeInstall();
+        });
+        $this->assertNotSame([], $queries);
+        $this->assertSame(Table::VERSION, get_option(Table::OPTION));
+        $this->assertTrue(Table::installed());
+        $this->assertTrue(Table::exists());
+    }
+
+    public function test_the_logger_recreates_a_missing_table_on_its_first_write(): void
+    {
+        global $wpdb;
+
+        // The test suite turns CREATE/DROP TABLE into temporary tables, which
+        // would leave the real table in place; the real one has to go.
+        remove_filter('query', [$this, '_create_temporary_tables']);
+        remove_filter('query', [$this, '_drop_temporary_tables']);
+
+        try {
+            // The option says installed, the table is gone (a restore from an older dump).
+            $wpdb->query('DROP TABLE IF EXISTS '.Table::name()); // phpcs:ignore
+            $this->assertFalse(Table::exists());
+            $this->healAndAssert();
+        } finally {
+            Table::install();
+            add_filter('query', [$this, '_create_temporary_tables']);
+            add_filter('query', [$this, '_drop_temporary_tables']);
+        }
+    }
+
+    private function healAndAssert(): void
+    {
+        global $wpdb;
+
+        $this->assertTrue(Table::installed());
+        $this->assertTrue(Logger::tableIsMissing("Table 'wp_tests.".Table::name()."' doesn't exist"));
+        $this->assertFalse(Logger::tableIsMissing('Duplicate entry'));
+
+        // The first INSERT fails (that is the point); its error must not be printed.
+        $suppressed = $wpdb->suppress_errors();
+        $this->seed([['batch_id' => 'healed', 'object_id' => 1, 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b']]);
+        $wpdb->suppress_errors($suppressed);
+
+        $this->assertTrue(Table::exists());
+        $table = Table::name();
+        $this->assertSame(['healed'], $wpdb->get_col("SELECT batch_id FROM {$table}")); // phpcs:ignore
+    }
+
+    public function test_prune_is_unscheduled_on_deactivation_and_rescheduled_in_the_admin(): void
+    {
+        Prune::schedule();
+        $this->assertNotFalse(wp_next_scheduled(Prune::HOOK));
+
+        do_action(Plugin::ACTION_DEACTIVATE);
+        $this->assertFalse(wp_next_scheduled(Prune::HOOK));
+
+        // Not an admin, cron or REST request: nothing happens.
+        (new Log)->maybeUpgrade();
+        $this->assertFalse(wp_next_scheduled(Prune::HOOK));
+
+        set_current_screen('dashboard');
+        $this->assertTrue(is_admin());
+        (new Log)->maybeUpgrade();
+        $this->assertNotFalse(wp_next_scheduled(Prune::HOOK));
+        $GLOBALS['current_screen'] = null;
     }
 
     /**
@@ -107,6 +210,25 @@ class LogTest extends RestTestCase
         $this->assertSame(['b2'], $ids(['since' => '2026-10-02', 'until' => '2026-10-06']));
         $this->assertSame(['b1'], $ids(['search' => 'saga']));
         $this->assertSame([], $ids(['search' => '100%']));
+    }
+
+    public function test_log_users_lists_who_made_changes(): void
+    {
+        $manager = self::factory()->user->create(['role' => 'shop_manager', 'display_name' => 'Aino Manager']);
+        $this->seed([
+            ['batch_id' => 'b1', 'object_id' => 1, 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b'],
+            ['batch_id' => 'b2', 'object_id' => 2, 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b', 'user_id' => $manager],
+            ['batch_id' => 'b3', 'object_id' => 3, 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b', 'user_id' => $manager],
+            ['batch_id' => 'b4', 'object_id' => 4, 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b', 'user_id' => 0],
+        ]);
+
+        $response = $this->request('GET', '/wc-products-list/v1/log/users');
+        $this->assertStatus(200, $response);
+
+        $users = $this->data($response);
+        $this->assertEqualsCanonicalizing([get_current_user_id(), $manager], array_column($users, 'id'));
+        $this->assertSame('Aino Manager', $users[0]['name']);
+        $this->assertSame(wp_get_current_user()->display_name, $users[1]['name']);
     }
 
     public function test_log_paginates_and_caps_per_page(): void

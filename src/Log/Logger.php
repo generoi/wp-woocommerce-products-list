@@ -173,10 +173,6 @@ final class Logger
         $rows = self::$buffer;
         self::$buffer = [];
 
-        if (! Table::exists()) {
-            Table::install();
-        }
-
         foreach (array_chunk($rows, self::INSERT_CHUNK) as $chunk) {
             self::insert($chunk);
         }
@@ -199,9 +195,14 @@ final class Logger
     }
 
     /**
+     * One multi-row INSERT. The table is not checked for beforehand (that
+     * would be a SHOW TABLES on every write request): when the INSERT
+     * fails because the table is gone, it is created and the INSERT runs
+     * once more.
+     *
      * @param  array<int, Row>  $rows
      */
-    private static function insert(array $rows): void
+    private static function insert(array $rows, bool $retry = true): void
     {
         global $wpdb;
 
@@ -234,9 +235,33 @@ final class Logger
         // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
         $result = $wpdb->query($wpdb->prepare($sql, $values));
 
-        if ($result === false && function_exists('wc_get_logger')) {
+        if ($result !== false) {
+            return;
+        }
+
+        if ($retry && self::tableIsMissing((string) $wpdb->last_error)) {
+            Table::install();
+            self::insert($rows, false);
+
+            return;
+        }
+
+        if (function_exists('wc_get_logger')) {
             wc_get_logger()->error('Could not write change log rows: '.$wpdb->last_error, ['source' => self::WC_LOG_SOURCE]);
         }
+    }
+
+    /**
+     * Whether a database error says the log table does not exist. MySQL
+     * and MariaDB: error 1146 "Table '…' doesn't exist".
+     */
+    public static function tableIsMissing(string $error): bool
+    {
+        return $error !== '' && (
+            stripos($error, "doesn't exist") !== false
+            || stripos($error, 'does not exist') !== false
+            || str_contains($error, '1146')
+        ) && stripos($error, Table::name()) !== false;
     }
 
     /**

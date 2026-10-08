@@ -37,6 +37,8 @@ class ListQueryTest extends TestCase
         $this->assertSame(1.0, $vars['min_stock']);
         $this->assertSame(10.5, $vars['max_stock']);
         $this->assertTrue($vars['has_variations']);
+        $this->assertNull($vars['sale_scheduled']);
+        $this->assertTrue(ListQuery::vars(['sale_scheduled' => 'true'])['sale_scheduled']);
         $this->assertSame('sku', $vars['orderby']);
     }
 
@@ -86,7 +88,7 @@ class ListQueryTest extends TestCase
         $params = ListQuery::params();
 
         $this->assertSame(
-            ['tab', 'brand', 'exclude_category', 'exclude_tag', 'min_stock_quantity', 'max_stock_quantity', 'has_variations'],
+            ['tab', 'brand', 'exclude_category', 'exclude_tag', 'min_stock_quantity', 'max_stock_quantity', 'has_variations', 'sale_scheduled'],
             array_keys($params)
         );
         $this->assertSame(ListQuery::TABS, $params['tab']['enum']);

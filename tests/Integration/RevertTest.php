@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Tests\Integration;
 
+use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Registry;
@@ -168,6 +169,61 @@ class RevertTest extends RestTestCase
         $this->assertFalse($reverted->get_manage_stock());
         $this->assertNull($reverted->get_stock_quantity());
         $this->assertSame('', $reverted->get_meta('_custom'));
+    }
+
+    public function test_reverting_a_change_that_created_a_meta_key_removes_the_key(): void
+    {
+        $product = $this->simpleProduct();
+        update_post_meta($product->get_id(), '_had_value', 'before');
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), [
+            'meta_data' => [['key' => '_note', 'value' => 'audit note'], ['key' => '_had_value', 'value' => 'after']],
+        ]));
+
+        $fields = array_column($this->rows($this->batchId()), 'old_value', 'field');
+        $this->assertNull($fields['meta_data._note']);
+        $this->assertSame('before', $fields['meta_data._had_value']);
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+
+        $this->assertFalse(metadata_exists('post', $product->get_id(), '_note'));
+        $this->assertSame('before', get_post_meta($product->get_id(), '_had_value', true));
+
+        // The revert's own row records the removal.
+        $reverted = array_column($this->rows($data['batch_id']), 'new_value', 'field');
+        $this->assertNull($reverted['meta_data._note']);
+    }
+
+    public function test_passwords_are_masked_in_the_log_and_not_reverted(): void
+    {
+        $product = $this->simpleProduct();
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['post_password' => 'open sesame', 'regular_price' => '150']));
+        $this->assertSame('open sesame', get_post($product->get_id())->post_password);
+
+        $rows = array_column($this->rows($this->batchId()), null, 'field');
+        $this->assertSame('', $rows['post_password']['old_value']);
+        $this->assertStringStartsWith('***', $rows['post_password']['new_value']);
+        $this->assertStringNotContainsString('sesame', wp_json_encode($rows));
+
+        $list = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId()]));
+        $this->assertStringNotContainsString('sesame', wp_json_encode($list));
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+        $this->assertSame('189', wc_get_product($product->get_id())->get_regular_price());
+        // The price came back, the password stayed as it is.
+        $this->assertSame('open sesame', get_post($product->get_id())->post_password);
+        $this->assertArrayNotHasKey('post_password', array_column($this->rows($data['batch_id']), null, 'field'));
+
+        // A batch with only a password change is reported as skipped.
+        $batch = wp_generate_uuid4();
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['post_password' => 'other'], [ListMode::BATCH_HEADER => $batch]));
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$batch.'/revert'));
+        $this->assertSame('skipped', $data['results'][0]['code']);
+        $this->assertStringContainsString('Passwords', $data['results'][0]['message']);
+        $this->assertSame('other', get_post($product->get_id())->post_password);
     }
 
     public function test_errors_are_reported_per_object_and_unknown_batches_are_404(): void

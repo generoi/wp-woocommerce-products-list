@@ -194,6 +194,65 @@ class SaveHookTest extends RestTestCase
         $this->assertSame('true', $fields['manage_stock']);
     }
 
+    /**
+     * A batch response carries the whole object of every item; with
+     * `fields` on the batch request each item row is trimmed to what the
+     * app shows, `id` always included. Errors are untouched.
+     */
+    public function test_batch_item_rows_are_trimmed_to_fields(): void
+    {
+        $a = $this->simpleProduct(['sku' => 'A']);
+        $b = $this->simpleProduct(['sku' => 'B']);
+        $taken = $this->simpleProduct(['sku' => 'TAKEN']);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [
+                ['id' => $a->get_id(), 'sale_price' => '149'],
+                ['id' => $b->get_id(), 'sku' => 'TAKEN'],
+            ],
+        ], [], ['fields' => 'sale_price,price,wc_products_list.can_edit']);
+        $this->assertStatus(200, $response);
+
+        $data = $this->data($response);
+        $this->assertCount(2, $data['update']);
+
+        $row = $data['update'][0];
+        $this->assertSame(['id', 'price', 'sale_price', 'wc_products_list'], array_values(array_intersect(['id', 'price', 'sale_price', 'wc_products_list'], array_keys($row))));
+        $this->assertSame($a->get_id(), $row['id']);
+        $this->assertSame('149', $row['sale_price']);
+        $this->assertArrayNotHasKey('name', $row);
+        $this->assertArrayNotHasKey('description', $row);
+        $this->assertArrayNotHasKey('meta_data', $row);
+        // A nested path keeps its top-level key whole, as Rows::trim() documents.
+        $this->assertTrue($row['wc_products_list']['can_edit']);
+        $this->assertArrayNotHasKey('brands', $row);
+        // WooCommerce adds `_links` to every collection item after the row filters.
+        $this->assertSame(['id', 'price', 'sale_price', 'wc_products_list'], array_values(array_diff(array_keys($row), ['_links'])));
+
+        $error = $data['update'][1];
+        $this->assertSame($b->get_id(), $error['id']);
+        $this->assertSame('product_invalid_sku', $error['error']['code']);
+
+        // Without `fields` the rows are whole, as WooCommerce returns them.
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $a->get_id(), 'sale_price' => '139']]]);
+        $row = $this->data($response)['update'][0];
+        $this->assertArrayHasKey('name', $row);
+        $this->assertArrayHasKey('description', $row);
+
+        // Variations batch, the same way.
+        $parent = $this->variableProduct(['38']);
+        $response = $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', [
+            'update' => [['id' => $parent->get_children()[0], 'sale_price' => '99']],
+        ], [], ['fields' => 'sale_price,parent_id']);
+        $row = $this->data($response)['update'][0];
+        $this->assertSame(['id', 'sale_price', 'parent_id'], array_values(array_diff(array_keys($row), ['_links'])));
+        $this->assertSame($parent->get_id(), $row['parent_id']);
+
+        // A single write is core's business (`_fields`), not trimmed by `fields`.
+        $response = $this->request('POST', '/wc/v3/products/'.$a->get_id(), ['sale_price' => '129'], [], ['fields' => 'sale_price']);
+        $this->assertArrayHasKey('name', $this->data($response));
+    }
+
     public function test_no_op_writes_produce_no_rows(): void
     {
         $product = $this->simpleProduct(['sku' => 'SAME']);

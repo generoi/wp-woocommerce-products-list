@@ -26,15 +26,105 @@ final class Rows
 
     public const FILTER_ROW = 'wc_products_list/row';
 
+    public const BRANDS_FILTER = 'woocommerce_rest_prepare_product_object';
+
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */
     private static ?WeakMap $fields = null;
+
+    /** @var callable|null WooCommerce Brands' own response callback, once taken over */
+    private $brandsCallback = null;
 
     public function register(): void
     {
         add_filter('woocommerce_rest_prepare_product_object', [$this, 'enrich'], 10, 3);
         add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'enrich'], 10, 3);
+        // Late: after every other row filter (brands, integrations) has added its keys.
+        add_filter('woocommerce_rest_prepare_product_object', [$this, 'trimBatchItem'], 1000, 3);
+        add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_product_get_gallery_image_ids', [$this, 'dropGallery'], 10, 2);
         add_action('rest_api_init', [$this, 'registerSchema']);
+
+        // WC_Brands registers its hooks on plugins_loaded at 11.
+        add_action('plugins_loaded', [$this, 'takeOverBrands'], 20);
+    }
+
+    /**
+     * WooCommerce Brands adds `brands` to every product response with
+     * `wp_get_post_terms()`, which bypasses the object term cache: two
+     * queries per product, on every page, whether or not the request asked
+     * for brands (`_fields`). On a 100-row list page that is 200 of the
+     * ~360 queries. Its callback is replaced by one that, in list mode,
+     * respects `_fields` and reads the terms the list query already primed;
+     * every other request still gets WooCommerce's own callback.
+     */
+    public function takeOverBrands(): void
+    {
+        $callback = self::findBrandsCallback();
+
+        if ($callback === null) {
+            return;
+        }
+
+        remove_filter(self::BRANDS_FILTER, $callback, 10);
+        $this->brandsCallback = $callback;
+        add_filter(self::BRANDS_FILTER, [$this, 'brands'], 10, 3);
+    }
+
+    /**
+     * @param  WP_REST_Response|mixed  $response
+     * @param  WC_Product|mixed  $product
+     * @param  WP_REST_Request|mixed  $request
+     * @return WP_REST_Response|mixed
+     */
+    public function brands($response, $product, $request = null)
+    {
+        if (! ListMode::active() || ListMode::method() !== 'GET' || ! $response instanceof WP_REST_Response || ! $request instanceof WP_REST_Request) {
+            return $this->brandsCallback !== null ? call_user_func($this->brandsCallback, $response, $product) : $response;
+        }
+
+        if (! self::includes('brands', $request)) {
+            return $response;
+        }
+
+        $data = $response->get_data();
+
+        if (! is_array($data) || ! empty($data['brands']) || ! $product instanceof WC_Product) {
+            return $response;
+        }
+
+        $terms = get_the_terms($product->get_id(), 'product_brand');
+        $data['brands'] = [];
+
+        foreach (is_array($terms) ? $terms : [] as $term) {
+            $data['brands'][] = ['id' => (int) $term->term_id, 'name' => (string) $term->name, 'slug' => (string) $term->slug];
+        }
+
+        $response->set_data($data);
+
+        return $response;
+    }
+
+    /**
+     * The `[WC_Brands, 'rest_api_prepare_brands_to_product']` callback on
+     * the product response filter, if WooCommerce registered one.
+     */
+    private static function findBrandsCallback(): ?callable
+    {
+        $hook = $GLOBALS['wp_filter'][self::BRANDS_FILTER] ?? null;
+
+        if (! $hook instanceof \WP_Hook) {
+            return null;
+        }
+
+        foreach ($hook->callbacks[10] ?? [] as $registered) {
+            $function = $registered['function'];
+
+            if (is_array($function) && is_object($function[0]) && $function[0] instanceof \WC_Brands && $function[1] === 'rest_api_prepare_brands_to_product') {
+                return $function;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -137,6 +227,50 @@ final class Rows
         $data = apply_filters(self::FILTER_ROW, $data, $product, $request);
 
         $response->set_data($data);
+
+        return $response;
+    }
+
+    /**
+     * A batch response returns the full wc/v3 object of every item it
+     * wrote (a 50-product chunk is over a megabyte, most of it
+     * descriptions, meta and attributes the app never reads), and core's
+     * `_fields` cannot reach into `{update: [...]}`. On list-mode batch
+     * writes the app names the row fields it wants in `fields` (as for
+     * the actions route), and each item row is trimmed to them here, `id`
+     * always kept. Single writes are left to core's `_fields`. WooCommerce
+     * adds `_links` to each item after this; the app ignores it.
+     *
+     * @param  WP_REST_Response|mixed  $response
+     * @param  WC_Product|mixed  $product
+     * @param  WP_REST_Request|mixed  $request
+     * @return WP_REST_Response|mixed
+     */
+    public function trimBatchItem($response, $product, $request)
+    {
+        if (! $response instanceof WP_REST_Response || ! $request instanceof WP_REST_Request || ! ListMode::active()) {
+            return $response;
+        }
+
+        $outer = ListMode::request();
+
+        // The outer request is the one being dispatched; a batch item's
+        // request is a different object, built by WooCommerce per item.
+        if ($outer === null || $outer === $request || $outer->get_method() === 'GET') {
+            return $response;
+        }
+
+        $fields = $outer->get_param('fields');
+
+        if (! is_string($fields) || trim($fields) === '') {
+            return $response;
+        }
+
+        $data = $response->get_data();
+
+        if (is_array($data)) {
+            $response->set_data(self::trim($data, $fields.',id'));
+        }
 
         return $response;
     }

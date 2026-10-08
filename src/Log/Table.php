@@ -37,14 +37,21 @@ final class Table
         return $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) === $table;
     }
 
+    /**
+     * Whether the stored schema version is the current one. A string
+     * compare on an autoloaded option, nothing more: this runs on every
+     * admin, REST and cron request. A table that went missing behind a
+     * current version is recreated by the logger on its first failed
+     * INSERT (`Logger::insert()`); `exists()` is for installs and tests.
+     */
     public static function installed(): bool
     {
-        return get_option(self::OPTION) === self::VERSION && self::exists();
+        return get_option(self::OPTION) === self::VERSION;
     }
 
     /**
      * Create or upgrade the table. Safe to call on every request; it only
-     * runs dbDelta when the version differs or the table is missing.
+     * runs dbDelta when the version differs.
      */
     public static function maybeInstall(): void
     {

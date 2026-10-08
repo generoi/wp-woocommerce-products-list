@@ -48,8 +48,38 @@ final class Recorder
         'grouped_products', 'menu_order', 'post_password', 'cost_of_goods_sold',
     ];
 
+    /**
+     * Fields whose value is never stored, only a marker of it. The log is
+     * readable by everyone with the list capability; a product password
+     * is not for them. `mask()` keeps two different values distinguishable
+     * so a change still yields a row, but nothing can be read back from it,
+     * and a revert skips the field.
+     */
+    public const MASKED_KEYS = ['post_password'];
+
+    public const MASK_PREFIX = '***';
+
     /** @var array<int, Pending> keyed by spl_object_id of the request */
     private static array $pending = [];
+
+    /**
+     * The stored form of a sensitive value: empty stays empty (so "no
+     * password" reads as such), anything else is a fixed-length marker
+     * derived from the value with a one-way hash.
+     */
+    public static function mask(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return $value;
+        }
+
+        return self::MASK_PREFIX.substr(hash('sha256', $value), 0, 8);
+    }
+
+    public static function isMasked(string $path): bool
+    {
+        return in_array($path, self::MASKED_KEYS, true);
+    }
 
     /**
      * The field paths a request body touches.
@@ -392,7 +422,8 @@ final class Recorder
         $values = [];
 
         foreach ($paths as $path) {
-            $values[$path] = self::serialize(self::read($product, $path));
+            $value = self::serialize(self::read($product, $path));
+            $values[$path] = self::isMasked($path) ? self::mask($value) : $value;
         }
 
         return $values;
@@ -409,7 +440,9 @@ final class Recorder
         if ($key === 'meta_data') {
             $metaKey = implode('.', array_slice($segments, 1));
             $meta = $product->get_meta($metaKey, false);
-            $values = array_map(static fn ($item) => $item->value, is_array($meta) ? $meta : []);
+            // array_values: get_meta() keeps the keys of the object's meta
+            // list, which has gaps once a key was deleted.
+            $values = array_values(array_map(static fn ($item) => $item->value, is_array($meta) ? $meta : []));
 
             return match (count($values)) {
                 0 => null,

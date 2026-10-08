@@ -55,7 +55,8 @@ final class Registry
 
     public const ACTION_SCOPES = ['product', 'variation', 'both'];
 
-    public const ARG_TYPES = ['text', 'select', 'boolean', 'integer', 'number'];
+    /** `array` renders as a checkbox group over `options` and posts a list. */
+    public const ARG_TYPES = ['text', 'select', 'boolean', 'integer', 'number', 'array'];
 
     /** The DataViews filter operators. Unknown ones are dropped; none left means `is`. */
     public const OPERATORS = [

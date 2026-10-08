@@ -125,6 +125,36 @@ class ListTest extends RestTestCase
         $this->assertEqualsCanonicalizing([$variable, $childless, $simple], $this->ids([]));
     }
 
+    public function test_sale_scheduled_finds_products_and_parents_with_a_future_sale(): void
+    {
+        $nextWeek = (string) (time() + WEEK_IN_SECONDS);
+        $lastWeek = (string) (time() - WEEK_IN_SECONDS);
+
+        $scheduled = $this->simpleProduct(['sale_price' => '149', 'date_on_sale_from' => $nextWeek])->get_id();
+        $running = $this->simpleProduct(['sale_price' => '149', 'date_on_sale_from' => $lastWeek])->get_id();
+        $datesOnly = $this->simpleProduct(['date_on_sale_from' => $nextWeek])->get_id();
+        $plain = $this->simpleProduct()->get_id();
+
+        $variable = $this->variableProduct(['38', '39']);
+        $variations = $variable->get_children();
+        $scheduledVariation = wc_get_product($variations[0]);
+        $scheduledVariation->set_sale_price('99');
+        $scheduledVariation->set_date_on_sale_from($nextWeek);
+        $scheduledVariation->save();
+        $untouched = $this->variableProduct(['38'])->get_id();
+
+        $this->assertEqualsCanonicalizing([$scheduled, $variable->get_id()], $this->ids(['sale_scheduled' => 'true']));
+        $this->assertEqualsCanonicalizing([$running, $datesOnly, $plain, $untouched], $this->ids(['sale_scheduled' => 'false']));
+
+        // The variations route filters on the variation's own sale.
+        $response = $this->request('GET', "/wc/v3/products/{$variable->get_id()}/variations", ['_fields' => 'id', 'sale_scheduled' => 'true'], [ListMode::HEADER => '1']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([$variations[0]], array_map('intval', array_column($this->data($response), 'id')));
+
+        // Outside list mode the parameter is unknown and ignored.
+        $this->assertCount(6, $this->ids(['sale_scheduled' => 'true'], [ListMode::HEADER => '']));
+    }
+
     public function test_orderby_sku_stock_quantity_and_menu_order(): void
     {
         $b = $this->simpleProduct(['sku' => 'B-2', 'manage_stock' => true, 'stock_quantity' => 20, 'menu_order' => 3])->get_id();
@@ -289,6 +319,59 @@ class ListTest extends RestTestCase
 
         $response = $this->request('GET', '/wc/v3/products', ['include' => [$product->get_id()], '_fields' => 'id,wc_products_list']);
         $this->assertArrayNotHasKey('i18n', $this->data($response)[0]);
+    }
+
+    /**
+     * WooCommerce Brands adds `brands` to every product response with a
+     * query per product that ignores the term cache and `_fields`; in list
+     * mode the plugin's callback respects both.
+     */
+    public function test_brands_are_not_queried_per_row_unless_asked(): void
+    {
+        if (! taxonomy_exists('product_brand') || ! class_exists(\WC_Brands::class)) {
+            $this->markTestSkipped('WooCommerce Brands is not loaded.');
+        }
+
+        $brand = wp_insert_term('Saga', 'product_brand');
+        $this->assertIsArray($brand);
+        $ids = [];
+
+        for ($i = 0; $i < 3; $i++) {
+            $product = $this->simpleProduct(['sku' => 'BRAND-'.$i]);
+            wp_set_object_terms($product->get_id(), [$brand['term_id']], 'product_brand');
+            $ids[] = $product->get_id();
+        }
+
+        $perRow = static fn (string $query): bool => (bool) preg_match('/taxonomy IN \(\'product_brand\'\)/', $query);
+        $seen = [];
+        add_filter('query', static function (string $query) use (&$seen, $perRow): string {
+            if ($perRow($query)) {
+                $seen[] = $query;
+            }
+
+            return $query;
+        });
+
+        // Not asked for: no key, no query.
+        $response = $this->request('GET', '/wc/v3/products', ['include' => $ids, '_fields' => 'id,name']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([], $seen);
+        $this->assertArrayNotHasKey('brands', $this->data($response)[0]);
+
+        // Asked for: names from the terms the list query primed.
+        $seen = [];
+        $response = $this->request('GET', '/wc/v3/products', ['include' => $ids, '_fields' => 'id,brands']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([], $seen);
+
+        foreach ($this->data($response) as $row) {
+            $this->assertSame([['id' => $brand['term_id'], 'name' => 'Saga', 'slug' => 'saga']], $row['brands']);
+        }
+
+        // Outside list mode WooCommerce's own callback still answers.
+        $response = $this->request('GET', '/wc/v3/products', ['include' => $ids, '_fields' => 'id,brands'], [ListMode::HEADER => '']);
+        $this->assertStatus(200, $response);
+        $this->assertSame('Saga', $this->data($response)[0]['brands'][0]['name']);
     }
 
     public function test_capabilities_follow_the_user(): void

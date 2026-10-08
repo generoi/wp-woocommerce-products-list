@@ -37,6 +37,12 @@ final class LogController
             ],
         ]);
 
+        register_rest_route(Plugin::REST_NAMESPACE, '/log/users', [
+            'methods' => 'GET',
+            'callback' => [$this, 'logUsers'],
+            'permission_callback' => $permission,
+        ]);
+
         register_rest_route(Plugin::REST_NAMESPACE, '/log/batches', [
             'methods' => 'GET',
             'callback' => [$this, 'batches'],
@@ -93,6 +99,21 @@ final class LogController
         $items = $this->formatRows(is_array($rows) ? $rows : []);
 
         return $this->paged($items, $total, $perPage);
+    }
+
+    /** The users with log rows, for the History screen's User filter: `[{id, name}]` sorted by name. */
+    public function logUsers(): WP_REST_Response
+    {
+        global $wpdb;
+
+        $table = Table::name();
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        $ids = $wpdb->get_col("SELECT DISTINCT user_id FROM {$table} WHERE user_id > 0");
+        $users = array_values($this->users(is_array($ids) ? $ids : []));
+
+        usort($users, static fn (array $a, array $b): int => strcasecmp((string) $a['name'], (string) $b['name']) ?: $a['id'] <=> $b['id']);
+
+        return rest_ensure_response($users);
     }
 
     public function batches(WP_REST_Request $request): WP_REST_Response

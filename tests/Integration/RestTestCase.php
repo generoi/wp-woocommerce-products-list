@@ -34,8 +34,9 @@ abstract class RestTestCase extends TestCase
      * @param  string  $route  e.g. '/wc/v3/products' or '/wc-products-list/v1/counts'
      * @param  array<string, mixed>  $params  query params for GET, body params otherwise
      * @param  array<string, string>  $headers  extra headers; `X-WC-Products-List: 1` is always set unless passed as ''
+     * @param  array<string, mixed>  $query  query params of a write (`fields`, `_fields`); ignored for GET, where `$params` are the query
      */
-    protected function request(string $method, string $route, array $params = [], array $headers = []): WP_REST_Response
+    protected function request(string $method, string $route, array $params = [], array $headers = [], array $query = []): WP_REST_Response
     {
         $request = new WP_REST_Request(strtoupper($method), $route);
 
@@ -55,6 +56,7 @@ abstract class RestTestCase extends TestCase
             $request->set_query_params($params);
         } else {
             $request->set_body_params($params);
+            $request->set_query_params($query);
         }
 
         return rest_do_request($request);

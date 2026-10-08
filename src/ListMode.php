@@ -37,9 +37,56 @@ final class ListMode
     /** @var array{0: ?bool, 1: ?string}|null */
     private static ?array $forced = null;
 
+    public const CACHE_KEY_PART = 'wc-products-list';
+
     public static function register(): void
     {
         add_filter('rest_request_before_callbacks', [self::class, 'capture'], 1, 3);
+        add_filter('woocommerce_rest_api_cache_key_info', [self::class, 'cacheKey'], 10, 2);
+    }
+
+    /**
+     * WooCommerce's REST response cache (the `rest_api_caching` feature)
+     * keys a products or variations response on route, method and query
+     * params, never on headers. A list-mode row carries the `wc_products_list`
+     * key, the integrations' keys, a trimmed gallery and the current user's
+     * capabilities, so such a response must not be served to another
+     * consumer, nor theirs to the app: in list mode the key gets a marker
+     * and the user.
+     *
+     * @param  mixed  $parts
+     * @param  mixed  $request
+     * @return mixed
+     */
+    public static function cacheKey($parts, $request = null)
+    {
+        if (! is_array($parts)) {
+            return $parts;
+        }
+
+        $active = $request instanceof WP_REST_Request
+            ? self::requestHasHeader($request)
+            : self::active();
+
+        if (! $active) {
+            return $parts;
+        }
+
+        $parts[] = self::CACHE_KEY_PART;
+        $parts[] = 'user_'.get_current_user_id();
+
+        return $parts;
+    }
+
+    private static function requestHasHeader(WP_REST_Request $request): bool
+    {
+        if (self::$forced !== null && self::$forced[0] !== null) {
+            return self::$forced[0];
+        }
+
+        $value = $request->get_header(self::HEADER);
+
+        return $value !== null && $value !== '' && $value !== '0';
     }
 
     /**
@@ -112,6 +159,15 @@ final class ListMode
         $value = $value === null ? null : strtolower(trim($value));
 
         return $value !== null && in_array($value, self::SOURCES, true) ? $value : 'quick';
+    }
+
+    /**
+     * The request being dispatched, or null outside REST dispatch. During
+     * `POST …/batch` this is the batch request, not its items.
+     */
+    public static function request(): ?WP_REST_Request
+    {
+        return self::$request;
     }
 
     /**

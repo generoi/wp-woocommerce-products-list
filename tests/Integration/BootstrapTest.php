@@ -124,6 +124,21 @@ class BootstrapTest extends RestTestCase
         $this->assertContains('menu_order', $variations['args']['orderby']['enum']);
     }
 
+    public function test_rest_response_cache_key_varies_on_list_mode(): void
+    {
+        $plain = new \WP_REST_Request('GET', '/wc/v3/products');
+        $this->assertSame(['route'], apply_filters('woocommerce_rest_api_cache_key_info', ['route'], $plain, false, null));
+
+        $list = new \WP_REST_Request('GET', '/wc/v3/products');
+        $list->set_header(ListMode::HEADER, '1');
+        $this->assertSame(
+            ['route', ListMode::CACHE_KEY_PART, 'user_'.get_current_user_id()],
+            apply_filters('woocommerce_rest_api_cache_key_info', ['route'], $list, false, null)
+        );
+
+        $this->assertSame('x', apply_filters('woocommerce_rest_api_cache_key_info', 'x', $list, false, null));
+    }
+
     public function test_source_header(): void
     {
         $seen = [];

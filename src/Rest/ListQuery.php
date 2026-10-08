@@ -12,7 +12,9 @@ use WP_REST_Request;
  * runs. Only in list mode; every other wc/v3 consumer sees the stock query.
  *
  * Products: `tab`, `brand`, `exclude_category`, `exclude_tag`,
- * `min_stock_quantity`, `max_stock_quantity`, `has_variations`, and
+ * `min_stock_quantity`, `max_stock_quantity`, `has_variations`,
+ * `sale_scheduled` (a sale price with a start date in the future, on the
+ * product or on one of its variations) and
  * `orderby=sku|stock_quantity|menu_order`. Stock and SKU live in
  * `wc_product_meta_lookup`, so those are one LEFT JOIN on the primary key
  * rather than a meta query. The join and the WHERE/ORDER BY pieces are added
@@ -70,6 +72,7 @@ final class ListQuery
      *     min_stock: ?float,
      *     max_stock: ?float,
      *     has_variations: ?bool,
+     *     sale_scheduled: ?bool,
      *     orderby: ?string,
      *     search: array<int, string>
      * }
@@ -88,6 +91,7 @@ final class ListQuery
             'min_stock' => self::number($params['min_stock_quantity'] ?? null),
             'max_stock' => self::number($params['max_stock_quantity'] ?? null),
             'has_variations' => self::bool($params['has_variations'] ?? null),
+            'sale_scheduled' => self::bool($params['sale_scheduled'] ?? null),
             'orderby' => $orderby !== null && in_array($orderby, self::ORDERBY, true) ? $orderby : null,
             'search' => array_values(array_filter(array_map('trim', explode(' ', $search)), static fn (string $token): bool => $token !== '')),
         ];
@@ -158,6 +162,7 @@ final class ListQuery
             'min_stock' => $vars['min_stock'],
             'max_stock' => $vars['max_stock'],
             'has_variations' => $vars['has_variations'],
+            'sale_scheduled' => $vars['sale_scheduled'],
             // menu_order is native to WP_Query (WooCommerce maps it to
             // `menu_order title`); sku and stock_quantity need the lookup table.
             'orderby' => in_array($vars['orderby'], ['sku', 'stock_quantity'], true) ? $vars['orderby'] : null,
@@ -188,6 +193,15 @@ final class ListQuery
     {
         if (! ListMode::active()) {
             return $args;
+        }
+
+        if (self::bool($request->get_param('sale_scheduled')) === true) {
+            // The variation's own sale: a price and a start in the future.
+            $args['meta_query'][] = [
+                'relation' => 'AND',
+                ['key' => '_sale_price', 'value' => '', 'compare' => '!='],
+                ['key' => '_sale_price_dates_from', 'value' => time(), 'compare' => '>', 'type' => 'NUMERIC'],
+            ];
         }
 
         $explicit = $request->get_query_params()['orderby'] ?? $request->get_body_params()['orderby'] ?? null;
@@ -296,6 +310,12 @@ final class ListQuery
             $clauses['where'] .= $vars['has_variations'] ? " AND {$exists}" : " AND NOT {$exists}";
         }
 
+        if (isset($vars['sale_scheduled'])) {
+            $scheduled = self::scheduledSaleSql();
+
+            $clauses['where'] .= $vars['sale_scheduled'] ? " AND ({$scheduled})" : " AND NOT ({$scheduled})";
+        }
+
         if ($orderby !== null) {
             $order = strtoupper((string) $query->get('order')) === 'DESC' ? 'DESC' : 'ASC';
             $column = $orderby === 'sku' ? "{$alias}.sku" : "{$alias}.stock_quantity";
@@ -304,6 +324,39 @@ final class ListQuery
         }
 
         return $clauses;
+    }
+
+    /**
+     * A sale that has not started: `_sale_price` set and `_sale_price_dates_from`
+     * (a timestamp) in the future, on the product itself or on one of its
+     * variations (the parent of a variable product carries no dates). Two
+     * EXISTS on the postmeta (post_id, meta_key) index.
+     */
+    private static function scheduledSaleSql(): string
+    {
+        global $wpdb;
+
+        $posts = $wpdb->posts;
+        $meta = $wpdb->postmeta;
+        $now = time();
+
+        $own = "EXISTS (SELECT 1 FROM {$meta} wc_products_list_sale_from"
+            ." INNER JOIN {$meta} wc_products_list_sale_price ON wc_products_list_sale_price.post_id = wc_products_list_sale_from.post_id"
+            ." AND wc_products_list_sale_price.meta_key = '_sale_price' AND wc_products_list_sale_price.meta_value <> ''"
+            ." WHERE wc_products_list_sale_from.post_id = {$posts}.ID"
+            ." AND wc_products_list_sale_from.meta_key = '_sale_price_dates_from'"
+            ." AND CAST(wc_products_list_sale_from.meta_value AS UNSIGNED) > {$now})";
+
+        $child = "EXISTS (SELECT 1 FROM {$posts} wc_products_list_sale_child"
+            ." INNER JOIN {$meta} wc_products_list_sale_child_from ON wc_products_list_sale_child_from.post_id = wc_products_list_sale_child.ID"
+            ." AND wc_products_list_sale_child_from.meta_key = '_sale_price_dates_from'"
+            ." INNER JOIN {$meta} wc_products_list_sale_child_price ON wc_products_list_sale_child_price.post_id = wc_products_list_sale_child.ID"
+            ." AND wc_products_list_sale_child_price.meta_key = '_sale_price' AND wc_products_list_sale_child_price.meta_value <> ''"
+            ." WHERE wc_products_list_sale_child.post_parent = {$posts}.ID"
+            ." AND wc_products_list_sale_child.post_type = 'product_variation'"
+            ." AND CAST(wc_products_list_sale_child_from.meta_value AS UNSIGNED) > {$now})";
+
+        return "{$own} OR {$child}";
     }
 
     /**
@@ -375,6 +428,12 @@ final class ListQuery
             ],
             'has_variations' => [
                 'description' => 'Limit result set to variable products with at least one variation (true) or to the rest (false).',
+                'type' => 'boolean',
+                'sanitize_callback' => 'rest_sanitize_boolean',
+                'validate_callback' => 'rest_validate_request_arg',
+            ],
+            'sale_scheduled' => [
+                'description' => 'Limit result set to products with a sale that has not started yet, on the product or on one of its variations (true), or to the rest (false).',
                 'type' => 'boolean',
                 'sanitize_callback' => 'rest_sanitize_boolean',
                 'validate_callback' => 'rest_validate_request_arg',

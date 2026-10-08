@@ -16,6 +16,8 @@ final class Bootstrap
 {
     public const FILTER = 'wc_products_list/bootstrap';
 
+    public const FILTER_ALLOW_HARD_DELETE = 'wc_products_list/allow_hard_delete';
+
     public const PER_PAGE_MAX = 100;
 
     public const MAX_CHILDREN_PER_PARENT = 1000;
@@ -68,6 +70,13 @@ final class Bootstrap
                 'cogs' => self::cogsEnabled(),
                 'brands' => taxonomy_exists('product_brand'),
                 'reviews' => get_option('woocommerce_enable_reviews', 'yes') === 'yes',
+                /**
+                 * Filters whether "Delete permanently" is offered on rows
+                 * outside the Trash. Off by default, as in the classic list.
+                 *
+                 * @param  bool  $allow
+                 */
+                'hardDelete' => (bool) apply_filters(self::FILTER_ALLOW_HARD_DELETE, false),
             ],
             'limits' => [
                 'perPageMax' => self::PER_PAGE_MAX,

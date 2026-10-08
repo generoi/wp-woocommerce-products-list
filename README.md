@@ -13,6 +13,24 @@ wp plugin activate wp-woocommerce-products-list
 
 `build/` is committed, so a Composer install needs no Node.
 
+## Capabilities
+
+The Catalog screen and the plugin's own REST routes need `edit_products` (shop managers and administrators have it; change it with the `wc_products_list/capability` filter). Saves go through WooCommerce's `wc/v3` endpoints, which have requirements of their own:
+
+- Quick edit of one product: `POST /wc/v3/products/{id}` needs `edit_post` on that product (`edit_products`, plus `edit_others_products` for products the user did not create, `edit_published_products` for published ones).
+- Bulk edit and every multi-row save: `POST /wc/v3/products/batch` and `/variations/batch` need **`edit_others_products`** (WooCommerce's rule for batch writes), or WooCommerce answers `woocommerce_rest_cannot_batch`. The settings payload exposes it as `caps.editOthers`.
+- Trash, restore, delete and duplicate run through `/wc-products-list/v1/actions/{action}` and check `delete_post` / `edit_post` (and `manage_woocommerce` for duplicate) per product.
+
+A role that has `edit_products` but not `edit_others_products` can browse and quick-edit its own products, but cannot bulk edit.
+
+## History
+
+Every change made through the list is logged. The History screen is the Catalog page with `&screen=history`: `edit.php?post_type=product&page=wc-products-list&screen=history` (the **History** button in the Catalog toolbar, `links.history` in the settings payload). `&object_id=<id>` scopes it to one product, `&batch=<uuid>` to one save; a row's **History** action opens the same screen for that row. There is no separate submenu slug.
+
+## Measuring
+
+The speed budgets in `docs/contracts.md` §9 are measured on a production-like build: `SCRIPT_DEBUG` off (Bedrock's development environment turns it on, which loads the development builds of React and the components and makes rendering several times slower) and Query Monitor deactivated (its per-query backtraces double the REST timings). Activate either for a diagnosis, not for a measurement.
+
 ## Develop
 
 ```sh

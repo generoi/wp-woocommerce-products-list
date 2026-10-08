@@ -85,6 +85,22 @@ class RegistryTest extends TestCase
         $this->assertSame('product', Registry::normaliseAction(['id' => 'x', 'scope' => 'galaxy'])['scope']);
     }
 
+    public function test_array_args_keep_their_type_and_list_default(): void
+    {
+        $action = Registry::normaliseAction([
+            'id' => 'i18n_copy',
+            'args' => [
+                ['id' => 'fields', 'type' => 'array', 'default' => ['name', 'slug'], 'options' => ['name' => 'Name', 'slug' => 'Slug']],
+                ['id' => 'nope', 'type' => 'galaxy'],
+            ],
+        ]);
+
+        $this->assertSame('array', $action['args'][0]['type']);
+        $this->assertSame(['name', 'slug'], $action['args'][0]['default']);
+        $this->assertSame([['value' => 'name', 'label' => 'Name'], ['value' => 'slug', 'label' => 'Slug']], $action['args'][0]['options']);
+        $this->assertSame('text', $action['args'][1]['type']);
+    }
+
     public function test_paths_and_operators_are_validated(): void
     {
         $field = Registry::normaliseField([

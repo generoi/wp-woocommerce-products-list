@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Tests\Integration;
 
 use GeneroWP\ProductsList\Actions\Action;
+use GeneroWP\ProductsList\Actions\Duplicate;
 use GeneroWP\ProductsList\Log\Table;
 use WC_Product;
 use WP_Error;
@@ -118,6 +119,142 @@ class ActionsTest extends RestTestCase
         $parent = $this->variableProduct(['38']);
         $data = $this->act('duplicate', [$parent->get_children()[0]]);
         $this->assertSame('not_applicable', $data['results'][0]['code']);
+    }
+
+    /**
+     * Over HTTP, `WC()->is_rest_api_request()` is true and WooCommerce
+     * takes a "SKU lock" before saving the copy; a third party answering
+     * `wc_product_pre_lock_on_sku` with false (Polylang for WooCommerce
+     * does, for a product without a language, which every fresh copy is)
+     * makes WooCommerce delete the copy and throw. `rest_do_request()` in
+     * a test is not an HTTP request, so both are simulated.
+     */
+    public function test_duplicate_survives_the_rest_sku_lock(): void
+    {
+        $parent = $this->variableProduct(['38', '39'], ['sku' => 'LOCKED']);
+        $variation = wc_get_product($parent->get_children()[0]);
+        $variation->set_sku('VAR-38');
+        $variation->save();
+
+        // WC()->is_rest_api_request() looks at REQUEST_URI before its filter.
+        $uri = $_SERVER['REQUEST_URI'] ?? null;
+        $_SERVER['REQUEST_URI'] = '/wp-json/wc-products-list/v1/actions/duplicate';
+        $this->assertTrue(WC()->is_rest_api_request());
+        $asked = 0;
+        add_filter('wc_product_pre_lock_on_sku', function ($locked) use (&$asked) {
+            $asked++;
+
+            return $locked ?? false;
+        }, 10);
+
+        $data = $this->act('duplicate', [$parent->get_id()]);
+
+        $this->assertTrue($data['results'][0]['ok'], wp_json_encode($data['results']));
+        $copy = wc_get_product($data['results'][0]['data']['new_id']);
+        $this->assertInstanceOf(WC_Product::class, $copy);
+        $this->assertSame('draft', $copy->get_status());
+        $this->assertSame('LOCKED-1', $copy->get_sku());
+        $this->assertCount(2, $copy->get_children());
+        $this->assertContains('VAR-38-1', array_map(static fn (int $id): string => wc_get_product($id)->get_sku(), $copy->get_children()));
+        // The lock was asked for (the product data store takes it; the
+        // variation data store does not) and answered before the third party.
+        $this->assertSame(1, $asked);
+
+        // The answer does not leak into later saves.
+        $this->assertTrue(has_filter('wc_product_pre_lock_on_sku') !== false);
+        $this->assertFalse(has_filter('wc_product_pre_lock_on_sku', [Duplicate::class, 'lockObtained']));
+
+        $rows = $this->rows();
+        $this->assertSame(['ok'], array_unique(array_column($rows, 'status')));
+
+        if ($uri === null) {
+            unset($_SERVER['REQUEST_URI']);
+        } else {
+            $_SERVER['REQUEST_URI'] = $uri;
+        }
+    }
+
+    public function test_duplicate_reports_sku_conflicts_in_plain_words(): void
+    {
+        $product = $this->simpleProduct(['sku' => 'TAKEN']);
+        $this->simpleProduct(['sku' => 'TAKEN-1']);
+
+        // The copy ends up with a SKU somebody else holds, as when a trashed
+        // copy exists or a concurrent request got there first.
+        add_action('woocommerce_product_duplicate_before_save', static function (WC_Product $duplicate): void {
+            $duplicate->set_sku('TAKEN-1');
+        });
+
+        $data = $this->act('duplicate', [$product->get_id()]);
+
+        $this->assertFalse($data['results'][0]['ok'], wp_json_encode($data['results']));
+        $this->assertSame('wc_products_list_duplicate_sku', $data['results'][0]['code']);
+        $this->assertStringContainsString('Could not duplicate "Saga wide toe boot"', $data['results'][0]['message']);
+        $this->assertStringContainsString('TAKEN', $data['results'][0]['message']);
+        $this->assertStringNotContainsString('lookup table', $data['results'][0]['message']);
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame('error', $rows[0]['status']);
+        $this->assertSame('wc_products_list_duplicate_sku', json_decode($rows[0]['context'], true)['code']);
+    }
+
+    /**
+     * Refreshing the rows after an action must not cost a nested list
+     * request per (parent, status) group: variations are serialised
+     * directly, products in one request per status.
+     */
+    public function test_refresh_covers_variations_of_several_parents_in_bounded_requests(): void
+    {
+        $a = $this->variableProduct(['38', '39']);
+        $b = $this->variableProduct(['40', '41']);
+        $c = $this->variableProduct(['42']);
+        $published = $this->simpleProduct();
+        $draft = $this->simpleProduct(['status' => 'draft']);
+        $variations = array_merge($a->get_children(), $b->get_children(), $c->get_children());
+
+        $nested = [];
+        add_filter('rest_request_before_callbacks', function ($response, $handler, WP_REST_Request $request) use (&$nested) {
+            if (str_starts_with($request->get_route(), '/wc/v3/')) {
+                $nested[] = $request->get_route();
+            }
+
+            return $response;
+        }, 10, 3);
+
+        $ids = array_merge($variations, [$published->get_id(), $draft->get_id()]);
+        $data = $this->act('trash', $ids);
+
+        $this->assertSame(array_fill(0, 7, true), array_column($data['results'], 'ok'));
+        // Both products are in the trash now: one products request, no variations requests.
+        $this->assertSame(['/wc/v3/products'], $nested);
+
+        $items = array_column($data['items'], null, 'id');
+        $this->assertEqualsCanonicalizing($ids, array_keys($items));
+
+        foreach ([$a, $b, $c] as $parent) {
+            foreach ($parent->get_children() as $variation) {
+                $this->assertSame('trash', $items[$variation]['status']);
+                $this->assertSame($parent->get_id(), $items[$variation]['parent_id']);
+                $this->assertSame($parent->get_id(), $items[$variation]['wc_products_list']['parent_id']);
+                $this->assertArrayNotHasKey('_links', $items[$variation]);
+            }
+        }
+
+        // Mixed statuses on the way back: publish and draft are two product groups.
+        $nested = [];
+        $data = $this->act('restore', [$variations[0], $variations[2], $variations[4], $published->get_id(), $draft->get_id()], [], ['fields' => 'id,status,parent_id']);
+
+        $this->assertCount(2, $nested);
+        $this->assertSame(['/wc/v3/products'], array_unique($nested));
+
+        $items = array_column($data['items'], null, 'id');
+        $this->assertCount(5, $items);
+        $this->assertSame('publish', $items[$published->get_id()]['status']);
+        $this->assertSame('draft', $items[$draft->get_id()]['status']);
+        $this->assertSame('publish', $items[$variations[0]]['status']);
+        $this->assertSame($b->get_id(), $items[$variations[2]]['parent_id']);
+        $this->assertSame(['id', 'status', 'parent_id'], array_keys($items[$variations[4]]));
     }
 
     public function test_publish_draft_and_feature(): void
