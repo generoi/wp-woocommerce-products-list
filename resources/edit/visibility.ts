@@ -8,7 +8,8 @@
  * - bulk editing drops `sku` (unique per product) and fields that opt out
  *   with `edit.bulk === false`;
  * - when the selection contains variations, parent-owned fields go;
- * - when the selection contains variable parents, sellable fields go — unless
+ * - variable parents do not take sellable fields: those show for the other
+ *   rows (selected variations, simple products) and skip the parents, unless
  *   the user asked to apply them to those parents' variations, in which case
  *   the parent is treated as its variations for those fields.
  */
@@ -166,18 +167,23 @@ export function visibleEditFields( fields: ProductField[], items: ProductListIte
 			return false;
 		}
 
-		if ( withVariableParents && isSellableField( field ) && ! options.applyToVariations ) {
+		// A sellable field skips the variable parents (their variations sell) unless they
+		// apply it to their variations: shown when the other rows (selected variations,
+		// simple products) take it, so prices never vanish because a parent is ticked too.
+		const takers = withVariableParents && isSellableField( field ) && ! options.applyToVariations ? rows.filter( ( item ) => ! isVariableParent( item ) ) : rows;
+
+		if ( takers.length === 0 ) {
 			return false;
 		}
 
-		if ( ! rows.every( ( item ) => fieldAppliesTo( field, item, options.applyToVariations ) ) ) {
+		if ( ! takers.every( ( item ) => fieldAppliesTo( field, item, options.applyToVariations ) ) ) {
 			return false;
 		}
 
 		if ( typeof field.isVisible === 'function' ) {
 			const isVisible = field.isVisible;
 
-			return rows.every( ( item ) => isVisible( item ) );
+			return takers.every( ( item ) => isVisible( item ) );
 		}
 
 		return true;

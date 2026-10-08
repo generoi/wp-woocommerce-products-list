@@ -12,6 +12,10 @@ import type { EditorSession } from '../../resources/edit/editor-rows';
 import type { ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, simple, variation } from './edit-fixtures';
 
+// These render the whole editor (DataForm and @wordpress/components): under a loaded CI box (tsc and
+// eslint in parallel) one render can pass vitest's 5 s default, which is not a failure of the editor.
+vi.setConfig( { testTimeout: 20000 } );
+
 const settings = editSettings();
 
 const notify = { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() };
@@ -128,8 +132,12 @@ describe( 'InlineEditor', () => {
 		expect( view.close ).not.toHaveBeenCalled();
 		// The x buttons are gone: the list is fixed from the first save on.
 		expect( screen.queryByRole( 'button', { name: /Remove .* from the selection/ } ) ).not.toBeInTheDocument();
-		// The two rows that did save can be undone from the notice; the editor lists the failed one.
-		expect( notify.error ).toHaveBeenCalledWith( '2 updated, 1 failed.', expect.objectContaining( { id: 'wc-pl-saved', actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
+		// The two rows that did save can be undone from the notice; the notice names the failed one and why
+		// (the editor may be gone by the time it shows), and links to the batch in the History.
+		expect( notify.error ).toHaveBeenCalledWith(
+			expect.stringMatching( /^2 updated, 1 failed\. Simple 3: You are not allowed/ ),
+			expect.objectContaining( { id: 'wc-pl-saved', actions: expect.arrayContaining( [ expect.objectContaining( { label: 'Undo' } ) ] ) } )
+		);
 
 		// The retry sends only the failed row.
 		saveEdits.mockResolvedValueOnce( { updated: [ simple( 3, { featured: true } ) ], errors: [], batchId: 'b2', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
@@ -538,5 +546,138 @@ describe( 'initialTabFor', () => {
 		fireEvent.click( screen.getByLabelText( /Turn on "Manage stock" for that row/ ) );
 
 		await screen.findByRole( 'button', { name: 'Update 2 products' } );
+	} );
+} );
+
+describe( 'InlineEditor, round 4', () => {
+	const metaTitle = { ...coreFields().find( ( field ) => field.id === 'name' )!, id: 'i18n:se.meta_title', label: 'SE title', edit: { group: 'i18n:se', bulk: 'default' as const }, rest: { fields: [ 'i18n' ], applies: { product: true, variation: false } } };
+
+	it( 'a language tab\'s load leaves variable products variable: the apply-to-variations box stays', async () => {
+		const { listProducts } = await import( '../../resources/api/client' );
+		const parents = [ simple( 219, { type: 'variable', name: 'Omaking Fresh', _hasChildren: true, _childCount: 4 } ), simple( 214, { type: 'variable', name: 'Omaking Wool', _hasChildren: true, _childCount: 3 } ) ];
+
+		( listProducts as unknown as ReturnType< typeof vi.fn > ).mockImplementation( async ( query: Record< string, unknown > ) => {
+			const wanted = String( query._fields );
+			const ids = String( query.include ).split( ',' ).map( Number );
+
+			// The client normalises every row: without `type` in `_fields` it says "simple", without `name` "#id".
+			return {
+				items: ids.map( ( id ) =>
+					wanted.includes( 'type' ) ? parents.find( ( row ) => row.id === id )! : { id, type: 'simple', name: `#${ id }`, status: 'publish', _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0, i18n: { se: { meta_title: 'T' } } }
+				),
+				total: ids.length,
+				totalPages: 1,
+			};
+		} );
+
+		const priced = [ ...coreFields().filter( ( field ) => [ 'status', 'regular_price', 'sale_price' ].includes( field.id ) ), metaTitle ];
+
+		renderEditor( parents, { fields: priced as typeof fields } );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		await screen.findByLabelText( /Apply price and sale fields/ );
+
+		fireEvent.click( screen.getByRole( 'tab', { name: 'SE' } ) );
+		await waitFor( () => expect( ( listProducts as unknown as ReturnType< typeof vi.fn > ).mock.calls.some( ( [ query ] ) => ! String( query._fields ).includes( 'type' ) ) ).toBe( true ) );
+		await waitFor( () => expect( screen.getByRole( 'tabpanel' ) ).toHaveAttribute( 'aria-busy', 'false' ) );
+		fireEvent.click( screen.getByRole( 'tab', { name: 'General' } ) );
+
+		expect( screen.getByLabelText( /Apply price and sale fields/ ) ).toBeInTheDocument();
+		expect( screen.getAllByText( 'Variable' ) ).toHaveLength( 2 );
+		expect( screen.getAllByText( 'Omaking Fresh' ).length ).toBeGreaterThan( 0 );
+		expect( screen.queryByText( '#219' ) ).not.toBeInTheDocument();
+
+		( listProducts as unknown as ReturnType< typeof vi.fn > ).mockReset();
+	} );
+
+	it( 'names a variation by its parent and SKU in the bulk list', async () => {
+		const { getVariations } = await import( '../../resources/api/client' );
+
+		// The reload answers without the parent's name (a variation request knows only the parent id).
+		( getVariations as unknown as ReturnType< typeof vi.fn > ).mockImplementation( async ( parentId: number, _page: number, options: { params: { include: string } } ) => ( {
+			items: options.params.include.split( ',' ).map( ( id ) => variation( Number( id ), parentId, { name: 'Black, 36', sku: undefined } ) ),
+			total: 1,
+			totalPages: 1,
+		} ) );
+
+		renderEditor( [ variation( 41, 4, { name: 'Black, 36', _parentName: 'Koel Gavien', sku: 'KG-36' } ), variation( 51, 5, { name: 'Black, 36', _parentName: 'Koel Dry', sku: 'KD-36' } ) ] );
+
+		const list = await screen.findByRole( 'list', { name: 'Selected items' } );
+
+		expect( list.textContent ).toContain( 'Koel Gavien' );
+		expect( list.textContent ).toContain( 'Koel Dry' );
+		expect( list.textContent ).toContain( 'KG-36' );
+		expect( list.querySelector( '[title="Koel Gavien – Black, 36 · KG-36"]' ) ).not.toBeNull();
+
+		( getVariations as unknown as ReturnType< typeof vi.fn > ).mockImplementation( async () => ( { items: [], total: 0, totalPages: 1 } ) );
+	} );
+
+	it( 'leaves out a product trashed after the editor loaded it, and says so', async () => {
+		const { listProducts } = await import( '../../resources/api/client' );
+		const mock = listProducts as unknown as ReturnType< typeof vi.fn >;
+		const original = mock.getMockImplementation();
+
+		mock.mockImplementation( async ( query: Record< string, unknown > ) => ( {
+			items: String( query.include )
+				.split( ',' )
+				.map( ( id ) => simple( Number( id ), { featured: false, status: query._fields === 'id,status' && id === '2' ? 'trash' : 'publish' } ) ),
+			total: 0,
+			totalPages: 1,
+		} ) );
+		saveEdits.mockResolvedValueOnce( { updated: [ simple( 1 ), simple( 3 ) ], errors: [], batchId: 'b1', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+
+		renderEditor( [ simple( 1 ), simple( 2 ), simple( 3 ) ] );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 3 items' } );
+		fireEvent.click( screen.getByLabelText( 'featured' ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Update 3 products' } ) );
+
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+		expect( ( saveEdits.mock.calls[ 0 ]?.[ 0 ] as ProductListItem[] ).map( ( row ) => row.id ) ).toEqual( [ 1, 3 ] );
+		await waitFor( () => expect( notify.success ).toHaveBeenCalledWith( expect.stringMatching( /2 items updated, 1 skipped \(moved to the Trash meanwhile\)\. Skipped: Simple 2/ ), expect.anything() ) );
+
+		mock.mockImplementation( original! );
+	} );
+
+	it( 'asks the browser before the page is left with typed changes', async () => {
+		renderEditor( [ simple( 1, { name: 'One' } ) ] );
+
+		await screen.findByText( 'One' );
+
+		const clean = new Event( 'beforeunload', { cancelable: true } );
+
+		window.dispatchEvent( clean );
+		expect( clean.defaultPrevented ).toBe( false );
+
+		fireEvent.click( screen.getByLabelText( 'featured' ) );
+
+		const dirty = new Event( 'beforeunload', { cancelable: true } );
+
+		window.dispatchEvent( dirty );
+		expect( dirty.defaultPrevented ).toBe( true );
+	} );
+
+	it( 'flags every invalid field and focuses the first one on the form, not the last flagged', async () => {
+		const row = simple( 1, { name: 'One', stock_quantity: 3 } );
+		const { listProducts } = await import( '../../resources/api/client' );
+
+		( listProducts as unknown as ReturnType< typeof vi.fn > ).mockImplementationOnce( async () => ( { items: [ row ], total: 0, totalPages: 1 } ) );
+
+		renderEditor( [ row ] );
+
+		const name = ( await screen.findByLabelText( /^name/ ) ) as HTMLInputElement;
+
+		fireEvent.change( name, { target: { value: '' } } );
+		fireEvent.change( screen.getByLabelText( /^stock_quantity/ ), { target: { value: '-5' } } );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Update' } ) );
+
+		await screen.findByText( '2 problems' );
+		await waitFor( () => expect( document.activeElement ).toBe( name ) );
+		expect( name ).toHaveAttribute( 'aria-invalid', 'true' );
+		expect( screen.getByLabelText( /^stock_quantity/ ) ).toHaveAttribute( 'aria-invalid', 'true' );
+		expect( name.getAttribute( 'aria-describedby' ) ).toContain( 'wc-pl-invalid-name' );
+		// The problem list links to the fields.
+		expect( screen.getByRole( 'button', { name: 'stock_quantity' } ) ).toBeInTheDocument();
+		expect( saveEdits ).not.toHaveBeenCalled();
 	} );
 } );

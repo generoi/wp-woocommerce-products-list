@@ -59,7 +59,7 @@ describe( 'variation sales on the parent row', () => {
 		render( <PriceCell item={ variable( { wc_products_list: meta( { sale_summary: { on_sale: 0, scheduled: 12, from: '2036-10-12T00:00:00', to: '2036-10-18T23:59:00' } } ) } ) } /> );
 
 		expect( screen.getByText( /^From 105,00 €/ ) ).toBeInTheDocument();
-		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 12 variations 12.10.2036 – 18.10.2036' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 12 variations 12.–18.10.2036' );
 		expect( screen.getByTitle( 'Scheduled sale: 12 variations 12.10.2036 – 18.10.2036' ) ).toBeInTheDocument();
 	} );
 

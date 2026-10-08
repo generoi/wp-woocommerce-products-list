@@ -5,6 +5,7 @@
 import { ProgressBar, Notice } from '@wordpress/components';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ProductListItem } from '../types';
+import { itemLabel } from './item-label';
 
 export interface SaveProgressProps {
 	done: number;
@@ -63,14 +64,16 @@ export interface EditErrorsProps {
 	/** `error` (default) or `warning` for a list the user may accept. */
 	status?: 'error' | 'warning';
 	className?: string;
+	/** Move to a field named in the list (its tab, then its control); the field names become buttons. */
+	onFocusField?: ( fieldId: string ) => void;
 }
 
-export function EditErrors( { errors, items, fieldLabels, title, status = 'error', className = 'wc-pl-edit__errors' }: EditErrorsProps ) {
+export function EditErrors( { errors, items, fieldLabels, title, status = 'error', className = 'wc-pl-edit__errors', onFocusField }: EditErrorsProps ) {
 	if ( errors.length === 0 ) {
 		return null;
 	}
 
-	const names = new Map( items.map( ( item ) => [ item.id, ( item as { name?: string } ).name ?? `#${ item.id }` ] ) );
+	const names = new Map( items.map( ( item ) => [ item.id, itemLabel( item ) ] ) );
 	const shown = errors.slice( 0, 50 );
 
 	return (
@@ -87,7 +90,18 @@ export function EditErrors( { errors, items, fieldLabels, title, status = 'error
 				{ shown.map( ( error, index ) => (
 					<li key={ `${ error.id }-${ error.field ?? '' }-${ index }` }>
 						{ error.id ? <strong>{ names.get( error.id ) ?? `#${ error.id }` }: </strong> : null }
-						{ error.field && fieldLabels[ error.field ] ? `${ fieldLabels[ error.field ] } — ` : '' }
+						{ error.field && fieldLabels[ error.field ] && onFocusField && ! error.id ? (
+							<>
+								<button type="button" className="button-link wc-pl-edit__error-field" onClick={ () => onFocusField( error.field! ) }>
+									{ fieldLabels[ error.field ] }
+								</button>
+								{ ' — ' }
+							</>
+						) : error.field && fieldLabels[ error.field ] ? (
+							`${ fieldLabels[ error.field ] } — `
+						) : (
+							''
+						) }
 						{ error.message }
 					</li>
 				) ) }

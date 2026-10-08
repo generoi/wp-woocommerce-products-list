@@ -21,6 +21,9 @@ $link: #2271b1;
 	display: flex;
 	flex-direction: column;
 
+	// Room under the last row for the snackbar stack (set by <Notices />), so it never covers a row's checkbox.
+	padding-bottom: var(--wc-pl-notices-height, 0);
+
 	.dataviews-wrapper {
 		height: auto;
 	}
@@ -342,6 +345,14 @@ $link: #2271b1;
 	left: calc(160px + 24px);
 	z-index: 100000;
 
+	// Only the snackbars take clicks, not the gaps between them.
+	pointer-events: none;
+
+	// Core positions the list absolutely; inside this fixed box it flows, so the box has the stack's height.
+	.components-snackbar-list {
+		position: static;
+	}
+
 	.folded & {
 		left: calc(36px + 24px);
 	}
@@ -471,5 +482,16 @@ $link: #2271b1;
 .wc-products-list__expand-progress {
 	color: $muted;
 	font-size: 12px;
+	white-space: nowrap;
+}
+
+// Snackbar actions after the first (core renders one): inline links after the text.
+.wc-products-list__notice-action.components-button.is-link {
+	margin-inline-start: 12px;
+	color: inherit;
+	text-decoration: underline;
+}
+
+.wc-pl-history__mode .components-toggle-group-control-option-base {
 	white-space: nowrap;
 }

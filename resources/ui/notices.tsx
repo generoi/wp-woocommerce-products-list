@@ -1,45 +1,217 @@
-import { SnackbarList } from '@wordpress/components';
+import { Button, SnackbarList } from '@wordpress/components';
 import { useDispatch, useSelect } from '@wordpress/data';
-import { useEffect } from '@wordpress/element';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { store as noticesStore } from '@wordpress/notices';
 
-type Snackbar = ReturnType< ReturnType< typeof useSelect >[ 'getNotices' ] >[ number ] & { explicitDismiss?: boolean };
+type StoredNotice = ReturnType< ReturnType< typeof useSelect >[ 'getNotices' ] >[ number ];
+type Snackbar = StoredNotice & { explicitDismiss?: boolean; status?: string };
 
 /**
- * Snackbars shown at once. Sticky ones (an Undo) never expire, so five quick
- * edits in a row would stack five "1 item updated. Undo" bars; the oldest
- * go when a newer one arrives (their batches stay revertable in History).
+ * Snackbars shown at once; the oldest go when a newer one arrives (their
+ * batches stay revertable in History).
  */
 export const MAX_SNACKBARS = 3;
 
+/** How long a snackbar with an action (Undo) stays, in ms, not counting time under the pointer or focus. */
+export const ACTION_TIMEOUT = 10000;
+
+/** How long a plain snackbar stays, in ms (core's own snackbar timeout). */
+export const PLAIN_TIMEOUT = 6000;
+
+interface NoticeLike {
+	id: string;
+	status?: string;
+	actions?: unknown[];
+	explicitDismiss?: boolean;
+}
+
+function hasActions( notice: NoticeLike ): boolean {
+	return Array.isArray( notice.actions ) && notice.actions.length > 0;
+}
+
 /**
- * A notice that offers something to undo stays until the user dismisses
- * it (a dismiss button is shown): "2 products moved to the Trash. Undo"
- * must not expire while the user is still looking, or while the tab is
- * busy rendering a large table. Plain notices keep the usual timeout.
+ * How long a snackbar stays before it hides itself, or null when it stays
+ * until dismissed: an error (it names what failed), or a notice its creator
+ * asked to keep (`explicitDismiss: true`). A success with an Undo hides
+ * after ACTION_TIMEOUT; the Undo stays reachable from History.
  */
-export function stickyWhenActionable< T extends { actions?: unknown[]; explicitDismiss?: boolean } >( notice: T ): T {
-	// core/notices stores `explicitDismiss: false` on every notice it creates,
-	// so "unspecified" cannot be told from an opt-out: a snackbar with an
-	// action (Undo) is always kept until the user dismisses it.
-	if ( notice.explicitDismiss === true || ! Array.isArray( notice.actions ) || notice.actions.length === 0 ) {
+export function snackbarTimeout( notice: NoticeLike ): number | null {
+	if ( notice.explicitDismiss === true || notice.status === 'error' ) {
+		return null;
+	}
+
+	return hasActions( notice ) ? ACTION_TIMEOUT : PLAIN_TIMEOUT;
+}
+
+/**
+ * The ids of snackbars to drop: older Undo-style notices once a newer one
+ * is shown (a stray click on an old Undo must not revert an earlier
+ * campaign), then the oldest beyond the cap. The store lists notices
+ * oldest first. Error notices with an action (Retry) are not superseded.
+ */
+export function overflowingNotices< T extends NoticeLike >( notices: T[], max: number = MAX_SNACKBARS ): string[] {
+	const actionable = notices.filter( ( notice ) => hasActions( notice ) && notice.status !== 'error' );
+	const superseded = new Set( actionable.slice( 0, -1 ).map( ( notice ) => notice.id ) );
+	const kept = notices.filter( ( notice ) => ! superseded.has( notice.id ) );
+	const overflow = kept.length > max ? kept.slice( 0, kept.length - max ).map( ( notice ) => notice.id ) : [];
+
+	return [ ...superseded, ...overflow ];
+}
+
+export interface DismissTimers {
+	/** Start timers for new notices, forget removed ones. */
+	sync( notices: Array< { id: string; timeout: number | null } > ): void;
+	pause(): void;
+	resume(): void;
+	dispose(): void;
+}
+
+/**
+ * Per-notice auto-dismiss timers that pause together (while the pointer is
+ * over the snackbars or focus is inside them) and resume with the time that
+ * was left. Core's Snackbar timeout cannot pause, so every snackbar is
+ * rendered with `explicitDismiss` (a close button, no click-anywhere
+ * dismiss) and expires through these timers instead.
+ */
+export function createDismissTimers( onExpire: ( id: string ) => void, now: () => number = () => Date.now() ): DismissTimers {
+	const timers = new Map< string, { remaining: number; startedAt: number; handle: ReturnType< typeof setTimeout > | null } >();
+	let paused = false;
+
+	const start = ( id: string ) => {
+		const timer = timers.get( id );
+
+		if ( ! timer ) {
+			return;
+		}
+
+		timer.startedAt = now();
+		timer.handle = setTimeout( () => {
+			timers.delete( id );
+			onExpire( id );
+		}, timer.remaining );
+	};
+
+	const stop = ( id: string ) => {
+		const timer = timers.get( id );
+
+		if ( timer?.handle ) {
+			clearTimeout( timer.handle );
+			timer.remaining = Math.max( 0, timer.remaining - ( now() - timer.startedAt ) );
+			timer.handle = null;
+		}
+	};
+
+	return {
+		sync( notices ) {
+			const ids = new Set( notices.map( ( notice ) => notice.id ) );
+
+			for ( const id of Array.from( timers.keys() ) ) {
+				if ( ! ids.has( id ) ) {
+					stop( id );
+					timers.delete( id );
+				}
+			}
+
+			for ( const notice of notices ) {
+				if ( notice.timeout === null || timers.has( notice.id ) ) {
+					continue;
+				}
+
+				timers.set( notice.id, { remaining: notice.timeout, startedAt: now(), handle: null } );
+
+				if ( ! paused ) {
+					start( notice.id );
+				}
+			}
+		},
+		pause() {
+			if ( paused ) {
+				return;
+			}
+
+			paused = true;
+			timers.forEach( ( _timer, id ) => stop( id ) );
+		},
+		resume() {
+			if ( ! paused ) {
+				return;
+			}
+
+			paused = false;
+			timers.forEach( ( _timer, id ) => start( id ) );
+		},
+		dispose() {
+			timers.forEach( ( timer ) => timer.handle && clearTimeout( timer.handle ) );
+			timers.clear();
+		},
+	};
+}
+
+interface NoticeAction {
+	label: string;
+	onClick?: () => void;
+	url?: string;
+}
+
+/**
+ * Core's Snackbar renders only its first action. The rest (Undo plus "View
+ * in History") go into the content as link buttons, so no action is lost.
+ */
+export function withExtraActions< N extends { content?: unknown; actions?: unknown[] } >( notice: N ): N {
+	const actions = ( Array.isArray( notice.actions ) ? notice.actions : [] ) as NoticeAction[];
+
+	if ( actions.length < 2 ) {
 		return notice;
 	}
 
-	return { ...notice, explicitDismiss: true };
+	const [ first, ...rest ] = actions;
+
+	return {
+		...notice,
+		actions: [ first ],
+		content: (
+			<>
+				{ notice.content as string }
+				{ rest.map( ( action ) => (
+					<Button
+						key={ action.label }
+						variant="link"
+						className="wc-products-list__notice-action"
+						href={ action.url }
+						onClick={ ( event: { stopPropagation(): void } ) => {
+							event.stopPropagation();
+							action.onClick?.();
+						} }
+					>
+						{ action.label }
+					</Button>
+				) ) }
+			</>
+		),
+	};
 }
 
-/** The ids of the oldest snackbars beyond the cap (the store lists notices oldest first). */
-export function overflowingNotices< T extends { id: string } >( notices: T[], max: number = MAX_SNACKBARS ): string[] {
-	return notices.length > max ? notices.slice( 0, notices.length - max ).map( ( notice ) => notice.id ) : [];
-}
+/** The CSS custom property the list pads its bottom with, so the last rows scroll clear of the snackbars. */
+export const NOTICES_HEIGHT_VAR = '--wc-pl-notices-height';
 
 /** The snackbar stack of the core/notices store, bottom-left like the editor. */
 export function Notices() {
 	const notices = useSelect( ( select ) => select( noticesStore ).getNotices(), [] );
 	const { removeNotice } = useDispatch( noticesStore );
-	const snackbars = notices.filter( ( notice ) => notice.type === 'snackbar' ).map( ( notice ) => stickyWhenActionable( notice as Snackbar ) );
+	const snackbars = useMemo( () => ( notices as Snackbar[] ).filter( ( notice ) => notice.type === 'snackbar' ), [ notices ] );
 	const overflow = overflowingNotices( snackbars ).join( ',' );
+	const removeRef = useRef( removeNotice );
+	const hasSnackbars = snackbars.length > 0;
+	const [ timers ] = useState( () => createDismissTimers( ( id ) => void removeRef.current( id ) ) );
+	const hoveredRef = useRef( false );
+	const focusedRef = useRef( false );
+	const containerRef = useRef< HTMLDivElement >( null );
+
+	useEffect( () => {
+		removeRef.current = removeNotice;
+	}, [ removeNotice ] );
+
+	useEffect( () => () => timers.dispose(), [ timers ] );
 
 	useEffect( () => {
 		if ( overflow ) {
@@ -47,9 +219,71 @@ export function Notices() {
 		}
 	}, [ overflow, removeNotice ] );
 
+	useEffect( () => {
+		timers.sync( snackbars.map( ( notice ) => ( { id: notice.id, timeout: snackbarTimeout( notice ) } ) ) );
+	}, [ snackbars, timers ] );
+
+	// Pad the list by the stack's height so it never covers the bottom row's controls.
+	useLayoutEffect( () => {
+		const root = typeof document !== 'undefined' ? document.documentElement : null;
+		const node = containerRef.current;
+
+		if ( ! root ) {
+			return undefined;
+		}
+
+		if ( ! node ) {
+			root.style.removeProperty( NOTICES_HEIGHT_VAR );
+
+			return undefined;
+		}
+
+		const update = () => root.style.setProperty( NOTICES_HEIGHT_VAR, `${ Math.ceil( node.getBoundingClientRect().height ) }px` );
+		update();
+
+		if ( typeof ResizeObserver === 'undefined' ) {
+			return () => root.style.removeProperty( NOTICES_HEIGHT_VAR );
+		}
+
+		const observer = new ResizeObserver( update );
+		observer.observe( node );
+
+		return () => {
+			observer.disconnect();
+			root.style.removeProperty( NOTICES_HEIGHT_VAR );
+		};
+	}, [ hasSnackbars ] );
+
 	if ( ! snackbars.length ) {
 		return null;
 	}
 
-	return <SnackbarList className="wc-products-list__notices" notices={ snackbars } onRemove={ removeNotice } />;
+	const sync = () => ( hoveredRef.current || focusedRef.current ? timers.pause() : timers.resume() );
+
+	return (
+		<div
+			ref={ containerRef }
+			className="wc-products-list__notices"
+			onMouseEnter={ () => {
+				hoveredRef.current = true;
+				sync();
+			} }
+			onMouseLeave={ () => {
+				hoveredRef.current = false;
+				sync();
+			} }
+			onFocus={ () => {
+				focusedRef.current = true;
+				sync();
+			} }
+			onBlur={ ( event ) => {
+				if ( ! event.currentTarget.contains( event.relatedTarget as Node | null ) ) {
+					focusedRef.current = false;
+					sync();
+				}
+			} }
+		>
+			<SnackbarList notices={ snackbars.map( ( notice ) => withExtraActions( { ...notice, explicitDismiss: true } ) ) as typeof snackbars } onRemove={ removeNotice } />
+		</div>
+	);
 }

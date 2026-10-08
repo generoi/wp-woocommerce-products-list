@@ -224,7 +224,7 @@ export interface NoticeOptions {
 	type?: 'snackbar' | 'default';
 	isDismissible?: boolean;
 	actions?: Array< { label: string; onClick?: () => void; url?: string } >;
-	/** Stay until dismissed. Defaults to true for a snackbar with `actions` (an Undo must not expire), false otherwise. */
+	/** Stay until dismissed. By default a snackbar hides after 6 s, or 10 s with `actions` (an Undo), paused while hovered or focused; errors always stay. */
 	explicitDismiss?: boolean;
 }
 

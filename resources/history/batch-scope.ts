@@ -28,11 +28,17 @@ export interface BatchScope {
 	partial: boolean;
 	/** Entries the revert leaves alone (trash, restore, delete, duplicate rows, and rows without a field). */
 	skipped?: number;
+	/** Changes that failed when they were made: nothing to put back. */
+	failed?: number;
 }
 
 /** The scope from `GET /log/batch/{id}`: exact counts for any size, no field names. */
-export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > ): BatchScope {
-	return { changes: plan.rows - plan.skipped.length, objects: plan.objects, fields: [], partial: false, skipped: plan.skipped.length };
+export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > & Partial< Pick< RevertPlan, 'failed' > > ): BatchScope {
+	const failedEntries = plan.skipped.filter( ( entry ) => entry.action === 'failed' ).length;
+	const failed = Math.max( failedEntries, plan.failed ?? 0 );
+	const skipped = plan.skipped.length - failedEntries;
+
+	return { changes: Math.max( 0, plan.rows - skipped - failed ), objects: plan.objects, fields: [], partial: false, skipped, failed };
 }
 
 /**
@@ -72,13 +78,27 @@ export function describeBatchScope( scope: BatchScope ): string {
 		: /* translators: 1: "N changes", 2: "N items" */
 		  sprintf( __( 'This will put back %1$s on %2$s.', 'wp-woocommerce-products-list' ), changes, scope.partial ? `${ objects }+` : objects );
 
-	if ( ! scope.skipped ) {
-		return text;
+	const parts: string[] = [ text ];
+
+	if ( scope.skipped ) {
+		parts.push(
+			sprintf(
+				/* translators: %d: number of log entries the revert leaves alone */
+				_n( '%d entry (trash, restore, delete or duplicate) is not reverted.', '%d entries (trash, restore, delete or duplicate) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
+				scope.skipped
+			)
+		);
 	}
 
-	return `${ text } ${ sprintf(
-		/* translators: %d: number of log entries the revert leaves alone */
-		_n( '%d entry (trash, restore, delete or duplicate) is not reverted.', '%d entries (trash, restore, delete or duplicate) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
-		scope.skipped
-	) }`;
+	if ( scope.failed ) {
+		parts.push(
+			sprintf(
+				/* translators: %d: number of changes that failed when they were made */
+				_n( '%d failed change, nothing to revert.', '%d failed changes, nothing to revert.', scope.failed, 'wp-woocommerce-products-list' ),
+				scope.failed
+			)
+		);
+	}
+
+	return parts.join( ' ' );
 }

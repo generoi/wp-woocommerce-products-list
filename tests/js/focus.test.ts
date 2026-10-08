@@ -79,4 +79,26 @@ describe( 'focusWithin', () => {
 		expect( document.activeElement ).toBe( root.firstElementChild );
 		expect( focusWithin( root, '.missing' ) ).toBe( false );
 	} );
+
+	it( 'after a bulk edit from the selection bar, lands on the first selected row inside the app, not on the app root', () => {
+		const app = document.createElement( 'div' );
+
+		app.className = 'wc-products-list';
+		document.body.appendChild( app );
+
+		const element = table( 3 );
+
+		app.appendChild( element );
+		( element.querySelectorAll( 'input' )[ 1 ] as HTMLInputElement ).checked = true;
+		( document.activeElement as HTMLElement | null )?.blur();
+
+		expect( restoreFocus( { element: null, rowIndex: null, label: null } ) ).toBe( true );
+		expect( document.activeElement ).toBe( element.querySelectorAll( 'input' )[ 1 ] );
+
+		( element.querySelectorAll( 'input' )[ 1 ] as HTMLInputElement ).checked = false;
+		( document.activeElement as HTMLElement | null )?.blur();
+		restoreFocus( null );
+		expect( document.activeElement ).toBe( element );
+		app.remove();
+	} );
 } );

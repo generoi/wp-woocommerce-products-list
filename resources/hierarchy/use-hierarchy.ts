@@ -389,23 +389,33 @@ export function removeVariationRows( ids: number[] ): void {
 	}
 }
 
-/** Forget loaded variations (all, or of the given parents); expanded parents reload on the next render. */
+/**
+ * Mark loaded variations stale (all, or of the given parents): their rows
+ * stay on screen (status 'idle' with the old items) and expanded parents
+ * refetch on the next render, replacing them when the new rows arrive. A
+ * refetch never removes a row from under an open quick edit.
+ */
 export function invalidateVariations( parentIds?: number[] ): void {
+	const ids = parentIds ?? Array.from( children.keys() );
+
 	if ( ! parentIds ) {
 		abortLoads();
-		children = new Map();
 		idCache.clear();
-		emit();
-
-		return;
 	}
 
 	const next = new Map( children );
 
-	for ( const id of parentIds ) {
+	for ( const id of ids ) {
 		abortLoad( id );
-		next.delete( id );
 		idCache.delete( id );
+
+		const state = next.get( id );
+
+		if ( state && state.items.length > 0 ) {
+			next.set( id, { status: 'idle', items: state.items, total: state.total } );
+		} else {
+			next.delete( id );
+		}
 	}
 
 	children = next;
@@ -425,7 +435,7 @@ function evict(): void {
 			break;
 		}
 
-		if ( state.status !== 'loaded' || currentExpanded.has( parentId ) || currentParents.has( parentId ) ) {
+		if ( state.status === 'loading' || currentExpanded.has( parentId ) || currentParents.has( parentId ) ) {
 			continue;
 		}
 
@@ -633,7 +643,8 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 			const wanted = Math.min( total, cap );
 			const lastPage = Math.max( 1, Math.ceil( wanted / perPage ) );
 
-			if ( lastPage > 1 ) {
+			// A refetch keeps the stale rows until the whole list is back.
+			if ( lastPage > 1 && ! previous?.items.length ) {
 				void setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total }, false );
 
 				await Promise.all(
@@ -659,8 +670,11 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 			if ( signal.aborted || isAbortError( error ) ) {
 				// Collapsed or paged away: back to idle, the next expand
 				// refetches. A load started since (retry, re-expand) owns the state.
-				if ( ! inflight.has( parentId ) && children.get( parentId )?.status === 'loading' ) {
-					await setChildren( parentId, { status: 'idle', items: [], total: 0 }, false );
+				const current = children.get( parentId );
+
+				if ( ! inflight.has( parentId ) && current?.status === 'loading' ) {
+					// Stale rows of a refetch stay; a first load's partial page goes.
+					await setChildren( parentId, previous?.items.length ? { status: 'idle', items: previous.items, total: previous.total } : { status: 'idle', items: [], total: 0 }, false );
 				}
 
 				return;

@@ -11,15 +11,17 @@ import { __ } from '@wordpress/i18n';
 import type { ComponentType } from 'react';
 import type { DataFormControlProps } from '../dataviews';
 import type { Settings } from '../types';
-import { DONT_CHANGE, isNumericOp, validateNumericOp } from './bulk-numeric';
+import type { FieldCurrency } from '../extensions/declarative';
+import { DONT_CHANGE, isNumericOp, ROUNDING_ENDINGS, validateNumericOp } from './bulk-numeric';
 import type { NumericKind, NumericOp } from './bulk-numeric';
 
 export type FormData = Record< string, unknown >;
 
 type OpChoice = { value: string; label: string; operation: NumericOp[ 'operation' ]; percent: boolean };
 
-function choices( kind: NumericKind, settings: Settings, salePrice: boolean ): OpChoice[] {
-	const symbol = settings.currency.symbol;
+function choices( kind: NumericKind, settings: Settings, salePrice: boolean, currency?: FieldCurrency ): OpChoice[] {
+	// A language's prices are in its market currency (kr), not the shop's (€).
+	const symbol = currency?.symbol ?? settings.currency.symbol;
 	const list: OpChoice[] = [
 		{ value: 'dont_change', label: __( '— No change —', 'wp-woocommerce-products-list' ), operation: 'dont_change', percent: false },
 		{ value: 'set', label: __( 'Change to:', 'wp-woocommerce-products-list' ), operation: 'set', percent: false },
@@ -94,15 +96,35 @@ export interface BulkNumericControlOptions {
 	reference?: string | null;
 	/** Offer "regular price minus" (sale price fields). */
 	salePrice?: boolean;
+	/** The currency the field's prices are in, when not the shop's (a language's market). */
+	currency?: FieldCurrency;
+}
+
+/** The rounding choices next to a relative money op: none, or a price ending. */
+export function roundingChoices( settings: Pick< Settings, 'currency' >, decimals: number ): Array< { value: string; label: string } > {
+	if ( decimals !== 2 ) {
+		return [];
+	}
+
+	const mark = settings.currency.decimalSeparator || '.';
+
+	return [
+		{ value: '', label: __( 'No rounding', 'wp-woocommerce-products-list' ) },
+		...ROUNDING_ENDINGS.map( ( ending ) => ( {
+			value: ending,
+			label: ending === '00' ? __( 'Round to whole units', 'wp-woocommerce-products-list' ) : `${ __( 'Round to', 'wp-woocommerce-products-list' ) } …${ mark }${ ending }`,
+		} ) ),
+	];
 }
 
 export function createBulkNumericControl( options: BulkNumericControlOptions ): ComponentType< DataFormControlProps< FormData > > {
-	const { kind, settings, salePrice = false } = options;
+	const { kind, settings, salePrice = false, currency } = options;
+	const rounding = kind === 'money' ? roundingChoices( settings, currency?.decimals ?? settings.currency.decimals ) : [];
 
 	function BulkNumericControl( { data, field, onChange, hideLabelFromVision }: DataFormControlProps< FormData > ) {
 		const raw = data[ field.id ];
 		const op: NumericOp = isNumericOp( raw ) ? raw : DONT_CHANGE;
-		const list = useMemo( () => choices( kind, settings, salePrice ), [] );
+		const list = useMemo( () => choices( kind, settings, salePrice, currency ), [] );
 		const idle = op.operation === 'dont_change';
 		const error = validateNumericOp( op, kind, settings );
 		const help = options.reference ? `${ __( 'Default:', 'wp-woocommerce-products-list' ) } ${ options.reference }` : undefined;
@@ -133,7 +155,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						onChange={ ( value: string ) => {
 							const choice = list.find( ( entry ) => entry.value === value ) ?? list[ 0 ]!;
 
-							update( { operation: choice.operation, value: op.value, percent: choice.percent } );
+							update( { operation: choice.operation, value: op.value, percent: choice.percent, ...( op.round && choice.operation !== 'set' ? { round: op.round } : {} ) } );
 						} }
 					/>
 					<TextControl
@@ -150,6 +172,18 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						onChange={ ( value: string ) => update( { ...op, value } ) }
 					/>
 				</HStack>
+				{ rounding.length > 0 && ! idle && op.operation !== 'set' ? (
+					<SelectControl
+						__nextHasNoMarginBottom
+						__next40pxDefaultSize
+						id={ `${ baseId }-round` }
+						className="wc-pl-bulk-numeric__round"
+						aria-label={ `${ field.label }: ${ __( 'rounding', 'wp-woocommerce-products-list' ) }` }
+						value={ op.round ?? '' }
+						options={ rounding }
+						onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
+					/>
+				) : null }
 				{ note ? <Text variant="muted">{ note }</Text> : null }
 			</BaseControl>
 		);

@@ -54,9 +54,16 @@ describe( 'scopeFromPlan', () => {
 	it( 'describes the plan exactly, naming what is left alone', () => {
 		const scope = scopeFromPlan( { rows: 160, objects: 158, skipped: [ { id: 9, object_type: 'product', action: 'trash' }, { id: 10, object_type: 'product', action: 'delete' } ] } );
 
-		expect( scope ).toEqual( { changes: 158, objects: 158, fields: [], partial: false, skipped: 2 } );
+		expect( scope ).toEqual( { changes: 158, objects: 158, fields: [], partial: false, skipped: 2, failed: 0 } );
 		expect( describeBatchScope( scope ) ).toBe( 'This will put back 158 changes on 158 items. 2 entries (trash, restore, delete or duplicate) are not reverted.' );
 		expect( describeBatchScope( scopeFromPlan( { rows: 1, objects: 1, skipped: [] } ) ) ).toBe( 'This will put back 1 change on 1 item.' );
+	} );
+
+	it( 'counts changes that failed when they were made apart from trash and restore entries', () => {
+		const scope = scopeFromPlan( { rows: 4, objects: 2, failed: 1, skipped: [ { id: 9, object_type: 'product', action: 'failed' }, { id: 10, object_type: 'product', action: 'trash' } ] } );
+
+		expect( scope ).toMatchObject( { changes: 2, skipped: 1, failed: 1 } );
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 2 changes on 2 items. 1 entry (trash, restore, delete or duplicate) is not reverted. 1 failed change, nothing to revert.' );
 	} );
 } );
 

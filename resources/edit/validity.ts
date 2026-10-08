@@ -190,11 +190,134 @@ export function focusFirstInvalidControl( root: HTMLElement | null ): boolean {
 		return false;
 	}
 
-	control.focus();
-
-	if ( typeof control.scrollIntoView === 'function' ) {
-		control.scrollIntoView( { block: 'center' } );
-	}
+	focusControl( control );
 
 	return true;
+}
+
+const CONTROL_SELECTOR = 'input:not([type="hidden"]), select, textarea';
+
+function normalizeLabel( text: string | null | undefined ): string {
+	return ( text ?? '' ).replace( /\s*\((?:required|optional)\)\s*$/i, '' ).replace( /\s*\*\s*$/, '' ).replace( /\s+/g, ' ' ).trim().toLowerCase();
+}
+
+/**
+ * The control a field renders, found by its label: DataForm generates the
+ * ids, so the label is the stable handle. A `<label for>` first, then a
+ * control named by `aria-label` ("Regular price: operation" for the bulk
+ * numeric control).
+ */
+export function controlForField( root: HTMLElement | null, label: string ): HTMLElement | null {
+	if ( ! root || ! label ) {
+		return null;
+	}
+
+	const wanted = normalizeLabel( label );
+
+	for ( const element of Array.from( root.querySelectorAll< HTMLLabelElement >( 'label' ) ) ) {
+		if ( normalizeLabel( element.textContent ) !== wanted ) {
+			continue;
+		}
+
+		const target = element.htmlFor ? root.ownerDocument.getElementById( element.htmlFor ) : element.querySelector< HTMLElement >( CONTROL_SELECTOR );
+
+		if ( target && root.contains( target ) ) {
+			return target.matches( CONTROL_SELECTOR ) ? target : target.querySelector< HTMLElement >( CONTROL_SELECTOR ) ?? target;
+		}
+	}
+
+	for ( const element of Array.from( root.querySelectorAll< HTMLElement >( CONTROL_SELECTOR ) ) ) {
+		const name = normalizeLabel( element.getAttribute( 'aria-label' ) );
+
+		if ( name === wanted || name.startsWith( `${ wanted }:` ) ) {
+			return element;
+		}
+	}
+
+	return null;
+}
+
+/** The marker the editor puts on controls it flagged itself (removed again on the next change). */
+export const FLAGGED_ATTRIBUTE = 'data-wc-pl-invalid';
+
+const OWN_INVALID_ATTRIBUTE = 'data-wc-pl-own-invalid';
+
+/** The id of the (visually hidden) message the editor renders for an invalid field. */
+export function invalidMessageId( fieldId: string ): string {
+	return `wc-pl-invalid-${ fieldId.replace( /[^a-z0-9_-]+/gi, '-' ) }`;
+}
+
+/**
+ * Flag the controls of `fields` as invalid for assistive technology
+ * (`aria-invalid`, described by the editor's message for the field),
+ * whatever the control itself does; returns the controls in the order given.
+ */
+export function flagInvalidControls( root: HTMLElement | null, fields: Array< { field: string; label: string } > ): HTMLElement[] {
+	clearFlaggedControls( root );
+
+	const controls: HTMLElement[] = [];
+
+	for ( const entry of fields ) {
+		const control = controlForField( root, entry.label );
+
+		if ( ! control ) {
+			continue;
+		}
+
+		const messageId = invalidMessageId( entry.field );
+		const described = ( control.getAttribute( 'aria-describedby' ) ?? '' ).split( /\s+/ ).filter( Boolean );
+
+		// A control that flags itself keeps doing so; only ours is taken off again.
+		if ( control.getAttribute( 'aria-invalid' ) === 'true' && ! control.hasAttribute( FLAGGED_ATTRIBUTE ) ) {
+			control.setAttribute( OWN_INVALID_ATTRIBUTE, 'true' );
+		}
+
+		control.setAttribute( 'aria-invalid', 'true' );
+		control.setAttribute( FLAGGED_ATTRIBUTE, messageId );
+
+		if ( ! described.includes( messageId ) ) {
+			control.setAttribute( 'aria-describedby', [ ...described, messageId ].join( ' ' ) );
+		}
+
+		controls.push( control );
+	}
+
+	return controls;
+}
+
+/** Undo `flagInvalidControls`. */
+export function clearFlaggedControls( root: HTMLElement | null ): void {
+	root?.querySelectorAll( `[${ FLAGGED_ATTRIBUTE }]` ).forEach( ( control ) => {
+		const messageId = control.getAttribute( FLAGGED_ATTRIBUTE );
+		const rest = ( control.getAttribute( 'aria-describedby' ) ?? '' ).split( /\s+/ ).filter( ( id ) => id && id !== messageId );
+
+		if ( rest.length ) {
+			control.setAttribute( 'aria-describedby', rest.join( ' ' ) );
+		} else {
+			control.removeAttribute( 'aria-describedby' );
+		}
+
+		control.removeAttribute( FLAGGED_ATTRIBUTE );
+
+		if ( control.hasAttribute( OWN_INVALID_ATTRIBUTE ) ) {
+			control.removeAttribute( OWN_INVALID_ATTRIBUTE );
+		} else {
+			control.removeAttribute( 'aria-invalid' );
+		}
+	} );
+}
+
+/** Focus a control and bring it into view without scrolling the table sideways. */
+export function focusControl( control: HTMLElement | null ): boolean {
+	if ( ! control ) {
+		return false;
+	}
+
+	control.focus( { preventScroll: true } );
+
+	if ( typeof control.scrollIntoView === 'function' ) {
+		control.scrollIntoView( { block: 'center', inline: 'nearest' } );
+	}
+
+	return control.ownerDocument.activeElement === control;
 }

@@ -25,6 +25,7 @@
 import { Button, CheckboxControl, Notice, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
+import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
 import type { KeyboardEvent } from 'react';
 import { getVariations } from '../api/client';
@@ -33,14 +34,18 @@ import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
 import { getCurrentRows } from '../store/rows';
 import type { ProductListItem, QuickEditTab } from '../types';
+import { rowFields } from '../actions/context';
+import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { editFetchFields, hydrateSelection, mergeHydrated, tabFetchFields } from './hydrate';
+import { editFetchFields, hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
 import { projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary } from './change-summary';
 import type { EditorHost } from './editor-context';
 import { isGoneCode } from './errors';
+import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
+import { LanguageTools } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
 import { buildInlineForm, buildTabs, fieldsOfTab, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
@@ -56,8 +61,9 @@ import { planSave } from './save-runner';
 import type { SavePlan } from './save-runner';
 import { undoBatch } from './undo';
 import { useEditState } from './use-edit-state';
-import { collectInvalidFields, focusFirstInvalidControl, revealInvalidControls, validateFormData } from './validity';
-import type { ValidatedField } from './validity';
+import { saleScheduleProblems } from './sale-schedule';
+import { clearFlaggedControls, collectInvalidFields, controlForField, flagInvalidControls, focusControl, focusFirstInvalidControl, invalidMessageId, revealInvalidControls, validateFormData } from './validity';
+import type { InvalidField, ValidatedField } from './validity';
 import { isSellableField, visibleEditFields } from './visibility';
 
 export interface InlineEditorProps {
@@ -87,7 +93,7 @@ function pick( edits: Record< string, unknown >, ids: Set< string > ): Record< s
 }
 
 function nameOf( item: ProductListItem ): string {
-	return ( item as { name?: string } ).name || `#${ item.id }`;
+	return itemLabel( item );
 }
 
 /** "A, B, C and 4 more" for a notice. */
@@ -158,9 +164,28 @@ export function saveLabelFor( plan: SavePlan ): string {
 }
 
 /** The snackbar after a save without errors: what was written, and what the plan left out. */
-export function successMessage( result: SaveResult ): string {
+export interface StatusSkips {
+	/** Rows left out because they were moved to the Trash since the editor loaded them. */
+	trashed: number;
+	/** Rows left out because they were deleted since. */
+	missing: number;
+	/** Their names, for the message. */
+	names?: string;
+}
+
+export function successMessage( result: SaveResult, skipped: StatusSkips = { trashed: 0, missing: 0 } ): string {
 	const updated = result.updated.length;
 	const extras: string[] = [];
+
+	if ( skipped.trashed > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d skipped (moved to the Trash meanwhile)', '%d skipped (moved to the Trash meanwhile)', skipped.trashed, 'wp-woocommerce-products-list' ), skipped.trashed ) );
+	}
+
+	if ( skipped.missing > 0 ) {
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d skipped (deleted meanwhile)', '%d skipped (deleted meanwhile)', skipped.missing, 'wp-woocommerce-products-list' ), skipped.missing ) );
+	}
 
 	if ( result.unchanged > 0 ) {
 		/* translators: %d: number of rows */
@@ -191,8 +216,12 @@ export function successMessage( result: SaveResult ): string {
 
 	/* translators: %d: number of rows saved */
 	const base = sprintf( _n( '%d item updated', '%d items updated', updated, 'wp-woocommerce-products-list' ), updated );
+	const message = `${ [ base, ...extras ].join( ', ' ) }.`;
 
-	return `${ [ base, ...extras ].join( ', ' ) }.`;
+	return skipped.names && skipped.trashed + skipped.missing > 0
+		? /* translators: 1: the message, 2: names of the rows skipped */
+		  sprintf( __( '%1$s Skipped: %2$s', 'wp-woocommerce-products-list' ), message, skipped.names )
+		: message;
 }
 
 /**
@@ -402,7 +431,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				setHydrated( ( current ) => {
 					const next = new Map( current );
 
-					full.forEach( ( row ) => next.set( row.id, row ) );
+					// A tab's load may have landed first: its values stay, the full row goes on top.
+					full.forEach( ( row ) => {
+						const known = next.get( row.id );
+
+						next.set( row.id, known ? ( mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem ) : row );
+					} );
 
 					return next;
 				} );
@@ -477,6 +511,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ skipExistingSales, setSkipExistingSales ] = useState( false );
 	const [ errors, setErrors ] = useState< EditError[] >( [] );
 	const [ warnings, setWarnings ] = useState< EditError[] >( [] );
+	/** The fields whose problem is listed, in the order the editor shows them (tabs, then the form's order). */
+	const [ invalidFields, setInvalidFields ] = useState< Array< { field: string; message: string } > >( [] );
 	const [ acknowledged, setAcknowledged ] = useState< string | null >( null );
 	const [ failedIds, setFailedIds ] = useState< Set< number > | null >( null );
 	const [ saving, setSaving ] = useState( false );
@@ -522,6 +558,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		let cancelled = false;
+		// Only what the tab asked for merges in: a partial row normalised by the client says `type: 'simple'` and `name: '#id'`.
+		const only = rootKeysOf( [ ...wanted, 'status' ] );
 
 		setTabLoading( tab.id );
 
@@ -535,9 +573,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					const next = new Map( current );
 
 					for ( const row of full ) {
-						const known = next.get( row.id );
+						const known = next.get( row.id ) ?? items.find( ( item ) => item.id === row.id );
 
-						next.set( row.id, known ? ( mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem ) : row );
+						if ( known ) {
+							next.set( row.id, mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown >, only ) as ProductListItem );
+						}
 					}
 
 					return next;
@@ -665,6 +705,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			setErrors( [] );
 			setWarnings( [] );
 			setAcknowledged( null );
+			setInvalidFields( [] );
+			clearFlaggedControls( formRef.current );
 		},
 		[ state ]
 	);
@@ -676,7 +718,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return items;
 		}
 
-		return [ ...items, ...Array.from( variations.byParent.values() ).flat() ];
+		// A variation both selected and reached through its parent is one row, not two.
+		const selected = new Set( items.map( ( item ) => item.id ) );
+
+		return [ ...items, ...Array.from( variations.byParent.values() ).flat().filter( ( row ) => ! selected.has( row.id ) ) ];
 	}, [ applyToVariations, items, variations ] );
 
 	// The plan and the warnings walk every target row; on a large selection they
@@ -722,51 +767,108 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) ), [ bulk, selectedRows ] );
 
+	/** Focus a field from the problem list: its tab first, then its control. */
+	const focusField = useCallback(
+		( fieldId: string ) => {
+			const field = fieldTab( fieldId );
+
+			if ( field && tabOf( field ) !== tab.id ) {
+				setTabId( tabOf( field ) );
+			}
+
+			setTimeout( () => {
+				if ( mountedRef.current ) {
+					focusControl( controlForField( formRef.current, fieldLabels[ fieldId ] ?? fieldId ) );
+				}
+			}, 0 );
+		},
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[ fieldTab, tab.id, fieldLabels ]
+	);
+
+	/**
+	 * Block the save on the form's own rules: the sale dates (quick and bulk:
+	 * a half-typed date must never become "no date") and, in quick edit, every
+	 * field's rules against the values as they are now (DataForm's tree lags a
+	 * change by a render and only re-checks the fields that changed), on the
+	 * tabs whose values are loaded. Every problem is listed, every invalid
+	 * control is flagged, and focus goes to the first one.
+	 */
 	const blockOnValidity = (): boolean => {
-		if ( bulk ) {
-			return false;
-		}
+		let invalid: InvalidField[] = saleScheduleProblems( state.data, visibleIds );
 
-		// The rules against the values as they are now (DataForm's tree lags a change by a render
-		// and only re-checks the fields that changed), on the tabs whose values are loaded.
-		const checked = formFields.filter( ( field ) => {
-			const source = fieldTab( field.id );
+		if ( ! bulk ) {
+			const checked = formFields.filter( ( field ) => {
+				const source = fieldTab( field.id );
 
-			return ! source || loadedTabs.has( tabOf( source ) );
-		} );
-		let invalid = validateFormData( state.data, checked as unknown as ValidatedField[] );
+				return ! source || loadedTabs.has( tabOf( source ) );
+			} );
+			const known = new Set( invalid.map( ( entry ) => entry.field ) );
+			let rules = validateFormData( state.data, checked as unknown as ValidatedField[] ).filter( ( entry ) => ! known.has( entry.field ) );
 
-		if ( invalid.length === 0 && ! isValid ) {
-			invalid = collectInvalidFields( validity as Parameters< typeof collectInvalidFields >[ 0 ] );
+			if ( rules.length === 0 && invalid.length === 0 && ! isValid ) {
+				rules = collectInvalidFields( validity as Parameters< typeof collectInvalidFields >[ 0 ] );
+			}
+
+			invalid = [ ...invalid, ...rules ];
 		}
 
 		if ( invalid.length === 0 ) {
 			return false;
 		}
 
-		const list: EditError[] = invalid.map( ( entry ) => {
+		// The form's order (the General tab's columns, then the other tabs), so "first" is the first on screen.
+		const order = new Map( visibleFields.map( ( field, index ) => [ field.id, index ] ) );
+		const tabOrder = new Map( tabs.map( ( entry, index ) => [ entry.id, index ] ) );
+		const rank = ( id: string ) => {
+			const field = fieldTab( id );
+
+			return ( field ? tabOrder.get( tabOf( field ) ) ?? 0 : 0 ) * 10000 + ( order.get( id ) ?? 9999 );
+		};
+
+		invalid = [ ...invalid ].sort( ( a, b ) => rank( a.field ) - rank( b.field ) );
+
+		// The browser's wording when the control has one, so the list says what the field says.
+		const worded = invalid.map( ( entry ) => {
+			const control = controlForField( formRef.current, fieldLabels[ entry.field ] ?? entry.field ) as HTMLInputElement | null;
+			const native = control && typeof control.validationMessage === 'string' ? control.validationMessage : '';
+
+			return native ? { ...entry, message: native } : entry;
+		} );
+
+		const list: EditError[] = worded.map( ( entry ) => {
 			const field = fieldTab( entry.field );
 			const tabName = field ? tabLabels[ tabOf( field ) ] : undefined;
 
 			return {
 				id: 0,
 				field: entry.field,
-				message: tabName && tabs.length > 1 ? `${ entry.message } (${ tabName })` : entry.message,
+				message: tabName && tabs.length > 1 && field && tabOf( field ) !== tab.id ? `${ entry.message } (${ tabName })` : entry.message,
 			};
 		} );
 
 		setErrors( list );
+		setInvalidFields( worded );
 
-		const first = invalid[ 0 ] ? fieldTab( invalid[ 0 ].field ) : undefined;
+		const first = worded[ 0 ] ? fieldTab( worded[ 0 ].field ) : undefined;
 
 		if ( first && tabOf( first ) !== tab.id ) {
 			setTabId( tabOf( first ) );
 		}
 
 		revealInvalidControls( formRef.current );
-		// After the tab (and the error state) rendered: the first invalid control gets the keyboard focus.
+		// After the tab (and the error state) rendered: every invalid control is flagged, the first one gets the keyboard focus.
 		setTimeout( () => {
-			if ( mountedRef.current && ! focusFirstInvalidControl( formRef.current ) ) {
+			if ( ! mountedRef.current ) {
+				return;
+			}
+
+			const controls = flagInvalidControls(
+				formRef.current,
+				worded.map( ( entry ) => ( { field: entry.field, label: fieldLabels[ entry.field ] ?? entry.field } ) )
+			);
+
+			if ( ! focusControl( controls[ 0 ] ?? null ) && ! focusFirstInvalidControl( formRef.current ) ) {
 				focusWithin( rootRef.current, '.wc-pl-edit__errors' );
 			}
 		}, 0 );
@@ -779,6 +881,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			onClose();
 		}
 	};
+
+	const historyAction = ( batchId: string ) =>
+		settings.links.history ? { label: __( 'View in History', 'wp-woocommerce-products-list' ), url: addQueryArgs( settings.links.history, { batch: batchId } ) } : null;
 
 	const undoAction = ( batchId: string ) => ( {
 		label: __( 'Undo', 'wp-woocommerce-products-list' ),
@@ -854,7 +959,26 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		let failed = false;
 
 		try {
-			const result = await saveEdits( retryTargets.items, pendingEdits, editFields, {
+			// Rows trashed or deleted since the editor loaded them are left out and named, not written in the Trash as if nothing happened.
+			const changed = bulk ? await recheckStatuses( retryTargets.items ) : { trashed: [], missing: [] };
+			const dropped = new Set( [ ...changed.trashed, ...changed.missing ] );
+			const saveItems = dropped.size ? retryTargets.items.filter( ( item ) => ! dropped.has( item.id ) ) : retryTargets.items;
+
+			if ( dropped.size ) {
+				dropped.forEach( ( id ) => pendingRemovalRef.current.add( id ) );
+
+				if ( mountedRef.current ) {
+					const trashedSet = new Set( changed.trashed );
+					const rows = retryTargets.items.filter( ( item ) => dropped.has( item.id ) );
+
+					setExcluded( ( current ) => ( {
+						missing: [ ...current.missing, ...rows.filter( ( item ) => ! trashedSet.has( item.id ) ) ],
+						trashed: [ ...current.trashed, ...rows.filter( ( item ) => trashedSet.has( item.id ) ) ],
+					} ) );
+				}
+			}
+
+			const result = await saveEdits( saveItems, pendingEdits, editFields, {
 				applyToVariations,
 				source: bulk ? 'bulk' : 'quick',
 				prefetchedVariations: retryTargets.prefetched,
@@ -873,8 +997,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			gone.forEach( ( id ) => pendingRemovalRef.current.add( id ) );
 
 			// The outcome is reported even when the editor was unmounted mid-save.
+			const skippedNames = dropped.size ? listNames( retryTargets.items.filter( ( item ) => dropped.has( item.id ) ) ) : '';
+
 			if ( result.errors.length === 0 ) {
-				notify.success( successMessage( result ), { id: SAVED_NOTICE_ID, actions: updated > 0 ? [ undoAction( result.batchId ) ] : undefined } );
+				notify.success( successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ), {
+					id: SAVED_NOTICE_ID,
+					// A bulk save also links to its batch in History (what changed, revert later).
+					actions: updated > 0 ? [ undoAction( result.batchId ), ...( bulk && historyAction( result.batchId ) ? [ historyAction( result.batchId )! ] : [] ) ] : undefined,
+				} );
 
 				if ( advance && nextRow ) {
 					if ( mountedRef.current ) {
@@ -890,9 +1020,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			failed = true;
 
 			// The rows that did save can still be undone; the editor (when still up) lists the rest.
-			notify.error( partialFailureMessage( result, names, ! mountedRef.current ), {
+			// Who failed and why, always: the editor may be gone by now (its rows left the list mid-save), and the snackbar is then all there is.
+			const history = historyAction( result.batchId );
+
+			notify.error( partialFailureMessage( result, names ), {
 				id: SAVED_NOTICE_ID,
-				actions: updated > 0 ? [ undoAction( result.batchId ) ] : undefined,
+				actions: [ ...( updated > 0 ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ],
+				explicitDismiss: true,
 			} );
 
 			if ( mountedRef.current ) {
@@ -946,6 +1080,29 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	}, [ submitRequested ] );
 
 	const dirty = state.hasInput && pendingCount > 0;
+
+	// A running save keeps the editor mounted: the screen does not close it when the selection or the rows change meanwhile.
+	const setBusy = host.setBusy;
+	useEffect( () => {
+		setBusy?.( saving );
+	}, [ saving, setBusy ] );
+
+	// Leaving the page (a product link, History, Add new, a reload) with typed changes asks the browser's own question first.
+	useEffect( () => {
+		if ( ! dirty && ! saving ) {
+			return;
+		}
+
+		const onBeforeUnload = ( event: BeforeUnloadEvent ) => {
+			event.preventDefault();
+			// Older browsers need a return value to show the prompt.
+			event.returnValue = '';
+		};
+
+		window.addEventListener( 'beforeunload', onBeforeUnload );
+
+		return () => window.removeEventListener( 'beforeunload', onBeforeUnload );
+	}, [ dirty, saving ] );
 
 	/**
 	 * May the editor close? At once when nothing was typed; after the
@@ -1064,9 +1221,25 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 	};
 
+	const sellableShown = visibleFields.some( isSellableField );
+
 	const variationNote = ( () => {
 		if ( ! applyToVariations ) {
-			return null;
+			// Prices show for the rest of the selection; say who they skip and how to include them.
+			return sellableShown ? (
+				<span className="wc-pl-edit__note">
+					{ sprintf(
+						/* translators: %d: number of variable products */
+						_n(
+							'Price and sale fields apply to the other selected items and skip the %d variable product (its variations hold the prices). Tick the box to include all its variations.',
+							'Price and sale fields apply to the other selected items and skip the %d variable products (their variations hold the prices). Tick the box to include all their variations.',
+							variableParents.length,
+							'wp-woocommerce-products-list'
+						),
+						variableParents.length
+					) }
+				</span>
+			) : null;
 		}
 
 		if ( variations.status === 'loading' ) {
@@ -1205,11 +1378,16 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 							<ul className="wc-pl-inline-edit__list" aria-label={ __( 'Selected items', 'wp-woocommerce-products-list' ) }>
 								{ listed.map( ( item ) => {
 									const kind = kindLabel( item, settings.productTypes );
+									const parentName = parentNameOf( item );
+									const sku = skuOf( item );
+									const label = nameOf( item );
 
 									return (
 										<li key={ item.id } className="wc-pl-inline-edit__item">
-											<span className="wc-pl-inline-edit__item-name" title={ nameOf( item ) }>
-												{ nameOf( item ) }
+											<span className="wc-pl-inline-edit__item-text" title={ sku ? `${ label } · ${ sku }` : label }>
+												{ parentName ? <span className="wc-pl-inline-edit__item-parent">{ parentName }</span> : null }
+												<span className="wc-pl-inline-edit__item-name">{ parentName ? shortNameOf( item ) : label }</span>
+												{ sku ? <span className="wc-pl-inline-edit__item-sku">{ sku }</span> : null }
 											</span>
 											{ kind ? <span className="wc-pl-inline-edit__item-kind">{ kind }</span> : null }
 											{ ! listFrozen ? (
@@ -1345,6 +1523,23 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</div>
 				) : null }
 
+				{ tab.id.includes( ':' ) && tabReady ? (
+					<LanguageTools
+						tabId={ tab.id }
+						tabLabel={ tab.label }
+						items={ items }
+						settings={ settings }
+						disabled={ saving }
+						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ) ) }
+						onDone={ () => {
+							if ( mountedRef.current ) {
+								// The tab's values reload: the copied (or cleared) texts show in the form.
+								setLoadedTabs( ( previous ) => new Set( Array.from( previous ).filter( ( id ) => id !== tab.id ) ) );
+							}
+						} }
+					/>
+				) : null }
+
 				<div
 					ref={ formRef }
 					id={ PANEL_ID }
@@ -1455,7 +1650,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					/>
 				) : null }
 
-				<EditErrors errors={ errors } items={ targetsForValidation } fieldLabels={ fieldLabels } />
+				<EditErrors errors={ errors } items={ targetsForValidation } fieldLabels={ fieldLabels } onFocusField={ focusField } />
+				<div hidden>
+					{ invalidFields.map( ( entry ) => (
+						<span key={ entry.field } id={ invalidMessageId( entry.field ) }>
+							{ entry.message }
+						</span>
+					) ) }
+				</div>
 
 				<div className="wc-pl-edit__footer">
 					<Button type="submit" variant="primary" isBusy={ saving } aria-disabled={ saveBlocked } disabled={ saveBlocked && ! saving } __next40pxDefaultSize>

@@ -78,7 +78,7 @@ describe( 'runSave', () => {
 	} );
 
 	it( 'saves variations per parent first, then parents, chunked, with progress', async () => {
-		const d = deps();
+		const d = deps( { concurrency: 1 } );
 		const progress: Array< [ number, number ] > = [];
 		const items = [ simple( 1 ), simple( 2 ), simple( 3 ), variation( 41, 4 ), variation( 42, 4 ), variation( 43, 4 ), variation( 51, 5 ) ];
 		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', onProgress: ( done, total ) => progress.push( [ done, total ] ) } );
@@ -89,6 +89,34 @@ describe( 'runSave', () => {
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 43, 51, 1, 2, 3 ] );
 		expect( progress ).toEqual( [ [ 0, 7 ], [ 2, 7 ], [ 3, 7 ], [ 4, 7 ], [ 6, 7 ], [ 7, 7 ] ] );
 		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 1, status: 'draft' }, { id: 2, status: 'draft' } ], { batchId: 'batch-1', source: 'bulk' } );
+	} );
+
+	it( 'sends product chunks side by side, cut so every slot has work, and shows every row at once', async () => {
+		let inFlight = 0;
+		let peak = 0;
+		const d = deps( {
+			batchSize: 50,
+			batchProducts: vi.fn( async ( update: Update[] ) => {
+				inFlight += 1;
+				peak = Math.max( peak, inFlight );
+				await new Promise( ( resolve ) => setTimeout( resolve, 5 ) );
+				inFlight -= 1;
+
+				return { update: update.map( ( row ) => ( { ...row } ) ) } as BatchResponse< RawProduct >;
+			} ),
+		} );
+		const items = Array.from( { length: 100 }, ( _, index ) => simple( index + 1, { status: 'publish' } ) );
+		const progress: Array< [ number, number ] > = [];
+		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', onProgress: ( done, total ) => progress.push( [ done, total ] ) } );
+
+		const sizes = ( d.batchProducts as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => ( call[ 0 ] as Update[] ).length );
+
+		expect( sizes ).toEqual( [ 34, 34, 32 ] );
+		expect( peak ).toBe( 3 );
+		expect( result.updated ).toHaveLength( 100 );
+		expect( progress.at( -1 ) ).toEqual( [ 100, 100 ] );
+		// The first patch is the optimistic one for all 100 rows.
+		expect( ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 0 ] ).toHaveLength( 100 );
 	} );
 
 	it( 'patches optimistically, then with the returned rows', async () => {
@@ -141,6 +169,7 @@ describe( 'runSave', () => {
 
 	it( 'reports per-item errors from the batch response and rolls those rows back', async () => {
 		const d = deps( {
+			concurrency: 1,
 			batchProducts: vi.fn( async ( update: Update[] ) => ( {
 				update: update.map( ( row ) => ( row.id === 2 ? { id: 2, error: { code: 'woocommerce_rest_invalid', message: 'Nope' } } : { ...row } ) ),
 			} ) ),
@@ -159,6 +188,7 @@ describe( 'runSave', () => {
 
 	it( 'a failed request fails every row of that chunk and continues with the next', async () => {
 		const d = deps( {
+			concurrency: 1,
 			batchProducts: vi.fn( async ( update: Update[] ) => {
 				if ( update.some( ( row ) => row.id === 1 ) ) {
 					throw Object.assign( new Error( 'Server exploded' ), { code: 'rest_error' } );
@@ -184,7 +214,7 @@ describe( 'runSave', () => {
 	} );
 
 	it( 'applies a scheduled sale to the variations of variable parents and the parents themselves get the rest', async () => {
-		const d = deps( { batchSize: 50 } );
+		const d = deps( { batchSize: 50, concurrency: 1 } );
 		const edits = { sale_price: { operation: 'decrease', value: '20', percent: true }, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' };
 		const result = await runSave( d, [ variable( 4, { status: 'draft' } ), simple( 1, { regular_price: '10', sale_price: '', status: 'draft' } ) ], edits, fields, settings, { applyToVariations: true, source: 'bulk' } );
 

@@ -36,8 +36,21 @@ function isFocusable( element: Element | null ): element is HTMLElement {
 	return element instanceof HTMLElement && element.isConnected && ! ( element as HTMLButtonElement ).disabled;
 }
 
+/** The table itself before the screen around it: a selector list matches in document order, which puts the app root first. */
+function findTable( doc: Document ): HTMLElement | null {
+	for ( const selector of TABLE_SELECTOR.split( ',' ) ) {
+		const match = doc.querySelector< HTMLElement >( selector.trim() );
+
+		if ( match ) {
+			return match;
+		}
+	}
+
+	return null;
+}
+
 function focusTable( doc: Document ): boolean {
-	const table = doc.querySelector< HTMLElement >( TABLE_SELECTOR );
+	const table = findTable( doc );
 
 	if ( ! table ) {
 		return false;
@@ -73,7 +86,7 @@ export function restoreFocus( origin: FocusOrigin | null, doc: Document = docume
 	}
 
 	if ( origin && origin.rowIndex !== null ) {
-		const table = doc.querySelector( TABLE_SELECTOR );
+		const table = findTable( doc );
 		const row = table?.querySelector( 'tbody' )?.children[ origin.rowIndex ] ?? null;
 
 		if ( row ) {
@@ -88,6 +101,17 @@ export function restoreFocus( origin: FocusOrigin | null, doc: Document = docume
 					return true;
 				}
 			}
+		}
+	}
+
+	// A bulk edit opened from the selection bar: the first selected row's checkbox is where the work was.
+	const checked = findTable( doc )?.querySelector< HTMLInputElement >( 'tbody input[type="checkbox"]:checked' );
+
+	if ( checked && isFocusable( checked ) ) {
+		checked.focus();
+
+		if ( doc.activeElement === checked ) {
+			return true;
 		}
 	}
 

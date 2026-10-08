@@ -6,13 +6,13 @@ import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
 import { isRealRow, nameOf } from './context';
 
-export const createHistoryAction: ActionFactory = () => {
+export const createHistoryAction: ActionFactory = ( { fields } ) => {
 	const action: ProductAction = {
 		id: 'history',
 		label: __( 'History', 'wp-woocommerce-products-list' ),
 		supportsBulk: false,
 		isEligible: isRealRow,
-		RenderModal: ( props: RenderModalProps< ProductListItem > ) => <RowHistoryModal { ...props } />,
+		RenderModal: ( props: RenderModalProps< ProductListItem > ) => <RowHistoryModal { ...props } productFields={ fields } />,
 		modalHeader: ( items ) => ( items[ 0 ] ? `${ __( 'History', 'wp-woocommerce-products-list' ) }: ${ nameOf( items[ 0 ] ) }` : __( 'History', 'wp-woocommerce-products-list' ) ),
 		modalSize: 'large',
 	};

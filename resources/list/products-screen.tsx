@@ -164,7 +164,13 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const setGuard = useCallback( ( guard: LeaveGuard | null ) => {
 		guardRef.current = guard;
 	}, [] );
-	const closeEditor = useCallback( () => setSession( null ), [] );
+	// While the editor saves, a refetch or an emptied selection never unmounts it: the save reports into it.
+	const [ editorBusy, setEditorBusy ] = useState( false );
+	const setBusy = useCallback( ( busy: boolean ) => setEditorBusy( busy ), [] );
+	const closeEditor = useCallback( () => {
+		setEditorBusy( false );
+		setSession( null );
+	}, [] );
 	/** Close the editor if it lets us (clean, or the user discards); false means it stays and the caller gives up. */
 	const leaveEditor = useCallback( async (): Promise< boolean > => {
 		if ( ! sessionRef.current ) {
@@ -276,22 +282,45 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		},
 		[ onChangeExpandedItemIds, leaveEditor ]
 	);
+	// Every way to collapse (the chevron, Collapse all, the row action) goes through the same guard.
+	const guardedHierarchy = useMemo(
+		() => ( {
+			...hierarchy,
+			onChangeExpandedItemIds: guardedSetExpanded,
+			collapse: ( id: number ) => guardedSetExpanded( hierarchy.expandedItemIds.filter( ( other ) => other !== id ) ),
+			collapseAll: () => guardedSetExpanded( [] ),
+			toggle: ( id: number ) => ( hierarchy.expandedItemIds.includes( id ) ? guardedSetExpanded( hierarchy.expandedItemIds.filter( ( other ) => other !== id ) ) : hierarchy.toggle( id ) ),
+		} ),
+		[ hierarchy, guardedSetExpanded ]
+	);
 
 	// The edited row left the list (trashed, refetched away): the editor cannot stay; an emptied bulk selection has nothing to edit.
+	// A variation whose parent is still refetching its rows is not gone yet, and a running save is never cut off.
+	const lastEditedRef = useRef< ProductListItem | null >( null );
 	useEffect( () => {
-		if ( ! session ) {
+		if ( ! session || editorBusy ) {
 			return;
 		}
 
-		if ( session.mode === 'quick' && ! findEditedRow( hierarchy.rows, session.id ) ) {
+		const found = session.mode === 'quick' ? findEditedRow( hierarchy.rows, session.id ) : undefined;
+
+		if ( found ) {
+			lastEditedRef.current = found;
+		}
+
+		const last = lastEditedRef.current;
+		const parentId = session.mode === 'quick' && last?.id === session.id ? last._parentId : null;
+		const reloading = parentId !== null && parents.some( ( parent ) => parent.id === parentId ) && hierarchy.childrenState.get( parentId )?.status !== 'loaded' && hierarchy.childrenState.get( parentId )?.status !== 'error';
+
+		if ( session.mode === 'quick' && ! found && ! reloading ) {
 			setSession( null );
 			notify.info( __( 'The product being edited is no longer in the list; the quick edit was closed.', 'wp-woocommerce-products-list' ) );
 		} else if ( session.mode === 'bulk' && selected.rows.length === 0 ) {
 			setSession( null );
 		}
-	}, [ session, hierarchy.rows, selected.rows.length ] );
+	}, [ session, editorBusy, hierarchy.rows, hierarchy.childrenState, parents, selected.rows.length ] );
 
-	const baseActions = useProductActions( { fields, settings, view, tab, hierarchy, selection, onChangeSelection: selected.set, openEditor } );
+	const baseActions = useProductActions( { fields, settings, view, tab, hierarchy: guardedHierarchy, selection, onChangeSelection: selected.set, openEditor } );
 
 	// DataViews' bulk actions see the page's selected rows; widen them to the
 	// whole selection, read at call time (the actions list is built once).
@@ -332,14 +361,16 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						fields,
 						items: editorItems,
 						offPageCount: session.mode === 'bulk' ? selected.offPageCount : 0,
-						wholeList: session.mode === 'bulk' && selected.offPageCount > 0 && selected.rows.length >= list.total,
+						// "Every product in the list": the selection is exactly this list (Select all), not a selection gathered across searches that happens to outnumber it.
+						wholeList: session.mode === 'bulk' && selected.offPageCount > 0 && list.total > 0 && selected.rows.length === list.total && selected.rows.length > parents.length,
 						close: closeEditor,
 						advance: advanceEditor,
 						removeItem: removeFromSelection,
 						setGuard,
+						setBusy,
 				  }
 				: null,
-		[ session, fields, editorItems, selected.offPageCount, selected.rows.length, list.total, closeEditor, advanceEditor, removeFromSelection, setGuard ]
+		[ session, fields, editorItems, selected.offPageCount, selected.rows.length, list.total, parents.length, closeEditor, advanceEditor, removeFromSelection, setGuard, setBusy ]
 	);
 
 	const hasExpandable = parents.some( ( item ) => item._hasChildren );
@@ -355,7 +386,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			{ hasExpandable && (
 				<>
 					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } />
-					<Button size="compact" variant="tertiary" onClick={ () => hierarchy.collapseAll() } disabled={ hierarchy.expandedItemIds.length === 0 }>
+					<Button size="compact" variant="tertiary" onClick={ () => guardedHierarchy.collapseAll() } disabled={ hierarchy.expandedItemIds.length === 0 }>
 						{ __( 'Collapse all', 'wp-woocommerce-products-list' ) }
 					</Button>
 				</>
@@ -380,7 +411,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const hasPageSelection = selection.length > selected.offPageCount;
 
 	return (
-		<HierarchyProvider value={ hierarchy }>
+		<HierarchyProvider value={ guardedHierarchy }>
 			<EditorHostProvider value={ host }>
 				<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }${ session ? ' has-editor' : '' }` }>
 					<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>

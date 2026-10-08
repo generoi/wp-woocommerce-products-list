@@ -24,7 +24,16 @@ import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
 
 /** Always fetched: what the row identity, the actions and the summary need. */
-export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list', 'name', 'permalink' ] as const;
+export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list', 'name', 'sku', 'permalink' ] as const;
+
+/**
+ * What a partial (per-tab) load must never change on a row: the hierarchy
+ * and identity keys. The API client normalises every row it returns, so a
+ * request without `type` answers `type: 'simple'` and one without `name`
+ * answers `name: '#id'`; merged over the row, a variable parent would turn
+ * into a simple product and a variation chip into "#221".
+ */
+export const IDENTITY_KEYS: ReadonlySet< string > = new Set( [ 'type', 'name', 'parent_id', '_kind', '_level', '_parentId', '_parentName', '_hasChildren', '_childCount', '_placeholder' ] );
 
 /** The projected sale < regular check reads both prices whichever one is edited. */
 export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_to', 'manage_stock' ] as const;
@@ -96,16 +105,37 @@ export interface HydratedSelection {
 	trashed: number[];
 }
 
+/** The top-level keys a `_fields` list asks for (`i18n.se.name` → `i18n`). */
+export function rootKeysOf( fields: string[] ): Set< string > {
+	return new Set( fields.map( ( field ) => field.split( '.' )[ 0 ] ?? field ) );
+}
+
 /**
  * The cached row with the fetched values on top. Plain objects (an
  * extension's `i18n`, `dimensions`) merge key by key, so a partial fetch
  * keeps what the row already carried; arrays and scalars are replaced.
+ * `undefined` never replaces a value. With `only`, just those top-level
+ * keys are taken from the fetched row (what the request asked for), and
+ * the identity keys the cached row has are kept whatever the fetch says.
  */
-export function mergeHydrated< Row extends Record< string, unknown > >( cached: Row, fetched: Record< string, unknown > ): Row {
+export function mergeHydrated< Row extends Record< string, unknown > >( cached: Row, fetched: Record< string, unknown >, only?: ReadonlySet< string > ): Row {
 	const result: Record< string, unknown > = { ...cached };
 
 	for ( const [ key, value ] of Object.entries( fetched ) ) {
+		if ( value === undefined ) {
+			continue;
+		}
+
+		if ( only && ( ! only.has( key ) || ( IDENTITY_KEYS.has( key ) && cached[ key ] !== undefined ) ) ) {
+			continue;
+		}
+
 		const current = result[ key ];
+
+		// An empty list or null where the row holds an object (older servers sent `i18n: []` for "nothing applies") is no data, not a wipe.
+		if ( isPlainObject( current ) && ( value === null || ( Array.isArray( value ) && value.length === 0 ) ) ) {
+			continue;
+		}
 
 		result[ key ] = isPlainObject( current ) && isPlainObject( value ) ? mergeHydrated( current, value ) : value;
 	}
@@ -194,4 +224,39 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	} );
 
 	return { items: merged, missing, trashed };
+}
+
+export interface StatusChanges {
+	/** Rows moved to the Trash since the editor loaded them. */
+	trashed: number[];
+	/** Rows deleted since. */
+	missing: number[];
+}
+
+/**
+ * Just before a bulk save: which of the products were trashed or deleted
+ * since the editor loaded them (another tab, another user, WP-CLI). One
+ * `_fields=id,status` request per hundred products, so a 100-row save
+ * pays a few dozen milliseconds. Variations are left out: they have no
+ * Trash of their own.
+ */
+export async function recheckStatuses( items: ProductListItem[], deps: Pick< HydrateDeps, 'listProducts' > = DEFAULT_DEPS, chunk = 100 ): Promise< StatusChanges > {
+	const products = items.filter( ( item ) => ! item._placeholder && ! isVariation( item ) && item.status !== 'trash' );
+	const seen = new Map< number, string | undefined >();
+	const limit = createLimiter( 4 );
+
+	await Promise.all(
+		Array.from( { length: Math.ceil( products.length / chunk ) }, ( _, index ) => products.slice( index * chunk, ( index + 1 ) * chunk ) ).map( ( slice ) =>
+			limit( async () => {
+				const result = await deps.listProducts( { include: slice.map( ( item ) => item.id ).join( ',' ), per_page: slice.length, include_status: ANY_STATUS, _fields: 'id,status' } );
+
+				result.items.forEach( ( row ) => seen.set( row.id, row.status ) );
+			} )
+		)
+	);
+
+	return {
+		trashed: products.filter( ( item ) => seen.get( item.id ) === 'trash' ).map( ( item ) => item.id ),
+		missing: products.filter( ( item ) => ! seen.has( item.id ) ).map( ( item ) => item.id ),
+	};
 }

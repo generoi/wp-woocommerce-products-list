@@ -1,38 +1,54 @@
 /**
- * Catalog → History: every change made through the list, newest first,
+ * Catalog → History. Lands on the batches (one row per gesture: what
+ * changed on how many items, who, when, failures, reverted since); "Show
+ * changes" opens the per-field rows of a batch. The changes view lists
+ * every change made through the list, newest first,
  * filterable by time, item, source, action, field and batch, with
  * "Revert batch" (rows with a field of an update or of an extension action
  * such as a translation copy; trash/restore/delete/duplicate rows are
  * reported as skipped by the server).
  */
-import { Button, Spinner } from '@wordpress/components';
+import { Button, Spinner, __experimentalToggleGroupControl as ToggleGroupControl, __experimentalToggleGroupControlOption as ToggleGroupControlOption } from '@wordpress/components';
 import { dateI18n } from '@wordpress/date';
 import { useCallback, useEffect, useMemo, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { getQueryArg } from '@wordpress/url';
 import { getLogUsers, getRevertPlan } from '../api/client';
-import type { RevertPlan } from '../api/client';
+import type { RevertedBy, RevertPlan } from '../api/client';
 import { notify } from '../actions/notices';
 import { DataViews } from '../dataviews';
 import type { Action, Filter, RenderModalProps, View } from '../dataviews';
 import { useReturnFocus } from '../edit/focus';
 import { SaveProgress } from '../edit/progress';
 import { getSettings } from '../settings';
-import type { Settings } from '../types';
+import { logFieldOptions } from '../fields/log-labels';
+import type { ProductField, Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { createLogFields, logQueryFromView } from './log-fields';
 import { describeBatchScope, isRevertableRow, scopeFromPlan } from './batch-scope';
 import { runRevert } from './revert';
 import type { RevertOutcome } from './revert';
-import { invalidateLog, useLog } from './use-log';
-import type { LogRow } from './use-log';
+import { batchQueryFromView, createBatchFields } from './batch-fields';
+import { invalidateLog, useLog, useLogBatches } from './use-log';
+import type { LogBatch, LogRow } from './use-log';
 import '../edit/style.scss';
 
 const TABLE_FIELDS = [ 'user', 'object', 'source', 'action', 'field', 'change', 'status', 'batch_id' ];
 
+const BATCH_FIELDS = [ 'user', 'source', 'changes', 'result', 'reverted', 'batch_id' ];
+
+/** What the revert confirm needs of a batch: a log row of it, or the batch summary itself. */
+export interface RevertTarget {
+	batch_id: string;
+	created_at: string;
+	created_at_gmt?: string;
+	user: { id: number; name: string };
+	reverted_by?: RevertedBy | null;
+}
+
 /** A log row's time in the site's date/time format and timezone (the same the table shows), from the GMT stamp when the row carries one. */
-export function formatLogTime( row: Pick< LogRow, 'created_at' | 'created_at_gmt' >, settings: Pick< Settings, 'dateFormat' | 'timeFormat' > ): string {
+export function formatLogTime( row: { created_at: string; created_at_gmt?: string }, settings: Pick< Settings, 'dateFormat' | 'timeFormat' > ): string {
 	const gmt = row.created_at_gmt ? `${ row.created_at_gmt.replace( ' ', 'T' ) }Z` : '';
 	const source = gmt || row.created_at;
 
@@ -78,7 +94,7 @@ function conflictFields( outcome: RevertOutcome ): string[] {
 	return Array.from( new Set( outcome.conflicts.flatMap( ( result ) => result.fields ?? [] ) ) );
 }
 
-function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps< LogRow > ) {
+function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPerformed }: RenderModalProps< T > ) {
 	const settings = getSettings();
 	const row = items[ 0 ];
 	const [ busy, setBusy ] = useState( false );
@@ -88,6 +104,8 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	// Set when a pass left conflicts behind: the summary and "Revert anyway".
 	const [ outcome, setOutcome ] = useState< RevertOutcome | null >( null );
 	const batchId = row?.batch_id;
+	// Already put back once: a second revert re-applies the batch's values over the first revert.
+	const revertedBy = ( plan && plan !== 'loading' ? plan.reverted_by : null ) ?? row?.reverted_by ?? null;
 
 	useReturnFocus();
 
@@ -205,6 +223,19 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 					<code>{ row.batch_id }</code> · { row.user?.name } · { formatLogTime( row, settings ) }
 				</p>
 			) : null }
+			{ revertedBy ? (
+				<p className="wc-pl-confirm__warning" role="status">
+					<strong>
+						{ sprintf(
+							/* translators: 1: user name, 2: date and time */
+							__( 'This batch was already reverted by %1$s at %2$s.', 'wp-woocommerce-products-list' ),
+							revertedBy.user?.name || `#${ revertedBy.user?.id ?? 0 }`,
+							formatLogTime( revertedBy, settings )
+						) }
+					</strong>{ ' ' }
+					{ __( 'Reverting it again puts back the values from before this batch a second time; to undo the revert, revert the revert batch instead.', 'wp-woocommerce-products-list' ) }
+				</p>
+			) : null }
 			<p className="wc-pl-confirm__scope" aria-live="polite">
 				{ plan === 'loading' ? (
 					<>
@@ -252,7 +283,7 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 					</Button>
 				) : (
 					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable } onClick={ () => void confirm() } __next40pxDefaultSize>
-						{ __( 'Revert batch', 'wp-woocommerce-products-list' ) }
+						{ revertedBy ? __( 'Revert again', 'wp-woocommerce-products-list' ) : __( 'Revert batch', 'wp-woocommerce-products-list' ) }
 					</Button>
 				) }
 			</div>
@@ -260,8 +291,36 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	);
 }
 
-export function HistoryScreen() {
+type HistoryMode = 'batches' | 'changes';
+
+function initialMode(): HistoryMode {
+	const href = typeof window !== 'undefined' ? window.location.href : '';
+
+	return getQueryArg( href, 'object_id' ) || getQueryArg( href, 'batch' ) || getQueryArg( href, 'view' ) === 'changes' ? 'changes' : 'batches';
+}
+
+function EmptyLog( { error, filtered, onReset }: { error?: Error; filtered: boolean; onReset: () => void } ) {
+	if ( error ) {
+		return <p className="wc-products-list__empty">{ error.message }</p>;
+	}
+
+	if ( filtered ) {
+		return (
+			<div className="wc-products-list__empty">
+				<p>{ __( 'No changes match these filters.', 'wp-woocommerce-products-list' ) }</p>
+				<Button variant="secondary" onClick={ onReset } __next40pxDefaultSize>
+					{ __( 'Reset filters', 'wp-woocommerce-products-list' ) }
+				</Button>
+			</div>
+		);
+	}
+
+	return <p className="wc-products-list__empty">{ __( 'No changes logged yet. Every edit made through the catalog shows up here.', 'wp-woocommerce-products-list' ) }</p>;
+}
+
+export function HistoryScreen( { fields: productFields = [] }: { fields?: ProductField[] } ) {
 	const settings = getSettings();
+	const [ mode, setMode ] = useState< HistoryMode >( initialMode );
 	const [ view, setView ] = useState< View >( () => ( {
 		type: 'table',
 		page: 1,
@@ -271,8 +330,19 @@ export function HistoryScreen() {
 		filters: initialFilters(),
 		layout: { density: 'compact' },
 	} ) );
+	const [ batchView, setBatchView ] = useState< View >( () => ( {
+		type: 'table',
+		page: 1,
+		perPage: 25,
+		titleField: 'created_at',
+		fields: BATCH_FIELDS,
+		filters: [],
+		layout: { density: 'compact' },
+	} ) );
 	const [ users, setUsers ] = useState< Array< { id: number; name: string } > >( [] );
-	const fields = useMemo( () => createLogFields( settings, { users } ), [ settings, users ] );
+	const fieldOptions = useMemo( () => logFieldOptions( productFields ), [ productFields ] );
+	const fields = useMemo( () => createLogFields( settings, { users, fieldOptions } ), [ settings, users, fieldOptions ] );
+	const batchFields = useMemo( () => createBatchFields( settings, { users, fieldOptions, formatTime: ( stamp ) => formatLogTime( stamp, settings ) } ), [ settings, users, fieldOptions ] );
 
 	useEffect( () => {
 		let cancelled = false;
@@ -301,14 +371,20 @@ export function HistoryScreen() {
 		};
 	}, [] );
 	const query = useMemo( () => logQueryFromView( view ), [ view ] );
-	const log = useLog( query );
+	const log = useLog( query, { enabled: mode === 'changes' } );
+	const batchQuery = useMemo( () => batchQueryFromView( batchView ), [ batchView ] );
+	const batches = useLogBatches( batchQuery, { enabled: mode === 'batches' } );
 
 	const showBatch = useCallback(
 		( batchId: string ) => {
 			setView( ( current ) => ( { ...current, page: 1, filters: [ ...( current.filters ?? [] ).filter( ( filter ) => filter.field !== 'batch_id' ), { field: 'batch_id', operator: 'is', value: batchId } ] } ) );
+			setMode( 'changes' );
 		},
 		[ setView ]
 	);
+
+	const resetFilters = useCallback( () => setView( ( current ) => ( { ...current, page: 1, search: '', filters: [] } ) ), [] );
+	const resetBatchFilters = useCallback( () => setBatchView( ( current ) => ( { ...current, page: 1, search: '', filters: [] } ) ), [] );
 
 	const actions = useMemo< Action< LogRow >[] >(
 		() => [
@@ -346,6 +422,32 @@ export function HistoryScreen() {
 		[ showBatch, settings.caps.edit ]
 	);
 
+	const batchActions = useMemo< Action< LogBatch >[] >(
+		() => [
+			{
+				id: 'show-changes',
+				label: __( 'Show changes', 'wp-woocommerce-products-list' ),
+				isPrimary: true,
+				supportsBulk: false,
+				callback: ( items ) => {
+					if ( items[ 0 ] ) {
+						showBatch( items[ 0 ].batch_id );
+					}
+				},
+			},
+			{
+				id: 'revert-batch',
+				label: __( 'Revert batch', 'wp-woocommerce-products-list' ),
+				supportsBulk: false,
+				isEligible: ( item ) => item.revertable && settings.caps.edit,
+				RenderModal: RevertModal,
+				modalHeader: __( 'Revert batch', 'wp-woocommerce-products-list' ),
+				modalSize: 'medium',
+			},
+		],
+		[ showBatch, settings.caps.edit ]
+	);
+
 	const header = (
 		<div className="wc-products-list__header">
 			<Button variant="tertiary" size="compact" href={ settings.links.page }>
@@ -357,21 +459,54 @@ export function HistoryScreen() {
 	return (
 		<div className="wc-products-list wc-pl-history">
 			<h1 className="wc-pl-history__title">{ __( 'History', 'wp-woocommerce-products-list' ) }</h1>
-			<DataViews< LogRow >
-				data={ log.items }
-				fields={ fields }
-				view={ view }
-				onChangeView={ setView }
-				getItemId={ ( row ) => String( row.id ) }
-				paginationInfo={ { totalItems: log.total, totalPages: log.totalPages } }
-				defaultLayouts={ { table: { titleField: 'created_at' } } }
-				actions={ actions }
-				isLoading={ log.isLoading }
-				search={ false }
-				header={ header }
-				config={ { perPageSizes: [ 25, 50, 100 ] } }
-				empty={ <p className="wc-products-list__empty">{ log.error ? log.error.message : __( 'No changes logged yet. Every edit made through the catalog shows up here.', 'wp-woocommerce-products-list' ) }</p> }
-			/>
+			<ToggleGroupControl
+				className="wc-pl-history__mode"
+				label={ __( 'Show', 'wp-woocommerce-products-list' ) }
+				hideLabelFromVision
+				isBlock={ false }
+				value={ mode }
+				onChange={ ( next ) => setMode( next === 'changes' ? 'changes' : 'batches' ) }
+				__next40pxDefaultSize
+				__nextHasNoMarginBottom
+			>
+				<ToggleGroupControlOption value="batches" label={ __( 'Batches', 'wp-woocommerce-products-list' ) } />
+				<ToggleGroupControlOption value="changes" label={ __( 'All changes', 'wp-woocommerce-products-list' ) } />
+			</ToggleGroupControl>
+			{ mode === 'batches' ? (
+				<DataViews< LogBatch >
+					key="batches"
+					data={ batches.items }
+					fields={ batchFields }
+					view={ batchView }
+					onChangeView={ setBatchView }
+					getItemId={ ( batch ) => batch.batch_id }
+					paginationInfo={ { totalItems: batches.total, totalPages: batches.totalPages } }
+					defaultLayouts={ { table: { titleField: 'created_at' } } }
+					actions={ batchActions }
+					isLoading={ batches.isLoading }
+					search={ false }
+					header={ header }
+					config={ { perPageSizes: [ 25, 50, 100 ] } }
+					empty={ <EmptyLog error={ batches.error } filtered={ Boolean( batchView.filters?.length || batchView.search ) } onReset={ resetBatchFilters } /> }
+				/>
+			) : (
+				<DataViews< LogRow >
+					key="changes"
+					data={ log.items }
+					fields={ fields }
+					view={ view }
+					onChangeView={ setView }
+					getItemId={ ( row ) => String( row.id ) }
+					paginationInfo={ { totalItems: log.total, totalPages: log.totalPages } }
+					defaultLayouts={ { table: { titleField: 'created_at' } } }
+					actions={ actions }
+					isLoading={ log.isLoading }
+					search={ false }
+					header={ header }
+					config={ { perPageSizes: [ 25, 50, 100 ] } }
+					empty={ <EmptyLog error={ log.error } filtered={ Boolean( view.filters?.length || view.search ) } onReset={ resetFilters } /> }
+				/>
+			) }
 			<Notices />
 		</div>
 	);

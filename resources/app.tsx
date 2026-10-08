@@ -25,7 +25,7 @@ export function App() {
 	if ( screen === 'history' ) {
 		return (
 			<Suspense fallback={ <div className="wc-products-list__placeholder"><Spinner /></div> }>
-				<HistoryScreen />
+				<HistoryScreen fields={ fields } />
 			</Suspense>
 		);
 	}

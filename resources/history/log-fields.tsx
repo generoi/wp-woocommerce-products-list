@@ -5,6 +5,10 @@
  */
 import { __ } from '@wordpress/i18n';
 import type { Field } from '../dataviews';
+import { formatPrice } from '../fields/currency';
+import { formatSiteDate } from '../fields/site-date';
+import { logFieldLabel } from '../fields/log-labels';
+import type { LogFieldOption } from '../fields/log-labels';
 import type { Settings } from '../types';
 import type { LogQuery, LogRow } from './use-log';
 
@@ -49,6 +53,51 @@ function text( value: string | null ): string {
 	return value;
 }
 
+const PRICE_KEY = /^(?:i18n\.([A-Za-z_-]+)\.)?(?:regular_price|sale_price|price)$/;
+const DATE_KEY = /^date_on_sale_(?:from|to)(?:_gmt)?$/;
+
+/**
+ * A logged value as the shop shows it: prices in the shop's format, or in
+ * the language's own currency for `i18n.<lang>.*_price` (kr, not €), sale
+ * dates in the site's date format. Anything else as text().
+ */
+export function formatLogValue( field: string, value: string | null, settings: Settings | null ): string {
+	if ( ! settings || value === null || value === undefined || value === '' || ! field ) {
+		return text( value );
+	}
+
+	const price = PRICE_KEY.exec( field );
+
+	if ( price && /^-?\d+(\.\d+)?$/.test( value ) ) {
+		const lang = price[ 1 ];
+		const code = lang ? settings.languages?.currencies?.[ lang ] : undefined;
+
+		if ( code ) {
+			try {
+				return new Intl.NumberFormat( ( settings.locale || 'en' ).replace( '_', '-' ), { style: 'currency', currency: code } ).format( Number( value ) );
+			} catch {
+				return `${ value } ${ code }`;
+			}
+		}
+
+		return formatPrice( value, settings ) || value;
+	}
+
+	if ( DATE_KEY.test( field ) && /^\d{4}-\d{2}-\d{2}/.test( value ) ) {
+		try {
+			// Logged in site wall-clock time (wc/v3 input shape): shown as the site's time, never shifted by the browser's zone.
+			return formatSiteDate( `${ settings.dateFormat } ${ settings.timeFormat }`, value.replace( ' ', 'T' ).replace( /([+-]\d{2}:\d{2}|Z)$/, '' ), undefined, settings );
+		} catch {
+			return value;
+		}
+	}
+
+	return text( value );
+}
+
+/** Settings for the change cell's formatting; set by createLogFields (the cell is a plain render function). */
+let cellSettings: Settings | null = null;
+
 export function ChangeCell( { item }: { item: LogRow } ) {
 	if ( item.action === 'duplicate' ) {
 		const copy = item.related;
@@ -62,18 +111,26 @@ export function ChangeCell( { item }: { item: LogRow } ) {
 		);
 	}
 
-	// Extension actions that report changes (i18n_copy) have a field and old/new values like an update.
+	// A failed write with several fields keeps what it tried in context; one field keeps it in old/new.
 	if ( item.action !== 'update' && ! item.field ) {
 		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
 	}
 
+	if ( ! item.field && item.status === 'error' && item.old_value === null && item.new_value === null ) {
+		return <span className="wc-pl-history__change">—</span>;
+	}
+
+	const before = formatLogValue( item.field, item.old_value, cellSettings );
+	const after = formatLogValue( item.field, item.new_value, cellSettings );
+
 	return (
-		<span className="wc-pl-history__change" title={ `${ text( item.old_value ) } → ${ text( item.new_value ) }` }>
-			<del className="wc-pl-history__value">{ text( item.old_value ) }</del>
+		<span className="wc-pl-history__change" title={ `${ before } → ${ after }` }>
+			<del className="wc-pl-history__value">{ before }</del>
 			<span aria-hidden="true">→</span>
 			<ins className="wc-pl-history__value" style={ { textDecoration: 'none' } }>
-				{ text( item.new_value ) }
+				{ after }
 			</ins>
+			{ item.status === 'error' ? <span className="screen-reader-text">{ __( '(attempted, not saved)', 'wp-woocommerce-products-list' ) }</span> : null }
 		</span>
 	);
 }
@@ -82,10 +139,14 @@ export interface LogFieldOptions {
 	withObject?: boolean;
 	/** The users with log rows (`GET /log/users`); when given, the User column filters by them. */
 	users?: Array< { id: number; name: string } >;
+	/** Labels of the logged field keys (fields/log-labels.ts); the Field column shows and filters by them. */
+	fieldOptions?: LogFieldOption[];
 }
 
 export function createLogFields( settings: Settings, options: LogFieldOptions = {} ): Field< LogRow >[] {
 	const users = options.users ?? [];
+	const fieldOptions = options.fieldOptions ?? [];
+	cellSettings = settings;
 	const fields: Field< LogRow >[] = [
 		{
 			id: 'created_at',
@@ -146,6 +207,8 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 				label: __( 'Item ID', 'wp-woocommerce-products-list' ),
 				enableSorting: false,
 				filterBy: { operators: [ 'is' ] },
+				// An id, not a quantity: 40561, never 40,561.
+				render: ( { item } ) => <span>{ String( item.object_id ) }</span>,
 			}
 		);
 	}
@@ -174,8 +237,10 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 			type: 'text',
 			label: __( 'Field', 'wp-woocommerce-products-list' ),
 			enableSorting: false,
+			...( fieldOptions.length ? { elements: fieldOptions } : {} ),
 			filterBy: { operators: [ 'is' ] },
 			getValue: ( { item } ) => item.field ?? '',
+			render: ( { item } ) => <span title={ item.field ?? '' }>{ logFieldLabel( item.field, fieldOptions ) || '—' }</span>,
 		},
 		{
 			id: 'change',

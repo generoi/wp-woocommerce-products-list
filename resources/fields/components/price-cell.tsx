@@ -58,6 +58,47 @@ function saleWindow( from: string, fromGmt: string | undefined, to: string | nul
 		  );
 }
 
+/** The calendar day of a site-local "2026-10-12T00:00:00" (no timezone shift: the site's day is the day shown). */
+function dayOf( value: string ): Date | null {
+	const match = /^(\d{4})-(\d{2})-(\d{2})/.exec( value );
+
+	return match ? new Date( Date.UTC( Number( match[ 1 ] ), Number( match[ 2 ] ) - 1, Number( match[ 3 ] ) ) ) : null;
+}
+
+/**
+ * The sale window short enough for a table cell: "Oct 12–18", "Oct 28 –
+ * Nov 3", with the year only when it is not this year; "from Oct 12"
+ * without an end. The full window is in the cell's title.
+ */
+export function compactSaleWindow( from: string, to: string | null | undefined, locale: string, now: Date = new Date() ): string {
+	const start = dayOf( from );
+	const end = to ? dayOf( to ) : null;
+
+	if ( ! start ) {
+		return '';
+	}
+
+	const lang = ( locale || 'en' ).replace( '_', '-' );
+	const thisYear = start.getUTCFullYear() === now.getFullYear() && ( ! end || end.getUTCFullYear() === now.getFullYear() );
+	const options: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', timeZone: 'UTC', ...( thisYear ? {} : { year: 'numeric' } ) };
+	let format: Intl.DateTimeFormat;
+
+	try {
+		format = new Intl.DateTimeFormat( lang, options );
+	} catch {
+		format = new Intl.DateTimeFormat( 'en', options );
+	}
+
+	if ( ! end ) {
+		/* translators: %s: start date */
+		return sprintf( __( 'from %s', 'wp-woocommerce-products-list' ), format.format( start ) );
+	}
+
+	const range = ( format as Intl.DateTimeFormat & { formatRange?: ( a: Date, b: Date ) => string } ).formatRange;
+
+	return range ? range.call( format, start, end ) : `${ format.format( start ) } – ${ format.format( end ) }`;
+}
+
 /**
  * The sale line of a variable parent, from `wc_products_list.sale_summary`:
  * "On sale · 3 variations" while a sale is in force, "Scheduled · 12
@@ -77,6 +118,7 @@ export function VariationSaleSummary( { item }: { item: ProductListItem } ) {
 	/* translators: %d: number of variations */
 	const variations = sprintf( _n( '%d variation', '%d variations', count, 'wp-woocommerce-products-list' ), count );
 	const window = summary.from ? saleWindow( summary.from, undefined, summary.to, undefined, settings ) : '';
+	const compact = summary.from ? compactSaleWindow( summary.from, summary.to, settings.locale ) : '';
 	const label = active
 		? sprintf(
 				/* translators: 1: "3 variations", 2: the sale window */
@@ -98,7 +140,7 @@ export function VariationSaleSummary( { item }: { item: ProductListItem } ) {
 			</span>
 			{ ' ' }
 			{ variations }
-			{ window ? ` ${ window }` : '' }
+			{ compact ? ` ${ compact }` : '' }
 		</span>
 	);
 }
@@ -141,6 +183,7 @@ export function PriceCell( { item }: { item: ProductListItem } ) {
 	if ( scheduled ) {
 		const sale = formatPrice( item.sale_price ?? '', settings );
 		const window = saleWindow( scheduled.from, scheduled.fromGmt, scheduled.to, scheduled.toGmt, settings );
+		const compact = compactSaleWindow( scheduled.from, scheduled.to, settings.locale ) || window;
 		const label = sprintf(
 			/* translators: 1: sale price, 2: the sale window ("20.11.2026 – 30.11.2026" or "from 20.11.2026") */
 			__( 'Scheduled sale: %1$s, %2$s', 'wp-woocommerce-products-list' ),
@@ -158,7 +201,7 @@ export function PriceCell( { item }: { item: ProductListItem } ) {
 						/* translators: 1: sale price, 2: the sale window */
 						__( '%1$s %2$s', 'wp-woocommerce-products-list' ),
 						sale,
-						window
+						compact
 					) }
 				</span>
 			</span>

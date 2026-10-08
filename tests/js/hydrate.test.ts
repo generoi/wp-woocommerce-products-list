@@ -22,8 +22,8 @@ describe( 'editFetchFields', () => {
 
 		expect( quick ).toContain( 'description' );
 		expect( quick ).toContain( 'sku' );
-		// Bulk never edits the SKU or long text.
-		expect( bulk ).not.toContain( 'sku' );
+		// Bulk never edits the SKU or long text; the SKU comes along only to tell the rows apart in the item list.
+		expect( bulk ).toContain( 'sku' );
 		expect( bulk ).not.toContain( 'description' );
 		expect( bulk ).toContain( 'stock_quantity' );
 		expect( quick ).not.toContain( 'images' );
@@ -149,5 +149,16 @@ describe( 'per-tab field lists', () => {
 		// The core registry has no language fields of its own; the i18n integration adds them.
 		expect( se ).toEqual( [] );
 		expect( tabFetchFields( fields, items, 'quick', { id: 'general', label: 'General' } ) ).toContain( 'regular_price' );
+	} );
+} );
+
+describe( 'mergeHydrated with an empty answer', () => {
+	it( 'keeps an object the row holds when the server sends [] or null for it', async () => {
+		const { mergeHydrated } = await import( '../../resources/edit/hydrate' );
+		const cached = { id: 1, i18n: { se: { name: { value: 'Ullsockor' } } } };
+
+		expect( mergeHydrated( cached, { i18n: [] } ).i18n ).toEqual( cached.i18n );
+		expect( mergeHydrated( cached, { i18n: null } ).i18n ).toEqual( cached.i18n );
+		expect( mergeHydrated( { id: 1, tags: [ 'a' ] }, { tags: [] } ).tags ).toEqual( [] );
 	} );
 } );

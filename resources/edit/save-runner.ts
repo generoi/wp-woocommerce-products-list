@@ -6,7 +6,7 @@
  * which are skipped (do not manage stock, already on sale) and which are
  * unchanged. The modal shows the plan before Save; `runSave` executes it.
  *
- * Order: variations first, then parents (`products/batch`, chunked). The
+ * Order: variations first, then parents (`products/batch`, chunked, side by side). The
  * variations go through the cross-parent `variations/batch` route in
  * chunks of `variationsBatchSize` (a scheduled sale over a page of
  * variable products is one or two requests, not one per parent); without
@@ -117,6 +117,43 @@ function chunk< T >( list: T[], size: number ): T[][] {
 	}
 
 	return chunks;
+}
+
+/**
+ * The cross-parent variation requests, as lanes: each lane's requests run
+ * one after the other, lanes run side by side, and no parent's rows are in
+ * two lanes. Parents that fit go whole into shared requests of up to
+ * `size` rows (a parent never split between them); a parent with more rows
+ * than that gets a lane of its own, chunked.
+ */
+export function packVariationLanes< T >( parents: T[][], size: number ): T[][][] {
+	const step = Math.max( 1, size );
+	const lanes: T[][][] = [];
+	let current: T[] = [];
+
+	for ( const rows of parents ) {
+		if ( rows.length === 0 ) {
+			continue;
+		}
+
+		if ( rows.length > step ) {
+			lanes.push( chunk( rows, step ) );
+			continue;
+		}
+
+		if ( current.length + rows.length > step ) {
+			lanes.push( [ current ] );
+			current = [];
+		}
+
+		current = current.concat( rows );
+	}
+
+	if ( current.length ) {
+		lanes.push( [ current ] );
+	}
+
+	return lanes;
 }
 
 function errorMessage( error: unknown ): string {
@@ -355,31 +392,35 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	}
 
 	if ( deps.batchVariationsAcross ) {
-		// Grouped by parent so each request touches as few parents as possible
-		// (the server syncs a parent once per request it appears in). The
-		// chunks are independent, so a few go out side by side.
+		// Whole parents per request (the server syncs a parent's price and stock
+		// once per request it appears in): a parent never shares out between two
+		// requests in flight, so its sync always reads its final variations. A
+		// parent larger than one request goes in requests of its own, one after
+		// the other. Lanes that share no parent go out side by side.
 		const ordered = Array.from( byParent.values() ).flat();
 		const across = deps.batchVariationsAcross;
-		const groups = chunk( ordered, deps.variationsBatchSize ?? deps.batchSize );
+		const lanes = packVariationLanes( Array.from( byParent.values() ), deps.variationsBatchSize ?? deps.batchSize );
 
 		// Every row shows its new value at once, not chunk by chunk.
 		deps.patchItems( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 		await runConcurrently(
-			groups.map( ( group ) => async () => {
-				try {
-					const response = await across(
-						group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
-						requestOptions
-					);
+			lanes.map( ( lane ) => async () => {
+				for ( const group of lane ) {
+					try {
+						const response = await across(
+							group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
+							requestOptions
+						);
 
-					applyResponse( group, response );
-				} catch ( error ) {
-					failGroup( group, error );
+						applyResponse( group, response );
+					} catch ( error ) {
+						failGroup( group, error );
+					}
+
+					done += group.length;
+					options.onProgress?.( done, total );
 				}
-
-				done += group.length;
-				options.onProgress?.( done, total );
 			} ),
 			deps.concurrency ?? DEFAULT_CONCURRENCY
 		);
@@ -402,19 +443,30 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		}
 	}
 
-	for ( const group of chunk( parents, deps.batchSize ) ) {
-		deps.patchItems( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+	// Products are independent of each other: their requests go out side by
+	// side, cut so that every slot has work (100 rows, 3 at a time: 34+34+32,
+	// never 50 then 50), and every row shows its new value at once.
+	if ( parents.length ) {
+		const concurrency = deps.concurrency ?? DEFAULT_CONCURRENCY;
+		const size = Math.max( 1, Math.min( deps.batchSize, Math.ceil( parents.length / concurrency ) ) );
 
-		try {
-			const response = await deps.batchProducts( group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
+		deps.patchItems( parents.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
-			applyResponse( group, response );
-		} catch ( error ) {
-			failGroup( group, error );
-		}
+		await runConcurrently(
+			chunk( parents, size ).map( ( group ) => async () => {
+				try {
+					const response = await deps.batchProducts( group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
 
-		done += group.length;
-		options.onProgress?.( done, total );
+					applyResponse( group, response );
+				} catch ( error ) {
+					failGroup( group, error );
+				}
+
+				done += group.length;
+				options.onProgress?.( done, total );
+			} ),
+			concurrency
+		);
 	}
 
 	return result;

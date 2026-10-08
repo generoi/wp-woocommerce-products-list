@@ -35,7 +35,7 @@ describe( 'PriceCell', () => {
 		setSettings( sampleSettings( { timezone: '+00:00' } ) );
 		render( <PriceCell item={ row( { price: '105', regular_price: '105', sale_price: '84', on_sale: false, date_on_sale_from: '2036-11-01T00:00:00', date_on_sale_from_gmt: '2036-11-01T00:00:00', date_on_sale_to: '2036-11-30T23:59:00', date_on_sale_to_gmt: '2036-11-30T23:59:00' } ) } /> );
 
-		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 84,00 € 1.11.2036 – 30.11.2036' );
+		expect( screen.getByText( 'Scheduled' ).parentElement ).toHaveTextContent( 'Scheduled 84,00 € 1.–30.11.2036' );
 		expect( screen.getByTitle( /^Scheduled sale/ ) ).toHaveAttribute( 'title', 'Scheduled sale: 84,00 €, 1.11.2036 – 30.11.2036' );
 		// The current price stays the price; the scheduled one is never struck through or shown as in force.
 		expect( screen.getByText( /^105,00 €/ ) ).toHaveClass( 'wc-products-list__price--scheduled' );
@@ -63,5 +63,17 @@ describe( 'PriceCell', () => {
 
 		expect( container.querySelector( 'del' ) ).toHaveTextContent( '180,00 €' );
 		expect( container.querySelector( 'ins' ) ).toHaveTextContent( '99,00 €' );
+	} );
+} );
+
+describe( 'compactSaleWindow', () => {
+	it( 'keeps the window short: one month once, the year only when it is not this year', async () => {
+		const { compactSaleWindow } = await import( '../../resources/fields/components/price-cell' );
+		const now = new Date( 2026, 5, 1 );
+		const plain = ( text: string ) => text.replace( /\s+/gu, ' ' );
+
+		expect( plain( compactSaleWindow( '2026-10-12T00:00:00', '2026-10-18T23:59:59', 'en_US', now ) ) ).toBe( 'Oct 12 – 18' );
+		expect( plain( compactSaleWindow( '2026-10-28T00:00:00', '2026-11-03T23:59:59', 'en_US', now ) ) ).toBe( 'Oct 28 – Nov 3' );
+		expect( plain( compactSaleWindow( '2027-01-05T00:00:00', null, 'en_US', now ) ) ).toBe( 'from Jan 5, 2027' );
 	} );
 } );

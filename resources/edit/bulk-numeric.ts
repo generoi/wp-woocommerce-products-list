@@ -27,7 +27,50 @@ export type NumericOp = {
 	value: string;
 	/** `increase`/`decrease` by percent of the current value, `regular_minus` by percent of the regular price (money only). */
 	percent?: boolean;
+	/**
+	 * Money only, relative ops: round the result to the nearest price with
+	 * these decimals ("95" → x.95, "00" → whole units), as a campaign's
+	 * charm pricing does. Empty or missing: the store's precision only.
+	 */
+	round?: string;
 };
+
+/** The endings the bulk control offers (two-decimal currencies). */
+export const ROUNDING_ENDINGS: readonly string[] = [ '00', '90', '95', '99' ];
+
+/** "rounded to ,95" for the summary. */
+export function describeRounding( round: string, settings?: Pick< Settings, 'currency' > ): string {
+	/* translators: %s: a price ending, e.g. ",95" */
+	return sprintf( __( 'rounded to %s', 'wp-woocommerce-products-list' ), `${ settings?.currency.decimalSeparator ?? '.' }${ round }` );
+}
+
+/**
+ * `units` (minor units) moved to the nearest amount ending in `ending`
+ * (a tie goes down: the lower price). Never below zero; unchanged when
+ * the ending does not fit the currency's decimals.
+ */
+export function roundToEnding( units: number, decimals: number, ending: string ): number {
+	if ( decimals <= 0 || ! /^\d+$/.test( ending ) || ending.length > decimals ) {
+		return units;
+	}
+
+	const scale = scaleOf( decimals );
+	const tail = Number( ending.padEnd( decimals, '0' ) );
+	const base = Math.floor( units / scale ) * scale;
+	let best: number | null = null;
+
+	for ( const candidate of [ base - scale + tail, base + tail, base + scale + tail ] ) {
+		if ( candidate < 0 ) {
+			continue;
+		}
+
+		if ( best === null || Math.abs( candidate - units ) < Math.abs( best - units ) ) {
+			best = candidate;
+		}
+	}
+
+	return best ?? units;
+}
 
 export type NumericKind = 'money' | 'integer';
 
@@ -255,6 +298,10 @@ export function computeNumericOp( current: string | number | null | undefined, o
 		units = increase ? baseUnits + amountUnits : baseUnits - amountUnits;
 	}
 
+	if ( kind === 'money' && op.round && units > 0 ) {
+		units = roundToEnding( units, decimals, op.round );
+	}
+
 	return units / scale;
 }
 
@@ -332,6 +379,28 @@ export function editsForItem( item: ProductListItem, edits: Record< string, unkn
 }
 
 /**
+ * The value a relative op starts from: the row's own, else (a language
+ * price nobody set by hand) the reference the shop sells at, which the
+ * translation integration derives from the default price. "+10 %" on the
+ * Swedish prices then raises every Swedish price, not only the manual ones.
+ */
+export function relativeBase( field: ProductField, item: ProductListItem, op: NumericOp, settings: Settings ): string | number | null | undefined {
+	const current = readFieldValue( field, item ) as string | number | null | undefined;
+
+	if ( op.operation !== 'increase' && op.operation !== 'decrease' ) {
+		return current;
+	}
+
+	if ( parseNumeric( current, settings ) !== undefined ) {
+		return current;
+	}
+
+	const reference = readReference( field, item );
+
+	return parseNumeric( reference, settings ) !== undefined ? ( reference as string | number ) : current;
+}
+
+/**
  * Resolve every edit for one row: numeric ops become concrete values,
  * everything else passes through. Ops that produce no change are dropped.
  */
@@ -352,7 +421,7 @@ export function projectEdits( item: ProductListItem, edits: Record< string, unkn
 				continue;
 			}
 
-			const current = readFieldValue( field, item ) as string | number | null | undefined;
+			const current = relativeBase( field, item, value, settings );
 			const next = applyNumericOp( current, value, kind, settings, contextFor( item, id, edits, byId, settings ) );
 
 			if ( next !== null ) {
@@ -560,7 +629,7 @@ export function projectWarnings( items: ProductListItem[], edits: Record< string
 				continue;
 			}
 
-			const current = readFieldValue( field, item ) as string | number | null | undefined;
+			const current = relativeBase( field, item, value, settings );
 			const next = computeNumericOp( current, value, kind, settings, contextFor( item, id, own, byId, settings ) );
 
 			if ( next === null || next >= 0 ) {

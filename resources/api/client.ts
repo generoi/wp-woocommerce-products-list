@@ -88,16 +88,42 @@ export interface LogRow {
 	message: string;
 	/** The copy a `duplicate` row created, while it still exists. */
 	related?: { id: number; name: string; edit_link: string | null } | null;
+	/** The batch this row's revert put back (rows written by a revert), or null. */
+	reverts?: string | null;
+	/** The latest revert of this row's batch, or null. */
+	reverted_by?: RevertedBy | null;
+}
+
+/** Who reverted a batch, and when (`reverted_by` on log rows, batches and plans). */
+export interface RevertedBy {
+	batch_id: string;
+	created_at: string;
+	created_at_gmt: string;
+	user: { id: number; name: string };
 }
 
 export interface LogBatch {
 	batch_id: string;
 	created_at: string;
+	created_at_gmt?: string;
 	user: { id: number; name: string };
 	source: LogRow[ 'source' ];
 	rows: number;
 	objects: number;
 	fields: string[];
+	/** The distinct actions of the batch's rows (update, trash, i18n_copy…). */
+	actions?: string[];
+	/** Distinct products (not variations) the batch touched. */
+	products?: number;
+	variations?: number;
+	/** Distinct parents of the variations. */
+	parents?: number;
+	/** Rows that failed. */
+	errors?: number;
+	/** The batch this one reverted, when it is a revert. */
+	reverts?: string | null;
+	/** The latest revert of this batch. */
+	reverted_by?: RevertedBy | null;
 	/** Distinct users with rows in the batch; a batch shared by more than one is not revertable. */
 	users?: number;
 	revertable: boolean;
@@ -548,9 +574,11 @@ export async function getLogUsers( options?: RequestOptions ): Promise< Array< {
 	return Array.isArray( users ) ? users : [];
 }
 
-export async function getLogBatches( params: { page?: number; perPage?: number } = {} ): Promise< ListResult< LogBatch > > {
+export async function getLogBatches( params: { page?: number; perPage?: number; batch?: string; user?: number; source?: string; since?: string; until?: string } = {}, options?: RequestOptions ): Promise< ListResult< LogBatch > > {
+	const { page, perPage, ...filters } = params;
 	const response = await request< { items: LogBatch[]; total: number; totalPages: number } >( {
-		path: addQueryArgs( `${ OWN }/log/batches`, { page: params.page ?? 1, per_page: params.perPage ?? 20 } ),
+		path: addQueryArgs( `${ OWN }/log/batches`, { page: page ?? 1, per_page: perPage ?? 20, ...Object.fromEntries( Object.entries( filters ).filter( ( [ , value ] ) => value !== undefined && value !== '' ) ) } ),
+		...listMode( options ),
 	} );
 
 	return { items: response.items ?? [], total: response.total ?? 0, totalPages: response.totalPages ?? 1 };
@@ -566,8 +594,12 @@ export interface RevertPlan {
 	chunk: number;
 	/** Object ids in write order, `chunk` per entry; one POST each. */
 	chunks: number[][];
-	/** Rows that are not reverted (trash, delete, duplicate, masked values). */
+	/** Rows that are not reverted (trash, delete, duplicate, masked values; `action: 'failed'` for rows that failed when made). */
 	skipped: Array< { id: number; object_type: 'product' | 'variation'; action: string } >;
+	/** Rows of the batch that failed when they were made: nothing to put back. */
+	failed?: number;
+	/** The latest revert of this batch, or null. */
+	reverted_by?: RevertedBy | null;
 	/** Distinct users with rows in the batch; more than one makes it not revertable (409 wc_products_list_batch_shared). */
 	users?: number;
 	revertable: boolean;

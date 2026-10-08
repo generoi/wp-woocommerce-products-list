@@ -936,3 +936,45 @@ describe( 'expandAll progressive commits', () => {
 		expect( Math.ceil( 1000 / BULK_PUBLISH_ROWS ) ).toBeGreaterThanOrEqual( loadedAtEmit.length - 1 );
 	} );
 } );
+
+describe( 'a refetch keeps the loaded variations on screen', () => {
+	it( 'invalidation (a column added, an action on another row) keeps every variation row until the new rows arrive', async () => {
+		const { fetch } = fakeFetch( { 1: 250 }, { delay: 20 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 250 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( result.current.rows.some( ( row ) => row.id === 1250 ) ).toBe( true );
+
+		// Every snapshot while it refetches still holds the last variation (on page 3 of the refetch).
+		const seen: boolean[] = [];
+		const unsubscribe = subscribeChildren( () => {
+			seen.push( ( getChildrenState().get( 1 )?.items ?? [] ).some( ( row ) => row.id === 1250 ) );
+		} );
+
+		act( () => invalidateVariations() );
+		expect( getChildrenState().get( 1 )?.status ).not.toBe( 'loaded' );
+		expect( result.current.rows.some( ( row ) => row.id === 1250 ) ).toBe( true );
+
+		await waitFor( () => expect( getChildrenState().get( 1 )?.status ).toBe( 'loaded' ) );
+		unsubscribe();
+
+		expect( seen.length ).toBeGreaterThan( 0 );
+		expect( seen.every( Boolean ) ).toBe( true );
+	} );
+
+	it( 'a collapse while refetching keeps the stale rows for the next expand', async () => {
+		const { fetch } = fakeFetch( { 1: 2 }, { delay: 20 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		act( () => invalidateVariations( [ 1 ] ) );
+		act( () => result.current.collapse( 1 ) );
+
+		await waitFor( () => expect( loadingParentIds() ).toEqual( [] ) );
+		expect( getChildrenState().get( 1 )?.items.map( ( row ) => row.id ) ).toEqual( [ 1001, 1002 ] );
+	} );
+} );

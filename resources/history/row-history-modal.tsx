@@ -5,18 +5,20 @@ import { __, sprintf } from '@wordpress/i18n';
 import { DataViews } from '../dataviews';
 import type { RenderModalProps, View } from '../dataviews';
 import { getSettings } from '../settings';
-import type { ProductListItem } from '../types';
+import { logFieldOptions } from '../fields/log-labels';
+import type { ProductField, ProductListItem } from '../types';
 import { createLogFields, logQueryFromView } from './log-fields';
 import { useLog } from './use-log';
 import type { LogRow } from './use-log';
 
 const ROW_FIELDS = [ 'user', 'source', 'field', 'change', 'status' ];
 
-export function RowHistoryModal( { items, closeModal }: RenderModalProps< ProductListItem > ) {
+export function RowHistoryModal( { items, closeModal, productFields = [] }: RenderModalProps< ProductListItem > & { productFields?: ProductField[] } ) {
 	const settings = getSettings();
 	const item = items.find( ( entry ) => ! entry._placeholder );
 	const [ view, setView ] = useState< View >( { type: 'table', page: 1, perPage: 25, titleField: 'created_at', fields: ROW_FIELDS, filters: [], layout: { density: 'compact' } } );
-	const fields = useMemo( () => createLogFields( settings, { withObject: false } ), [ settings ] );
+	const fieldOptions = useMemo( () => logFieldOptions( productFields ), [ productFields ] );
+	const fields = useMemo( () => createLogFields( settings, { withObject: false, fieldOptions } ), [ settings, fieldOptions ] );
 	const query = useMemo( () => logQueryFromView( view, { object_id: item?.id } ), [ view, item?.id ] );
 	const log = useLog( query, { enabled: Boolean( item ) } );
 

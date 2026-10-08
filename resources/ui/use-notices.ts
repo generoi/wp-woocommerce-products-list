@@ -11,7 +11,7 @@ function toOptions( options: NoticeOptions | undefined ) {
 		type: options?.type ?? 'snackbar',
 		isDismissible: options?.isDismissible ?? true,
 		actions: options?.actions,
-		// A snackbar with actions always stays until dismissed (ui/notices.tsx); `true` makes one without actions stay too.
+		// Snackbars hide after a timeout that pauses on hover/focus (ui/notices.tsx); `true` keeps one until dismissed.
 		...( options?.explicitDismiss !== undefined ? { explicitDismiss: options.explicitDismiss } : {} ),
 	};
 }

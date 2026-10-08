@@ -23,7 +23,9 @@ describe( 'describeEdits', () => {
 		const lines = describeEdits( { sale_price: { operation: 'regular_minus', value: '20', percent: true }, schedule_sale: true, date_on_sale_from: '2026-11-01T00:00:00' }, fields, items, settings );
 
 		expect( lines[ 0 ] ).toMatchObject( { change: 'regular price − 20 %', count: 1, example: 'Boot 38: (empty) → 80,00 €' } );
-		expect( lines[ 1 ] ).toMatchObject( { field: 'schedule_sale', change: 'on' } );
+		expect( lines[ 1 ] ).toMatchObject( { field: 'schedule_sale' } );
+		// What the sale runs from and to, never just "on".
+		expect( lines[ 1 ]?.change ).toMatch( /^on: from .*2026.*, to as each row has it$/ );
 		expect( lines[ 2 ] ).toMatchObject( { field: 'date_on_sale_from', count: 1 } );
 		expect( lines[ 2 ]?.change ).toMatch( /^→ .*2026/ );
 	} );

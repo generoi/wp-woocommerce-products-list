@@ -132,7 +132,8 @@ describe( 'visibleEditFields', () => {
 			{
 				items: [ simple( 1 ), variable( 2 ) ],
 				options: bulk,
-				expect: { has: [ 'name', 'status', 'stock_quantity', 'featured' ], not: [ 'sku', 'regular_price', 'sale_price', 'external_url' ] },
+				// Prices show for the simple product and skip the variable parent (its variations sell).
+				expect: { has: [ 'name', 'status', 'stock_quantity', 'featured', 'regular_price', 'sale_price' ], not: [ 'sku', 'external_url' ] },
 			},
 			{
 				items: [ simple( 1 ), variable( 2 ) ],
@@ -142,7 +143,8 @@ describe( 'visibleEditFields', () => {
 			{
 				items: [ variable( 2 ), variation( 21, 2 ) ],
 				options: bulk,
-				expect: { has: [ 'status', 'stock_quantity' ], not: [ 'name', 'regular_price', 'featured', 'categories' ] },
+				// A parent and its variations ticked together: the prices are there for the variations.
+				expect: { has: [ 'status', 'stock_quantity', 'regular_price', 'sale_price' ], not: [ 'name', 'featured', 'categories' ] },
 			},
 			{
 				items: [ variable( 2 ), variation( 21, 2 ) ],

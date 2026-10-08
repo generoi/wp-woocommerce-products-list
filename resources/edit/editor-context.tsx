@@ -32,6 +32,8 @@ export interface EditorHost {
 	removeItem( id: number ): void;
 	/** The editor installs its discard-confirm here; the screen asks it before paging, sorting, filtering or opening another editor. */
 	setGuard( guard: LeaveGuard | null ): void;
+	/** The editor reports a running save: the screen keeps it mounted until the save is done. Optional for older hosts. */
+	setBusy?( busy: boolean ): void;
 }
 
 const EditorContext = createContext< EditorHost | null >( null );
@@ -100,12 +102,78 @@ export function useEditorRowSpan( ref: React.RefObject< HTMLElement | null > ): 
 	}, [ ref ] );
 }
 
+/** The nearest ancestor that scrolls sideways (the table's wrapper), or null. */
+export function horizontalScroller( from: HTMLElement | null ): HTMLElement | null {
+	let node = from?.parentElement ?? null;
+
+	while ( node && node !== document.body ) {
+		const overflow = window.getComputedStyle( node ).overflowX;
+
+		if ( overflow === 'auto' || overflow === 'scroll' ) {
+			return node;
+		}
+
+		node = node.parentElement;
+	}
+
+	return null;
+}
+
+/**
+ * Keep the editor inside the visible part of the table. The editor's cell
+ * spans the whole table, which a few wide columns make wider than its
+ * scrolling wrapper; laid out at that width the right-hand column is cut
+ * off, and focusing a field there scrolls the wrapper sideways (the item
+ * list and the Name column leave the screen, and stay out after Update).
+ * The host is sized to the wrapper's visible width and sticks to its left
+ * edge; the wrapper is scrolled back to the start when the editor opens
+ * and when it closes.
+ */
+export function useEditorFitsScroller( ref: React.RefObject< HTMLElement | null > ): void {
+	useLayoutEffect( () => {
+		const host = ref.current;
+		const cell = host?.closest( 'td' ) ?? null;
+		const scroller = horizontalScroller( cell );
+
+		if ( ! host || ! cell || ! scroller ) {
+			return;
+		}
+
+		const fit = () => {
+			const style = window.getComputedStyle( cell );
+			const left = parseFloat( style.paddingLeft ) || 0;
+			const right = parseFloat( style.paddingRight ) || 0;
+			const width = scroller.clientWidth - left - right;
+
+			if ( width > 0 ) {
+				host.style.setProperty( '--wc-pl-editor-width', `${ width }px` );
+				host.style.setProperty( '--wc-pl-editor-left', `${ left }px` );
+				host.classList.add( 'is-fitted' );
+			}
+		};
+
+		fit();
+		scroller.scrollLeft = 0;
+
+		const observer = typeof ResizeObserver === 'function' ? new ResizeObserver( fit ) : null;
+
+		observer?.observe( scroller );
+
+		return () => {
+			observer?.disconnect();
+			// The row the editor stood in comes back where it was, Name column and checkboxes in view.
+			scroller.scrollLeft = 0;
+		};
+	}, [ ref ] );
+}
+
 /** What the name field renders for the editor row. */
 export function InlineEditorCell( { item }: { item: ProductListItem } ) {
 	const host = useEditorHost();
 	const ref = useRef< HTMLDivElement >( null );
 
 	useEditorRowSpan( ref );
+	useEditorFitsScroller( ref );
 
 	if ( ! host || ! item._editor ) {
 		return null;

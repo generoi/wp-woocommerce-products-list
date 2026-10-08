@@ -10,6 +10,7 @@ import { applyFilters } from '@wordpress/hooks';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { runAction } from '../api/client';
 import type { ActionResponse, ActionResult } from '../api/client';
+import { isEditorHostedAction } from '../edit/hosted-actions';
 import { undoBatch } from '../edit/undo';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
@@ -173,7 +174,10 @@ function declarativeActions( context: ProductActionsContext ): ProductAction[] {
 	const fields = rowFields( context.fields );
 	const labels = new Map( context.settings.actions.map( ( def ) => [ def.id, def.label || def.id ] ) );
 
-	return actionsFromSettings( context.settings, ( action, ids, args ) => runDeclarativeAction( action, labels.get( action ) ?? action, ids, args, fields ) );
+	// Per-language tools (copy / clear a language) run inline in the editor's language tab, not from a dialog.
+	const hosted = new Set( context.openEditor ? context.settings.actions.filter( isEditorHostedAction ).map( ( def ) => def.id ) : [] );
+
+	return actionsFromSettings( context.settings, ( action, ids, args ) => runDeclarativeAction( action, labels.get( action ) ?? action, ids, args, fields ) ).filter( ( action ) => ! hosted.has( action.id ) );
 }
 
 export function buildProductActions( context: ProductActionsContext ): ProductAction[] {

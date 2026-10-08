@@ -163,8 +163,27 @@
 	}
 }
 
+// Every box between the cell and the editor lets it stick (an `overflow: hidden`
+// ancestor would become its scroll container and pin it to nothing).
+.wc-products-list .dataviews-view-table td.wc-pl-editor-cell,
+.wc-products-list .dataviews-view-table td.wc-pl-editor-cell div:has( .wc-pl-inline-edit-host ) {
+	overflow: visible;
+}
+
+// Sized to the visible width of the table's scrolling wrapper and stuck to its
+// left edge (editor-context.tsx measures it): the three columns stay on screen
+// whatever the table's own width, and focusing a field never scrolls sideways.
+.wc-products-list .dataviews-view-table td.wc-pl-editor-cell .wc-pl-inline-edit-host.is-fitted {
+	position: sticky;
+	left: var( --wc-pl-editor-left, 0 );
+	box-sizing: border-box;
+	width: var( --wc-pl-editor-width );
+	max-width: var( --wc-pl-editor-width );
+}
+
 .wc-pl-inline-edit-host {
 	width: 100%;
+	box-sizing: border-box;
 
 	// A variation's quick edit keeps the row's indentation.
 	&.is-level-1 {
@@ -211,7 +230,7 @@
 	// Bulk: the selected items on the left, the form on the right.
 	&.is-bulk {
 		display: grid;
-		grid-template-columns: minmax( 200px, 260px ) minmax( 0, 1fr );
+		grid-template-columns: minmax( 220px, 320px ) minmax( 0, 1fr );
 		gap: 24px;
 		align-items: start;
 
@@ -259,12 +278,27 @@
 		}
 	}
 
-	&__item-name {
+	&__item-text {
+		display: flex;
 		flex: 1;
+		flex-direction: column;
+		min-width: 0;
+	}
+
+	&__item-name,
+	&__item-parent,
+	&__item-sku {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	&__item-parent,
+	&__item-sku {
+		font-size: 11px;
+		line-height: 1.4;
+		color: var( --wp-components-color-foreground-muted, #757575 );
 	}
 
 	&__item-kind {
@@ -434,4 +468,79 @@
 	padding: 8px 12px;
 	border-left: 4px solid #dba617;
 	background: #fcf9e8;
+}
+
+// A date the browser could not read, or an end before the start: said in red under the input.
+.wc-pl-date-control.is-invalid {
+	.components-base-control__help {
+		color: var( --wp-components-color-foreground-error, #cc1818 );
+	}
+
+	.components-input-control__backdrop {
+		border-color: var( --wp-components-color-foreground-error, #cc1818 );
+	}
+}
+
+// A field named in the problem list: a link-styled button to it.
+.wc-pl-edit__error-field {
+	font-weight: 600;
+}
+
+// Copy / clear a language, folded above the language tab's fields.
+.wc-pl-language-tools {
+	padding: 8px 12px;
+	border: 1px solid var( --wp-components-color-gray-300, #ddd );
+	border-radius: 4px;
+	background: #fff;
+
+	> summary {
+		cursor: pointer;
+		font-weight: 600;
+	}
+
+	&__tool {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+		padding-top: 12px;
+	}
+
+	&__description {
+		margin: 0;
+		font-size: 12px;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+	}
+
+	&__args {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 12px 24px;
+		align-items: flex-start;
+	}
+
+	&__fields {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 16px;
+		margin: 0;
+		padding: 0;
+		border: 0;
+
+		legend {
+			margin-bottom: 4px;
+			font-size: 11px;
+			font-weight: 600;
+			text-transform: uppercase;
+		}
+	}
+
+	&__error {
+		margin: 0;
+		color: var( --wp-components-color-foreground-error, #cc1818 );
+	}
+}
+
+.wc-pl-bulk-numeric__round {
+	margin-top: 8px;
 }

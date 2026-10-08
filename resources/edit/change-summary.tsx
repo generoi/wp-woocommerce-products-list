@@ -6,15 +6,19 @@
  */
 import { dateI18n } from '@wordpress/date';
 import { __, _n, sprintf } from '@wordpress/i18n';
+import { formatMoney } from '../extensions/declarative';
+import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
 import type { Option } from '../dataviews';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { applyArrayOp, arrayOpFieldId, describeArrayOperation, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
-import { editsForItem, isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
+import { describeRounding, editsForItem, isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
 import type { NumericOp } from './bulk-numeric';
 import type { RowEditOptions } from './row-rules';
 import { isVariableParent, readFieldValue } from './field-value';
+import { itemLabel } from './item-label';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
+import { isInvalidDate } from './sale-schedule';
 import { fieldAppliesTo, isSellableField, leafOf } from './visibility';
 
 export interface ChangeLine {
@@ -26,34 +30,94 @@ export interface ChangeLine {
 	count: number;
 	/** "Name: 120,00 € → 126,00 €" for the first row the edit changes. */
 	example?: string;
+	/** The rows counted (each once), so the heading counts every row once across the lines. */
+	rowIds: number[];
 }
 
-function money( value: unknown, settings: Settings ): string {
-	return formatPrice( value as string | number | null | undefined, settings ) || String( value ?? '' );
+/** The currency a price field is in: a language's market currency (SEK) for its prices, else the shop's. */
+export function currencyOf( field: ProductField ): FieldCurrency | undefined {
+	return ( field as { currency?: FieldCurrency } ).currency;
 }
 
-function amount( op: NumericOp, kind: 'money' | 'integer', settings: Settings ): string {
+function money( value: unknown, settings: Settings, currency?: FieldCurrency ): string {
+	const text = currency && currency.code !== settings.currency.code ? formatMoney( value, currency, settings ) : formatPrice( value as string | number | null | undefined, settings );
+
+	return text || String( value ?? '' );
+}
+
+function roundingNote( op: NumericOp, settings: Settings ): string {
+	return op.round ? ` (${ describeRounding( op.round, settings ) })` : '';
+}
+
+function amount( op: NumericOp, kind: 'money' | 'integer', settings: Settings, currency?: FieldCurrency ): string {
 	if ( op.percent ) {
 		return `${ op.value } %`;
 	}
 
-	return kind === 'money' ? money( op.value.replace( settings.currency.decimalSeparator, '.' ), settings ) : op.value;
+	return kind === 'money' ? money( op.value.replace( settings.currency.decimalSeparator, '.' ), settings, currency ) : op.value;
 }
 
-function describeOp( op: NumericOp, kind: 'money' | 'integer', settings: Settings ): string {
+export function describeOp( op: NumericOp, kind: 'money' | 'integer', settings: Settings, currency?: FieldCurrency ): string {
 	switch ( op.operation ) {
 		case 'set':
-			return `→ ${ amount( op, kind, settings ) }`;
+			return `→ ${ amount( op, kind, settings, currency ) }`;
 		case 'increase':
-			return `+ ${ amount( op, kind, settings ) }`;
+			return `+ ${ amount( op, kind, settings, currency ) }${ roundingNote( op, settings ) }`;
 		case 'decrease':
-			return `− ${ amount( op, kind, settings ) }`;
+			return `− ${ amount( op, kind, settings, currency ) }${ roundingNote( op, settings ) }`;
 		case 'regular_minus':
 			/* translators: %s: an amount or percent, e.g. "20 %" */
-			return sprintf( __( 'regular price − %s', 'wp-woocommerce-products-list' ), amount( op, kind, settings ) );
+			return sprintf( __( 'regular price − %s', 'wp-woocommerce-products-list' ), amount( op, kind, settings, currency ) ) + roundingNote( op, settings );
 		default:
 			return '';
 	}
+}
+
+/** Each row once (a variation selected and reached through its parent too), placeholders left out. */
+export function uniqueRows( targets: ProductListItem[] ): ProductListItem[] {
+	const seen = new Set< number >();
+
+	return targets.filter( ( item ) => {
+		if ( item._placeholder || seen.has( item.id ) ) {
+			return false;
+		}
+
+		seen.add( item.id );
+
+		return true;
+	} );
+}
+
+/**
+ * The schedule line: what the sale will run from and to, so a sale with
+ * no dates reads "starts now, no end date", never just "on".
+ */
+export function describeSchedule( toggleId: string, edits: Record< string, unknown >, settings: Settings ): string {
+	const prefix = toggleId.slice( 0, toggleId.length - SCHEDULE_SALE_FIELD_ID.length );
+	const from = edits[ `${ prefix }date_on_sale_from` ];
+	const to = edits[ `${ prefix }date_on_sale_to` ];
+	const describe = ( value: unknown, empty: string ) => {
+		if ( value === undefined ) {
+			return __( 'as each row has it', 'wp-woocommerce-products-list' );
+		}
+
+		if ( value === '' || value === null ) {
+			return empty;
+		}
+
+		if ( isInvalidDate( value ) ) {
+			return __( 'not a valid date', 'wp-woocommerce-products-list' );
+		}
+
+		return describeSiteDateTime( String( value ), settings );
+	};
+
+	return sprintf(
+		/* translators: 1: when the sale starts ("now" or a date), 2: when it ends ("no end date" or a date) */
+		__( 'on: from %1$s, to %2$s', 'wp-woocommerce-products-list' ),
+		describe( from, __( 'now (starts immediately)', 'wp-woocommerce-products-list' ) ),
+		describe( to, __( 'no end date', 'wp-woocommerce-products-list' ) )
+	);
 }
 
 const ZONED_DATE = /(?:Z|[+-]\d{2}:?\d{2})$/;
@@ -119,7 +183,7 @@ function describeValue( field: ProductField, value: unknown, settings: Settings 
 	}
 
 	if ( numericKindOf( field ) === 'money' ) {
-		return money( value, settings );
+		return money( value, settings, currencyOf( field ) );
 	}
 
 	if ( Array.isArray( field.elements ) ) {
@@ -142,7 +206,7 @@ function reaches( field: ProductField, item: ProductListItem, applyToVariations:
 
 export function describeEdits( edits: Record< string, unknown >, fields: ProductField[], targets: ProductListItem[], settings: Settings, applyToVariations = false, options: RowEditOptions = {} ): ChangeLine[] {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
-	const rows = targets.filter( ( item ) => ! item._placeholder );
+	const rows = uniqueRows( targets );
 	const lines: ChangeLine[] = [];
 
 	for ( const [ id, value ] of Object.entries( edits ) ) {
@@ -159,9 +223,9 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
 			const chosen = edits[ arrayOpFieldId( id ) ];
 			const operation = isArrayOperation( chosen ) ? chosen : 'add';
-			const changed = reached.filter( ( item ) => applyArrayOp( readFieldValue( field, item ), operation, value ).changed ).length;
+			const changed = reached.filter( ( item ) => applyArrayOp( readFieldValue( field, item ), operation, value ).changed );
 
-			lines.push( { field: id, label, change: `${ describeArrayOperation( operation ) } ${ describeValue( field, value, settings ) }`, count: changed } );
+			lines.push( { field: id, label, change: `${ describeArrayOperation( operation ) } ${ describeValue( field, value, settings ) }`, count: changed.length, rowIds: changed.map( ( item ) => item.id ) } );
 			continue;
 		}
 
@@ -169,8 +233,9 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 			lines.push( {
 				field: id,
 				label,
-				change: value === false ? __( 'sale dates cleared', 'wp-woocommerce-products-list' ) : __( 'on', 'wp-woocommerce-products-list' ),
+				change: value === false ? __( 'sale dates cleared', 'wp-woocommerce-products-list' ) : describeSchedule( id, edits, settings ),
 				count: reached.length,
+				rowIds: reached.map( ( item ) => item.id ),
 			} );
 			continue;
 		}
@@ -183,7 +248,7 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 			}
 
 			let example: string | undefined;
-			let changed = 0;
+			const changed: number[] = [];
 
 			for ( const item of reached ) {
 				const projected = projectEdits( item, editsForItem( item, edits, fields, options ), fields, settings );
@@ -193,21 +258,20 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 					continue;
 				}
 
-				changed += 1;
+				changed.push( item.id );
 
 				if ( ! example ) {
 					const current = readFieldValue( field, item );
-					const name = ( item as { name?: string } ).name ?? `#${ item.id }`;
 
-					example = `${ name }: ${ describeValue( field, current, settings ) } → ${ describeValue( field, next, settings ) }`;
+					example = `${ itemLabel( item ) }: ${ describeValue( field, current, settings ) } → ${ describeValue( field, next, settings ) }`;
 				}
 			}
 
-			lines.push( { field: id, label, change: describeOp( value, kind, settings ), count: changed, example } );
+			lines.push( { field: id, label, change: describeOp( value, kind, settings, currencyOf( field ) ), count: changed.length, example, rowIds: changed } );
 			continue;
 		}
 
-		lines.push( { field: id, label, change: `→ ${ describeValue( field, value, settings ) }`, count: reached.length } );
+		lines.push( { field: id, label, change: `→ ${ describeValue( field, value, settings ) }`, count: reached.length, rowIds: reached.map( ( item ) => item.id ) } );
 	}
 
 	return lines;
@@ -231,7 +295,8 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 		return null;
 	}
 
-	const rows = targets.filter( ( item ) => ! item._placeholder ).length;
+	// Each row once, however many lines reach it; parents an edit skips are not counted.
+	const rows = new Set( lines.flatMap( ( line ) => line.rowIds ) ).size;
 
 	return (
 		<div className="wc-pl-edit__summary-box" aria-live="polite">

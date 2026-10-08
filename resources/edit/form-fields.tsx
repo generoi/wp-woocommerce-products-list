@@ -29,6 +29,7 @@ import type { MixedState } from './merge';
 import { createMixedBooleanControl } from './mixed-boolean-control';
 import { createMixedTextControl } from './mixed-text-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
+import { saleDateProblem } from './sale-schedule';
 import { leafOf } from './visibility';
 
 export type { FormData } from './bulk-numeric-control';
@@ -165,10 +166,14 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		// Our own datetime-local input: named after the field for assistive technology
 		// ("Sale from", not "Date time"), site wall-clock time in and out, no calendar popover.
 		if ( ( field.type === 'datetime' || field.type === 'date' ) && ! field.Edit ) {
+			const problem = ( data: FormData, fieldId: string ) => saleDateProblem( data, fieldId, ids );
+
 			formField.type = undefined;
-			formField.Edit = createDateTimeControl( settings ) as ComponentType< DataFormControlProps< FormData > >;
+			formField.Edit = createDateTimeControl( settings, { problem } ) as ComponentType< DataFormControlProps< FormData > >;
 			// The control clears with `undefined`, which would read as "untouched"; an empty string is "no date".
 			formField.setValue = ( { value } ) => ( { [ field.id ]: value === undefined ? '' : value } );
+			// A half-typed date or an end before the start blocks Update (quick and bulk alike, inline-editor.tsx).
+			formField.isValid = { ...formField.isValid, custom: ( item: FormData ) => problem( item, field.id ) };
 		}
 
 		if ( field.type === 'array' ) {
@@ -204,7 +209,14 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 			formField.type = undefined;
 			formField.isValid = undefined;
-			formField.Edit = createBulkNumericControl( { kind, settings, placeholder: shared, reference, salePrice: isSalePriceField( field ) } ) as ComponentType< DataFormControlProps< FormData > >;
+			formField.Edit = createBulkNumericControl( {
+				kind,
+				settings,
+				placeholder: shared,
+				reference: reference !== null && reference !== '' ? referenceText( field, reference, settings ) : reference,
+				salePrice: isSalePriceField( field ),
+				currency: ( field as { currency?: FieldCurrency } ).currency,
+			} ) as ComponentType< DataFormControlProps< FormData > >;
 		} else if ( bulk && field.type === 'boolean' && isMixed && ! field.Edit ) {
 			formField.Edit = createMixedBooleanControl( reference );
 		} else if ( bulk && isMixed && isPlainTextField( field ) ) {
