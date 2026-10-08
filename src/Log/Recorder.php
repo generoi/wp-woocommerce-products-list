@@ -1,0 +1,609 @@
+<?php
+
+namespace GeneroWP\ProductsList\Log;
+
+use WC_Product;
+use WC_Product_Variation;
+use WP_REST_Request;
+
+/**
+ * Turns one REST write into log rows: snapshots the touched fields before
+ * WooCommerce saves, reads them again from the saved object and writes one
+ * row per field that actually changed.
+ *
+ * Fields are the request's top-level wc/v3 keys. Two kinds expand into
+ * leaves: `meta_data` becomes `meta_data.{key}`, and extension keys such as
+ * `i18n` become their nested paths (`i18n.se.name`), so a translation edit
+ * is one row like any other field. Values are stored as strings: scalars as
+ * they are, booleans as `true`/`false`, arrays JSON-encoded in the shape
+ * wc/v3 accepts on input, so a revert can post them back verbatim.
+ *
+ * The pure parts (paths, serialize, diff, rows) carry no WordPress
+ * dependency and are covered by the unit suite.
+ *
+ * @phpstan-type Pending array{
+ *     paths: array<int, string>, before: array<string, ?string>, creating: bool,
+ *     object_id: int, object_type: string, parent_id: int, context: array<string, mixed>
+ * }
+ */
+final class Recorder
+{
+    public const FILTER_VALUE = 'wc_products_list/log_value';
+
+    /** Request keys that are addressing, not data. */
+    public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id'];
+
+    /**
+     * wc/v3 keys the product and variation controllers write. Arrays among
+     * them (categories, images, dimensions) are one field, not leaves.
+     */
+    public const CORE_KEYS = [
+        'name', 'slug', 'date_created', 'date_created_gmt', 'type', 'status', 'featured', 'catalog_visibility',
+        'description', 'short_description', 'sku', 'global_unique_id', 'regular_price', 'sale_price',
+        'date_on_sale_from', 'date_on_sale_from_gmt', 'date_on_sale_to', 'date_on_sale_to_gmt',
+        'virtual', 'downloadable', 'downloads', 'download_limit', 'download_expiry', 'external_url', 'button_text',
+        'tax_status', 'tax_class', 'manage_stock', 'stock_quantity', 'stock_status', 'backorders', 'low_stock_amount',
+        'sold_individually', 'weight', 'dimensions', 'shipping_class', 'reviews_allowed', 'upsell_ids', 'cross_sell_ids',
+        'purchase_note', 'categories', 'tags', 'brands', 'images', 'image', 'attributes', 'default_attributes',
+        'grouped_products', 'menu_order', 'post_password', 'cost_of_goods_sold',
+    ];
+
+    /** @var array<int, Pending> keyed by spl_object_id of the request */
+    private static array $pending = [];
+
+    /**
+     * The field paths a request body touches.
+     *
+     * @param  array<string, mixed>  $body  the request's body params
+     * @return array<int, string>
+     */
+    public static function paths(array $body): array
+    {
+        $paths = [];
+
+        foreach ($body as $key => $value) {
+            $key = (string) $key;
+
+            if ($key === '' || in_array($key, self::IGNORED_KEYS, true)) {
+                continue;
+            }
+
+            if ($key === 'meta_data') {
+                foreach (is_array($value) ? $value : [] as $meta) {
+                    if (is_array($meta) && isset($meta['key']) && is_scalar($meta['key']) && (string) $meta['key'] !== '') {
+                        $paths[] = 'meta_data.'.$meta['key'];
+                    }
+                }
+
+                continue;
+            }
+
+            if (in_array($key, self::CORE_KEYS, true) || ! is_array($value) || array_is_list($value)) {
+                $paths[] = $key;
+
+                continue;
+            }
+
+            foreach (self::leaves($value, $key) as $leaf) {
+                $paths[] = $leaf;
+            }
+        }
+
+        return array_values(array_unique($paths));
+    }
+
+    /**
+     * Dot paths to the scalar (or list) leaves of a nested array.
+     *
+     * @param  array<string, mixed>  $value
+     * @return array<int, string>
+     */
+    private static function leaves(array $value, string $prefix): array
+    {
+        $leaves = [];
+
+        foreach ($value as $key => $child) {
+            $path = $prefix.'.'.$key;
+
+            if (is_array($child) && $child !== [] && ! array_is_list($child)) {
+                foreach (self::leaves($child, $path) as $leaf) {
+                    $leaves[] = $leaf;
+                }
+            } else {
+                $leaves[] = $path;
+            }
+        }
+
+        return $leaves;
+    }
+
+    /**
+     * The stored form of a value: null stays null, booleans become
+     * `true`/`false`, other scalars strings, arrays JSON.
+     */
+    public static function serialize(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if (is_scalar($value)) {
+            return (string) $value;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d\TH:i:s');
+        }
+
+        if (is_object($value) && method_exists($value, 'get_data')) {
+            $value = $value->get_data();
+        }
+
+        $json = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return $json === false ? '' : $json;
+    }
+
+    /**
+     * The fields whose stored value differs. Null and the empty string are
+     * the same absence: WooCommerce returns '' for an unset price and null
+     * for an unset date, and a request clearing either yields no noise row.
+     *
+     * @param  array<string, ?string>  $before
+     * @param  array<string, ?string>  $after
+     * @return array<string, array{old: ?string, new: ?string}>
+     */
+    public static function diff(array $before, array $after): array
+    {
+        $changes = [];
+
+        foreach ($after as $path => $new) {
+            $old = $before[$path] ?? null;
+
+            if (($old ?? '') === ($new ?? '')) {
+                continue;
+            }
+
+            $changes[$path] = ['old' => $old, 'new' => $new];
+        }
+
+        return $changes;
+    }
+
+    /**
+     * Log rows for a set of changes.
+     *
+     * @param  array<string, array{old: ?string, new: ?string}>  $changes
+     * @param  array<string, mixed>  $base  shared columns (object_id, object_type, parent_id, action, context, ...)
+     * @return array<int, array<string, mixed>>
+     */
+    public static function rows(array $changes, array $base): array
+    {
+        $rows = [];
+
+        foreach ($changes as $field => $change) {
+            $rows[] = $base + [
+                'field' => $field,
+                'old_value' => $change['old'],
+                'new_value' => $change['new'],
+                'status' => 'ok',
+                'message' => '',
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Before WooCommerce saves: remember the current values of the fields
+     * the request touches. The product passed by `pre_insert` already
+     * carries the new values, so the old ones come from a fresh load.
+     */
+    public static function begin(WC_Product $product, WP_REST_Request $request, bool $creating): void
+    {
+        $body = self::body($request);
+        $paths = self::paths($body);
+
+        if ($paths === []) {
+            return;
+        }
+
+        $before = [];
+
+        if (! $creating && $product->get_id() > 0) {
+            $stored = wc_get_product($product->get_id());
+
+            if ($stored instanceof WC_Product) {
+                $before = self::snapshot($stored, $paths);
+            }
+        }
+
+        self::$pending[spl_object_id($request)] = [
+            'paths' => $paths,
+            'before' => $before,
+            'creating' => $creating,
+            'object_id' => (int) $product->get_id(),
+            'object_type' => $product instanceof WC_Product_Variation ? 'variation' : 'product',
+            'parent_id' => (int) $product->get_parent_id(),
+            'context' => self::context($request, array_keys($body)),
+        ];
+    }
+
+    /**
+     * After WooCommerce saved: diff and log.
+     */
+    public static function complete(WC_Product $product, WP_REST_Request $request): void
+    {
+        $key = spl_object_id($request);
+        $pending = self::$pending[$key] ?? null;
+
+        if ($pending === null) {
+            return;
+        }
+
+        unset(self::$pending[$key]);
+
+        $after = self::snapshot($product, $pending['paths']);
+        $changes = self::diff($pending['before'], $after);
+
+        if ($changes === []) {
+            return;
+        }
+
+        Logger::log(self::rows($changes, [
+            'action' => $pending['creating'] ? 'create' : 'update',
+            'object_type' => $product instanceof WC_Product_Variation ? 'variation' : 'product',
+            'object_id' => (int) $product->get_id(),
+            'parent_id' => (int) $product->get_parent_id(),
+            'context' => $pending['context'],
+        ]));
+    }
+
+    /**
+     * The request is over: whatever WooCommerce rejected gets an error row.
+     *
+     * Two sources. Snapshots that never completed (the save failed after
+     * `pre_insert`), and errors in the response for items that never got
+     * that far: a bad SKU or price throws while the request is applied to
+     * the product, before any hook, so for those the touched fields come
+     * from the request body.
+     *
+     * @param  mixed  $response
+     */
+    public static function abandon($response, WP_REST_Request $request): void
+    {
+        $pending = self::$pending;
+        self::$pending = [];
+
+        $errors = self::errorsFromResponse($response);
+
+        if ($pending === [] && $errors === []) {
+            return;
+        }
+
+        $rows = [];
+        $seen = [];
+
+        foreach ($pending as $item) {
+            $error = $errors[$item['object_id']] ?? $errors[0] ?? null;
+            $seen[$item['object_id']] = true;
+
+            $rows[] = self::errorRow($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error);
+        }
+
+        if ($errors !== []) {
+            $isVariation = str_contains($request->get_route(), '/variations');
+            $parentId = (int) ($request['product_id'] ?? 0);
+            $bodies = self::bodiesById($request);
+
+            foreach ($errors as $id => $error) {
+                if ($id === 0) {
+                    $id = (int) ($request['id'] ?? 0);
+                }
+
+                if ($id === 0 || isset($seen[$id])) {
+                    continue;
+                }
+
+                $body = $bodies[$id] ?? [];
+                $paths = self::paths($body);
+
+                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $parentId, false, $paths, self::context($request, array_keys($body)), $error);
+            }
+        }
+
+        Logger::log($rows);
+    }
+
+    /**
+     * @param  array<int, string>  $paths
+     * @param  array<string, mixed>  $context
+     * @param  array{code: string, message: string}|null  $error
+     * @return array<string, mixed>
+     */
+    private static function errorRow(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error): array
+    {
+        return [
+            'action' => $creating ? 'create' : 'update',
+            'object_type' => $objectType,
+            'object_id' => $objectId,
+            'parent_id' => $parentId,
+            'field' => count($paths) === 1 ? $paths[0] : '',
+            'old_value' => null,
+            'new_value' => null,
+            'status' => 'error',
+            'message' => $error['message'] ?? __('The save was rejected.', 'wp-woocommerce-products-list'),
+            'context' => $context + ['code' => $error['code'] ?? '', 'fields' => $paths],
+        ];
+    }
+
+    /**
+     * The per-item bodies of a write request keyed by id: the `update`
+     * entries of a batch, or the single request's own body.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private static function bodiesById(WP_REST_Request $request): array
+    {
+        $body = self::body($request);
+        $bodies = [];
+
+        if (isset($body['update']) && is_array($body['update'])) {
+            foreach ($body['update'] as $item) {
+                if (is_array($item) && isset($item['id'])) {
+                    $bodies[(int) $item['id']] = $item;
+                }
+            }
+
+            return $bodies;
+        }
+
+        $id = (int) ($request['id'] ?? 0);
+
+        if ($id > 0) {
+            $bodies[$id] = $body;
+        }
+
+        return $bodies;
+    }
+
+    public static function hasPending(): bool
+    {
+        return self::$pending !== [];
+    }
+
+    public static function reset(): void
+    {
+        self::$pending = [];
+    }
+
+    /**
+     * The stored values of the given fields on a product.
+     *
+     * @param  array<int, string>  $paths
+     * @return array<string, ?string>
+     */
+    public static function snapshot(WC_Product $product, array $paths): array
+    {
+        $values = [];
+
+        foreach ($paths as $path) {
+            $values[$path] = self::serialize(self::read($product, $path));
+        }
+
+        return $values;
+    }
+
+    /**
+     * The current value of one field, in the shape wc/v3 takes on input.
+     */
+    public static function read(WC_Product $product, string $path): mixed
+    {
+        $segments = explode('.', $path);
+        $key = $segments[0];
+
+        if ($key === 'meta_data') {
+            $metaKey = implode('.', array_slice($segments, 1));
+            $meta = $product->get_meta($metaKey, false);
+            $values = array_map(static fn ($item) => $item->value, is_array($meta) ? $meta : []);
+
+            return match (count($values)) {
+                0 => null,
+                1 => $values[0],
+                default => $values,
+            };
+        }
+
+        if (count($segments) > 1 || ! in_array($key, self::CORE_KEYS, true)) {
+            return self::readExtension($product, $path, $segments);
+        }
+
+        return match ($key) {
+            'categories' => self::ids($product->get_category_ids()),
+            'tags' => self::ids($product->get_tag_ids()),
+            'brands' => self::ids(wc_get_product_term_ids($product->get_id(), 'product_brand')),
+            'images' => self::ids(array_filter(array_merge([$product->get_image_id()], $product->get_gallery_image_ids()))),
+            'image' => $product->get_image_id() ? ['id' => (int) $product->get_image_id()] : null,
+            'dimensions' => [
+                'length' => (string) $product->get_length(),
+                'width' => (string) $product->get_width(),
+                'height' => (string) $product->get_height(),
+            ],
+            'shipping_class' => (string) $product->get_shipping_class(),
+            'attributes' => self::attributes($product),
+            'default_attributes' => self::defaultAttributes($product),
+            'grouped_products' => array_map('intval', $product->get_children()),
+            'upsell_ids' => array_map('intval', $product->get_upsell_ids()),
+            'cross_sell_ids' => array_map('intval', $product->get_cross_sell_ids()),
+            'downloads' => array_values(array_map(static fn ($download) => [
+                'id' => $download->get_id(),
+                'name' => $download->get_name(),
+                'file' => $download->get_file(),
+            ], $product->get_downloads())),
+            'date_created', 'date_on_sale_from', 'date_on_sale_to' => self::date($product->{'get_'.$key}()),
+            'date_created_gmt', 'date_on_sale_from_gmt', 'date_on_sale_to_gmt' => self::date($product->{'get_'.substr($key, 0, -4)}(), true),
+            'cost_of_goods_sold' => ['value' => $product->get_cogs_value()],
+            'type' => $product->get_type(),
+            default => method_exists($product, 'get_'.$key) ? $product->{'get_'.$key}() : null,
+        };
+    }
+
+    /**
+     * Values an extension wrote: by default the gds-woo-i18n convention
+     * (`i18n.{lang}.{field}` lives in meta `_i18n_{field}_{lang}`), and
+     * whatever `wc_products_list/log_value` returns for anything else.
+     *
+     * @param  array<int, string>  $segments
+     */
+    private static function readExtension(WC_Product $product, string $path, array $segments): mixed
+    {
+        $value = null;
+
+        if ($segments[0] === 'i18n' && count($segments) === 3) {
+            $value = $product->get_meta('_i18n_'.$segments[2].'_'.$segments[1], true);
+        }
+
+        /**
+         * Filters the logged value of an extension field.
+         *
+         * @param  mixed  $value  null when the plugin cannot read it
+         * @param  string  $path  dot path in the request body, e.g. `i18n.se.name`
+         * @param  WC_Product  $product
+         * @param  array<int, string>  $segments
+         */
+        return apply_filters(self::FILTER_VALUE, $value, $path, $product, $segments);
+    }
+
+    /**
+     * @param  array<int, int|string>  $ids
+     * @return array<int, array{id: int}>
+     */
+    private static function ids(array $ids): array
+    {
+        return array_values(array_map(static fn ($id): array => ['id' => (int) $id], $ids));
+    }
+
+    private static function date(mixed $date, bool $gmt = false): ?string
+    {
+        if (! $date instanceof \WC_DateTime) {
+            return null;
+        }
+
+        return $gmt ? gmdate('Y-m-d\TH:i:s', $date->getTimestamp()) : $date->date('Y-m-d\TH:i:s');
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private static function attributes(WC_Product $product): array
+    {
+        $list = [];
+
+        if ($product instanceof WC_Product_Variation) {
+            foreach ($product->get_attributes() as $name => $option) {
+                $list[] = ['name' => (string) $name, 'option' => (string) $option];
+            }
+
+            return $list;
+        }
+
+        foreach ($product->get_attributes() as $attribute) {
+            if (! $attribute instanceof \WC_Product_Attribute) {
+                continue;
+            }
+
+            $list[] = [
+                'id' => $attribute->get_id(),
+                'name' => $attribute->get_name(),
+                'position' => $attribute->get_position(),
+                'visible' => $attribute->get_visible(),
+                'variation' => $attribute->get_variation(),
+                'options' => $attribute->is_taxonomy()
+                    ? array_map(static fn ($term) => $term->name, $attribute->get_terms() ?: [])
+                    : $attribute->get_options(),
+            ];
+        }
+
+        return $list;
+    }
+
+    /**
+     * @return array<int, array{name: string, option: string}>
+     */
+    private static function defaultAttributes(WC_Product $product): array
+    {
+        $list = [];
+
+        foreach ($product->get_default_attributes() as $name => $option) {
+            $list[] = ['name' => (string) $name, 'option' => (string) $option];
+        }
+
+        return $list;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function body(WP_REST_Request $request): array
+    {
+        return array_merge($request->get_body_params(), $request->get_json_params() ?: []);
+    }
+
+    /**
+     * @param  array<int, int|string>  $keys
+     * @return array<string, mixed>
+     */
+    private static function context(WP_REST_Request $request, array $keys): array
+    {
+        return [
+            'keys' => array_values(array_filter(array_map('strval', $keys), static fn (string $key): bool => ! in_array($key, self::IGNORED_KEYS, true))),
+            'route' => $request->get_route(),
+            'ip' => isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash((string) $_SERVER['REMOTE_ADDR'])) : '',
+            'ua' => isset($_SERVER['HTTP_USER_AGENT']) ? substr(sanitize_text_field(wp_unslash((string) $_SERVER['HTTP_USER_AGENT'])), 0, 255) : '',
+        ];
+    }
+
+    /**
+     * Error messages by object id from a (batch) response, 0 for a single error.
+     *
+     * @param  mixed  $response
+     * @return array<int, array{code: string, message: string}>
+     */
+    private static function errorsFromResponse($response): array
+    {
+        if (is_wp_error($response)) {
+            return [0 => ['code' => (string) $response->get_error_code(), 'message' => $response->get_error_message()]];
+        }
+
+        if ($response instanceof \WP_REST_Response && is_wp_error($response->as_error())) {
+            $error = $response->as_error();
+
+            return [0 => ['code' => (string) $error->get_error_code(), 'message' => $error->get_error_message()]];
+        }
+
+        // `rest_request_after_callbacks` sees what the handler returned: a
+        // batch handler returns a plain array, not yet a WP_REST_Response.
+        /** @var array<string, mixed> $data */
+        $data = $response instanceof \WP_REST_Response ? (array) $response->get_data() : (is_array($response) ? $response : []);
+        $errors = [];
+
+        foreach (['create', 'update', 'delete'] as $type) {
+            $list = $data[$type] ?? null;
+
+            foreach (is_array($list) ? $list : [] as $item) {
+                if (is_array($item) && isset($item['error']) && is_array($item['error'])) {
+                    $errors[(int) ($item['id'] ?? 0)] = [
+                        'code' => (string) ($item['error']['code'] ?? ''),
+                        'message' => (string) ($item['error']['message'] ?? ''),
+                    ];
+                }
+            }
+        }
+
+        return $errors;
+    }
+}

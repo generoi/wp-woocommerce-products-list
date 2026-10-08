@@ -29,6 +29,9 @@ class Plugin
     /** Fired once on activation, and from the test bootstrap, after the modules are registered. */
     public const ACTION_ACTIVATE = 'wc_products_list/activate';
 
+    /** Fired once on deactivation; modules that scheduled cron events unschedule them. */
+    public const ACTION_DEACTIVATE = 'wc_products_list/deactivate';
+
     public const TEXT_DOMAIN = 'wp-woocommerce-products-list';
 
     /** The script and style handle of the admin app. Extensions depend on it. */
@@ -120,6 +123,17 @@ class Plugin
         self::getInstance()->boot();
 
         do_action(self::ACTION_ACTIVATE);
+    }
+
+    /**
+     * Deactivation hook. The table and its rows stay (the log is the point);
+     * only the scheduled work goes.
+     */
+    public static function deactivate(): void
+    {
+        self::getInstance()->boot();
+
+        do_action(self::ACTION_DEACTIVATE);
     }
 
     /**

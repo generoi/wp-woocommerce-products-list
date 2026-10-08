@@ -1,0 +1,311 @@
+<?php
+
+namespace GeneroWP\ProductsList\Rest;
+
+use GeneroWP\ProductsList\Actions\Action;
+use GeneroWP\ProductsList\Bootstrap;
+use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\Logger;
+use GeneroWP\ProductsList\Log\Recorder;
+use GeneroWP\ProductsList\Plugin;
+use Throwable;
+use WC_Product;
+use WC_Product_Variation;
+use WP_Error;
+use WP_REST_Request;
+use WP_REST_Response;
+
+/**
+ * POST /wc-products-list/v1/actions/{action} {ids, args}: runs one Action
+ * per id, logs one row per id (or per change the handler reports), and
+ * returns per-id results plus the refreshed rows of the ids that still
+ * exist, so the app can patch its cache without a reload.
+ */
+final class ActionsController
+{
+    public const FILTER_HANDLERS = 'wc_products_list/action_handlers';
+
+    public const ID_PATTERN = '[a-z0-9][a-z0-9_:.\-]{0,99}';
+
+    public function register(): void
+    {
+        register_rest_route(Plugin::REST_NAMESPACE, '/actions/(?P<action>'.self::ID_PATTERN.')', [
+            'methods' => 'POST',
+            'callback' => [$this, 'handle'],
+            'permission_callback' => static fn (): bool => current_user_can(Plugin::capability()),
+            'args' => [
+                'action' => ['type' => 'string', 'required' => true],
+                'ids' => ['type' => 'array', 'required' => true, 'items' => ['type' => 'integer']],
+                'args' => ['type' => 'object', 'default' => []],
+                // `fields`, not `_fields`: core trims the whole response to
+                // `_fields` after the callback, and this response has no
+                // `id`/`status` at the top level, so the app would get `[]`.
+                'fields' => ['type' => 'string', 'description' => 'Comma-separated wc/v3 fields of the refreshed `items` rows.'],
+            ],
+        ]);
+    }
+
+    /**
+     * The registered handlers by id.
+     *
+     * @return array<string, Action>
+     */
+    public static function handlers(): array
+    {
+        /**
+         * Filters the Action instances behind POST /actions/{id}.
+         *
+         * @param  array<string, mixed>  $handlers
+         */
+        $handlers = apply_filters(self::FILTER_HANDLERS, []);
+        $byId = [];
+
+        foreach ($handlers as $handler) {
+            if ($handler instanceof Action) {
+                $byId[$handler->id()] = $handler;
+            }
+        }
+
+        return $byId;
+    }
+
+    /**
+     * Validate the ids of a request: integers, unique, at least one, at most
+     * `$max`. Pure; the unit suite covers it.
+     *
+     * @return array{ok: true, ids: array<int, int>}|array{ok: false, code: string, message: string}
+     */
+    public static function parseIds(mixed $ids, int $max): array
+    {
+        if (! is_array($ids)) {
+            return ['ok' => false, 'code' => 'wc_products_list_invalid_ids', 'message' => 'ids must be an array of integers.'];
+        }
+
+        $clean = [];
+
+        foreach ($ids as $id) {
+            if (is_int($id) || (is_string($id) && ctype_digit($id)) || (is_float($id) && floor($id) === $id)) {
+                $id = (int) $id;
+            } else {
+                return ['ok' => false, 'code' => 'wc_products_list_invalid_ids', 'message' => 'ids must be an array of integers.'];
+            }
+
+            if ($id > 0) {
+                $clean[$id] = $id;
+            }
+        }
+
+        if ($clean === []) {
+            return ['ok' => false, 'code' => 'wc_products_list_no_ids', 'message' => 'No ids given.'];
+        }
+
+        if (count($clean) > $max) {
+            return ['ok' => false, 'code' => 'wc_products_list_too_many_ids', 'message' => sprintf('At most %d ids per request.', $max)];
+        }
+
+        return ['ok' => true, 'ids' => array_values($clean)];
+    }
+
+    public function handle(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        $actionId = (string) $request['action'];
+        $action = self::handlers()[$actionId] ?? null;
+
+        if ($action === null) {
+            return new WP_Error('wc_products_list_unknown_action', sprintf(
+                /* translators: %s: action id */
+                __('Unknown action "%s".', 'wp-woocommerce-products-list'),
+                $actionId
+            ), ['status' => 404]);
+        }
+
+        $parsed = self::parseIds($request['ids'], Bootstrap::ACTION_BATCH_SIZE);
+
+        if (! $parsed['ok']) {
+            return new WP_Error($parsed['code'], $parsed['message'], ['status' => 400]);
+        }
+
+        $args = $action->sanitizeArgs(is_array($request['args']) ? $request['args'] : []);
+
+        if (is_wp_error($args)) {
+            $args->add_data(['status' => 400]);
+
+            return $args;
+        }
+
+        Logger::setSource('action');
+        $batchId = Logger::batchId();
+        $results = [];
+        $rows = [];
+        $survivors = [];
+
+        foreach ($parsed['ids'] as $id) {
+            [$result, $logRows, $product] = $this->runOne($action, $id, $args, $request, $batchId);
+            $results[] = $result;
+
+            foreach ($logRows as $row) {
+                $rows[] = $row;
+            }
+
+            if ($product !== null && get_post($id) !== null) {
+                $survivors[] = $id;
+            }
+        }
+
+        Logger::log($rows);
+        Logger::flush();
+
+        $fields = $request->get_param('fields');
+
+        return rest_ensure_response([
+            'batch_id' => $batchId,
+            'results' => $results,
+            'items' => $this->refresh($survivors, is_string($fields) ? $fields : null),
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $args
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>, 2: ?WC_Product}
+     */
+    private function runOne(Action $action, int $id, array $args, WP_REST_Request $request, string $batchId): array
+    {
+        $product = wc_get_product($id);
+        $base = [
+            'batch_id' => $batchId,
+            'source' => 'action',
+            'action' => $action->id(),
+            'object_type' => $product instanceof WC_Product_Variation ? 'variation' : 'product',
+            'object_id' => $id,
+            'parent_id' => $product instanceof WC_Product ? (int) $product->get_parent_id() : 0,
+            'context' => ['args' => $args],
+        ];
+
+        $fail = static function (string $code, string $message) use ($id, $base): array {
+            return [
+                ['id' => $id, 'ok' => false, 'code' => $code, 'message' => $message],
+                [$base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'error', 'message' => $message, 'context' => $base['context'] + ['code' => $code]]],
+                null,
+            ];
+        };
+
+        if (! $product instanceof WC_Product || $product->get_id() === 0) {
+            return $fail('not_found', __('The product no longer exists.', 'wp-woocommerce-products-list'));
+        }
+
+        $isVariation = $product instanceof WC_Product_Variation;
+        $applies = $action->appliesTo();
+
+        if (($applies === 'product' && $isVariation) || ($applies === 'variation' && ! $isVariation)) {
+            return $fail('not_applicable', $isVariation
+                ? __('This action does not apply to variations.', 'wp-woocommerce-products-list')
+                : __('This action only applies to variations.', 'wp-woocommerce-products-list'));
+        }
+
+        if (! $action->can($product)) {
+            return $fail('forbidden', __('You are not allowed to do this to this product.', 'wp-woocommerce-products-list'));
+        }
+
+        try {
+            $data = $action->run($product, $args, $request);
+        } catch (Throwable $e) {
+            return $fail('exception', $e->getMessage());
+        }
+
+        if (is_wp_error($data)) {
+            return $fail((string) $data->get_error_code(), $data->get_error_message());
+        }
+
+        $changes = is_array($data['changes'] ?? null) ? $data['changes'] : [];
+        unset($data['changes']);
+
+        $rows = [];
+
+        foreach ($changes as $field => $change) {
+            $rows[] = $base + [
+                'field' => (string) $field,
+                'old_value' => Recorder::serialize(is_array($change) ? ($change[0] ?? null) : null),
+                'new_value' => Recorder::serialize(is_array($change) ? ($change[1] ?? null) : null),
+                'status' => 'ok',
+                'message' => '',
+            ];
+        }
+
+        if ($rows === []) {
+            $rows[] = $base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'ok', 'message' => ''];
+        }
+
+        $result = ['id' => $id, 'ok' => true];
+
+        if ($data !== []) {
+            $result['data'] = $data;
+        }
+
+        return [$result, $rows, $product];
+    }
+
+    /**
+     * The current wc/v3 rows (list-mode shape) of the ids that still exist,
+     * in one list request per status group: a trashed product is only found
+     * with `status=trash`, and variations live under their parent.
+     *
+     * @param  array<int, int>  $ids
+     * @return array<int, mixed>
+     */
+    private function refresh(array $ids, ?string $fields): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        _prime_post_caches($ids, false, false);
+
+        $groups = [];
+
+        foreach ($ids as $id) {
+            $post = get_post($id);
+
+            if ($post === null) {
+                continue;
+            }
+
+            $parent = $post->post_type === 'product_variation' ? (int) $post->post_parent : 0;
+            $groups[$parent][$post->post_status][] = $id;
+        }
+
+        $items = [];
+
+        foreach ($groups as $parent => $byStatus) {
+            foreach ($byStatus as $status => $groupIds) {
+                $route = $parent > 0 ? '/wc/v3/products/'.$parent.'/variations' : '/wc/v3/products';
+
+                $request = new WP_REST_Request('GET', $route);
+                $request->set_header(ListMode::HEADER, '1');
+                $request->set_query_params(array_filter([
+                    'include' => $groupIds,
+                    'status' => $status,
+                    'per_page' => Bootstrap::PER_PAGE_MAX,
+                    'image_size' => 'thumbnail',
+                    '_fields' => $fields,
+                ]));
+
+                $response = rest_do_request($request);
+
+                if ($response->is_error()) {
+                    continue;
+                }
+
+                // get_data(), not response_to_data(): the rows without _links.
+                // wc/v3 skips the fields it is not asked for, but keys that
+                // filters add (brands, i18n, wc_products_list) still need trimming.
+                foreach ((array) $response->get_data() as $row) {
+                    if (is_array($row)) {
+                        $items[] = Rows::trim($row, $fields);
+                    }
+                }
+            }
+        }
+
+        return $items;
+    }
+}
