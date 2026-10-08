@@ -65,6 +65,8 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 
 **Actions** (`wc_products_list/actions`) show up in the row menu and the bulk toolbar and run `POST /wc-products-list/v1/actions/{id}` with the selected ids. Without `args` and `confirm` the action runs on click. With either, a modal collects the args (`text`, `select`, `boolean`, `integer`, `number`, `array`; `required` blocks the button) and shows the confirm text. The form starts from each arg's `default`; a required `select` without one starts on its first option, so the button is enabled with the value the user sees. An `array` arg is a checkbox group over its `options` and is sent as a list of the ticked values (`'default' => ['name']` or `'name,slug'` pre-ticks them); use it for "which fields" choices instead of a comma-separated text input. `scope` limits the action to products, variations or both; `destructive` styles the button; the handler itself is a `GeneroWP\ProductsList\Actions\Action` registered through `wc_products_list/action_handlers`.
 
+**Actions hosted in the editor.** A declarative action with a non-null `group` and a `select` arg with id `lang` (gds-woo-i18n's `i18n_copy` and `i18n_clear`) runs inline in the quick/bulk editor instead: on each `<group>:<lang>` tab a "Copy or clear <Language> for the selected items" panel shows the action with `lang` fixed to that tab's language and the other args as inline controls; a `destructive` action asks through an in-page confirm, and the tab's values reload after a run. While an editor is available the action is not listed in the row menu or the bulk toolbar.
+
 ## JavaScript API
 
 `window.wcProductsList` exists when your script runs (enqueue it on `wc_products_list/enqueue` with the handle you receive as a dependency). If you cannot guarantee the order, register in a `wcProductsList.ready` handler; both work, before and after the app mounts.
@@ -85,7 +87,7 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 | `refresh( { counts? } )` | refetches the current page (and counts) |
 | `patchItems( [ { id, …partial } ] )` | merges partial rows into every cached list without a request (for optimistic updates) |
 | `batchUpdate( { products?, variations? }, { source? } )` | saves through the bulk-edit path: variations first (per parent), then parents, under one batch id, logged; resolves `{ updated, errors, batchId }` |
-| `notices.success / error / info( message, options? )` | snackbar (default) or panel notices; `options.actions` (e.g. an Undo) keeps the snackbar on screen until dismissed (always: core/notices cannot express an opt-out), `explicitDismiss: true` keeps one without actions too |
+| `notices.success / error / info( message, options? )` | snackbar (default) or panel notices; snackbars hide after 6 s, or 10 s with `options.actions` (e.g. an Undo), the timer paused while the pointer or focus is on them; error snackbars stay until dismissed; a newer success snackbar with an action replaces an older one (only the latest Undo is offered; earlier batches stay revertable in History); `explicitDismiss: true` keeps any snackbar until dismissed |
 | `getItems()` | the rows currently on screen, parents and expanded variations in display order (placeholder rows excluded; empty before the Catalog mounts and on the History screen) |
 | `hooks` | `wp.hooks` plus the names: `hooks.filters.query`, `hooks.actions.loaded`, `hooks.hookNamespace( 'my-plugin' )` |
 
