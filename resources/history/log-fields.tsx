@@ -1,0 +1,229 @@
+/**
+ * DataViews fields over LogRow, shared by the History screen and the
+ * per-row history modal. Filtering and sorting happen on the server
+ * (`GET /log`), so fields only declare which operators map to a param.
+ */
+import { __ } from '@wordpress/i18n';
+import type { Field } from '../dataviews';
+import type { Settings } from '../types';
+import type { LogQuery, LogRow } from './use-log';
+
+export const SOURCE_OPTIONS = [
+	{ value: 'quick', label: __( 'Quick edit', 'wp-woocommerce-products-list' ) },
+	{ value: 'bulk', label: __( 'Bulk edit', 'wp-woocommerce-products-list' ) },
+	{ value: 'action', label: __( 'Action', 'wp-woocommerce-products-list' ) },
+	{ value: 'extension', label: __( 'Extension', 'wp-woocommerce-products-list' ) },
+	{ value: 'revert', label: __( 'Revert', 'wp-woocommerce-products-list' ) },
+];
+
+export const ACTION_OPTIONS = [
+	{ value: 'update', label: __( 'Update', 'wp-woocommerce-products-list' ) },
+	{ value: 'trash', label: __( 'Trash', 'wp-woocommerce-products-list' ) },
+	{ value: 'restore', label: __( 'Restore', 'wp-woocommerce-products-list' ) },
+	{ value: 'delete', label: __( 'Delete', 'wp-woocommerce-products-list' ) },
+	{ value: 'duplicate', label: __( 'Duplicate', 'wp-woocommerce-products-list' ) },
+];
+
+function text( value: string | null ): string {
+	if ( value === null || value === undefined ) {
+		return '—';
+	}
+
+	if ( value === '' ) {
+		return __( '(empty)', 'wp-woocommerce-products-list' );
+	}
+
+	// Values are JSON-encoded when they were not scalar.
+	if ( value.startsWith( '[' ) || value.startsWith( '{' ) ) {
+		try {
+			const parsed: unknown = JSON.parse( value );
+
+			if ( Array.isArray( parsed ) ) {
+				return parsed.map( ( entry ) => ( typeof entry === 'object' && entry !== null && 'name' in entry ? String( ( entry as { name: unknown } ).name ) : String( entry ) ) ).join( ', ' ) || __( '(none)', 'wp-woocommerce-products-list' );
+			}
+		} catch {
+			// Not JSON after all; show as is.
+		}
+	}
+
+	return value;
+}
+
+export function ChangeCell( { item }: { item: LogRow } ) {
+	if ( item.action !== 'update' ) {
+		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
+	}
+
+	return (
+		<span className="wc-pl-history__change" title={ `${ text( item.old_value ) } → ${ text( item.new_value ) }` }>
+			<del className="wc-pl-history__value">{ text( item.old_value ) }</del>
+			<span aria-hidden="true">→</span>
+			<ins className="wc-pl-history__value" style={ { textDecoration: 'none' } }>
+				{ text( item.new_value ) }
+			</ins>
+		</span>
+	);
+}
+
+export function createLogFields( settings: Settings, options: { withObject?: boolean } = {} ): Field< LogRow >[] {
+	const fields: Field< LogRow >[] = [
+		{
+			id: 'created_at',
+			type: 'datetime',
+			label: __( 'Time', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			enableHiding: false,
+			filterBy: { operators: [ 'after', 'before' ] },
+			format: { datetime: `${ settings.dateFormat } ${ settings.timeFormat }` },
+		},
+		{
+			id: 'user',
+			type: 'text',
+			label: __( 'User', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			getValue: ( { item } ) => item.user?.name ?? '',
+			filterBy: false,
+		},
+	];
+
+	if ( options.withObject !== false ) {
+		fields.push(
+			{
+				id: 'object',
+				type: 'text',
+				label: __( 'Item', 'wp-woocommerce-products-list' ),
+				enableSorting: false,
+				enableHiding: false,
+				filterBy: false,
+				getValue: ( { item } ) => item.object_name || `#${ item.object_id }`,
+				render: ( { item } ) => {
+					const label = item.object_name || `#${ item.object_id }`;
+					const kind = item.object_type === 'variation' ? ` (${ __( 'variation', 'wp-woocommerce-products-list' ) })` : '';
+
+					return item.edit_link ? (
+						<a href={ item.edit_link }>
+							{ label }
+							{ kind }
+						</a>
+					) : (
+						<span>
+							{ label }
+							{ kind }
+						</span>
+					);
+				},
+			},
+			{
+				id: 'object_id',
+				type: 'integer',
+				label: __( 'Item ID', 'wp-woocommerce-products-list' ),
+				enableSorting: false,
+				filterBy: { operators: [ 'is' ] },
+			}
+		);
+	}
+
+	fields.push(
+		{
+			id: 'source',
+			type: 'text',
+			label: __( 'Source', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			elements: SOURCE_OPTIONS,
+			filterBy: { operators: [ 'is' ] },
+		},
+		{
+			id: 'action',
+			type: 'text',
+			label: __( 'Action', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			elements: ACTION_OPTIONS,
+			filterBy: { operators: [ 'is' ] },
+			getValue: ( { item } ) => item.action,
+			render: ( { item } ) => <span>{ ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label ?? item.action }</span>,
+		},
+		{
+			id: 'field',
+			type: 'text',
+			label: __( 'Field', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			filterBy: { operators: [ 'is' ] },
+			getValue: ( { item } ) => item.field ?? '',
+		},
+		{
+			id: 'change',
+			type: 'text',
+			label: __( 'Change', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			enableHiding: false,
+			filterBy: false,
+			getValue: ( { item } ) => item.new_value ?? '',
+			render: ChangeCell,
+		},
+		{
+			id: 'status',
+			type: 'text',
+			label: __( 'Result', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			filterBy: false,
+			getValue: ( { item } ) => item.status,
+			render: ( { item } ) => ( item.status === 'ok' ? <span>{ __( 'OK', 'wp-woocommerce-products-list' ) }</span> : <span className="wc-pl-history__error" title={ item.message }>{ __( 'Error', 'wp-woocommerce-products-list' ) }</span> ),
+		},
+		{
+			id: 'batch_id',
+			type: 'text',
+			label: __( 'Batch', 'wp-woocommerce-products-list' ),
+			enableSorting: false,
+			filterBy: { operators: [ 'is' ] },
+			getValue: ( { item } ) => item.batch_id,
+			render: ( { item } ) => <code title={ item.batch_id }>{ item.batch_id.slice( 0, 8 ) }</code>,
+		}
+	);
+
+	return fields;
+}
+
+/** Translate the DataViews view (filters, page) into the `/log` params. */
+export function logQueryFromView( view: { page?: number; perPage?: number; filters?: Array< { field: string; operator: string; value: unknown } > }, base: Partial< LogQuery > = {} ): LogQuery {
+	const query: LogQuery = { ...base, page: view.page ?? 1, per_page: view.perPage ?? 50 };
+
+	for ( const filter of view.filters ?? [] ) {
+		const value = Array.isArray( filter.value ) ? filter.value[ 0 ] : filter.value;
+
+		if ( value === undefined || value === null || value === '' ) {
+			continue;
+		}
+
+		switch ( filter.field ) {
+			case 'created_at':
+				if ( filter.operator === 'after' ) {
+					query.since = String( value );
+				} else if ( filter.operator === 'before' ) {
+					query.until = String( value );
+				}
+				break;
+			case 'object_id':
+				query.object_id = Number( value );
+				break;
+			case 'source':
+				query.source = String( value );
+				break;
+			case 'action':
+				query.action = String( value );
+				break;
+			case 'field':
+				query.field = String( value );
+				break;
+			case 'batch_id':
+				query.batch = String( value );
+				break;
+			case 'user':
+				query.user = Number( value );
+				break;
+			default:
+				break;
+		}
+	}
+
+	return query;
+}

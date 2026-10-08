@@ -10,8 +10,9 @@ Conventions: PHP namespace `GeneroWP\ProductsList`, text domain `wp-woocommerce-
 | --- | --- | --- |
 | `X-WC-Products-List: 1` | every request from the app | `ListMode::active()` is true: wc/v3 rows are enriched, extra params mapped, writes logged. Other wc/v3 consumers see nothing. |
 | `X-WC-Products-List-Batch: <id>` | every write (POST/PUT/DELETE) | `ListMode::batchId()`; `[A-Za-z0-9_-]{1,64}`, the app sends a UUID v4. One id per user gesture (one bulk save, one action on N rows), shared across the requests it takes. Groups log rows; `revert` works per batch. |
+| `X-WC-Products-List-Source: <source>` | every write | `ListMode::source()`; one of `ListMode::SOURCES` = `quick`, `bulk`, `action`, `extension`, `revert` (the app sends the first three; the plugin sets `action` and `revert` on its own nested requests). Default `quick`. Stored per log row. |
 
-PHP: `ListMode::active(): bool`, `ListMode::batchId(): ?string`, `ListMode::force(?bool $active, ?string $batchId = null)` (tests/CLI; `force(null)` resets). Captured on `rest_request_before_callbacks` (priority 1), so it is per request, including batch sub-requests. Filter `wc_products_list/active` (bool) can override.
+PHP: `ListMode::active(): bool`, `ListMode::batchId(): ?string`, `ListMode::source(): string`, `ListMode::method(): ?string` (the dispatched request's HTTP method; batch sub-requests are not dispatched, so it stays `POST` through a batch), `ListMode::force(?bool $active, ?string $batchId = null)` (tests/CLI; `force(null)` resets). Captured on `rest_request_before_callbacks` (priority 1), so it is per request, including batch sub-requests. Filter `wc_products_list/active` (bool) can override.
 
 JS: `api/client.ts` installs an `apiFetch` middleware that adds both headers; the batch id comes from the caller (`batchId` option) or is generated per call.
 
@@ -33,6 +34,9 @@ JS: `api/client.ts` installs an `apiFetch` middleware that adds both headers; th
 | `wc_products_list/variation_query_args` | `(array $args, WP_REST_Request $request): array` | same for `products/{id}/variations` |
 | `wc_products_list/row` | `(array $row, WC_Product $product, WP_REST_Request $request): array` | `Rest\Rows`, after `wc_products_list` key is set, only in list mode; `$product` is a `WC_Product_Variation` for variation rows. Respect `_fields`: `rest_is_field_included('i18n', $fields)`. |
 | `wc_products_list/counts` | `(array<string,int> $counts): array` | `Rest\CountsController` |
+| `wc_products_list/drop_gallery` | `(bool $drop = true): bool` | `Rest\Rows`: on list-mode **read** requests a product's gallery is not serialised (`images` holds the featured image only), which is most of the cost of a 100-row page; return false to keep the gallery. Writes never see a trimmed gallery. |
+| `wc_products_list/write_keys` | `(string[] $keys = []): string[]` | `Rest\Saves::writeKeys()`: extra top-level body keys that make `wc_products_list/save` fire, besides the declarative fields' `writeKey`s (§6). For integrations that take keys without declaring fields. |
+| `wc_products_list/log_value` | `(mixed $value, string $path, WC_Product $product, string[] $segments): mixed` | `Log\Recorder`: the logged value of a nested write path (`i18n.se.name`). The default reader resolves `i18n.{lang}.{field}` to meta `_i18n_{field}_{lang}` and `meta_data.{key}` to that meta; return the value for other shapes. |
 | `wc_products_list/log_retention_days` | `(int $days = 180): int` | `Log\Prune` |
 | `wc_products_list/replace_legacy_screen` | `(bool $replace = false): bool` | `Modules\LegacyRedirect` |
 
@@ -41,6 +45,7 @@ JS: `api/client.ts` installs an `apiFetch` middleware that adds both headers; th
 | Hook | Signature | Where |
 | --- | --- | --- |
 | `wc_products_list/activate` | `()` | `Plugin::activate()` (activation hook, and `tests/bootstrap.php`), after modules are registered. `Log\Table` installs here and on `init` when the stored version differs. |
+| `wc_products_list/deactivate` | `()` | `Plugin::deactivate()` (deactivation hook). `Log\Prune` unschedules its cron here; the table and its rows stay. |
 | `wc_products_list/enqueue` | `(string $handle = 'wc-products-list')` | `Modules\AdminPage::enqueue`, after the app script and style are enqueued. Extension scripts enqueue here with `$handle` as a dependency. |
 | `wc_products_list/save` | `(WC_Product $product, WP_REST_Request $request, bool $creating)` | `Rest\Saves`, on `woocommerce_rest_pre_insert_product_object` / `_variation_object` **only** when the request carries a registered write key (§6, `Registry::writeKeys()`) and list mode is on. Apply the extension's own keys to `$product` (`update_meta_data` etc.); do not save, WooCommerce saves right after. Throw `WC_REST_Exception` or return normally. |
 | `wc_products_list/logged` | `(array $rows, string $batchId)` | `Log\Logger`, after rows are written |
@@ -75,7 +80,9 @@ All own routes: namespace `wc-products-list/v1`, permission `current_user_can(Pl
 | `has_variations` | `1` → variable products with ≥1 variation; `0` → the rest |
 | `orderby=sku|stock_quantity|menu_order` | lookup-table join; core already does `id,title,date,modified,price,popularity,rating,include,slug` |
 
-The app always sends `_fields` (union of visible fields' `rest.fields` + `id,type,status,parent_id,wc_products_list`), `image_size=thumbnail`, `per_page ≤ 100`, `search_name_or_sku` instead of `search`. Response headers `X-WP-Total`, `X-WP-TotalPages` are read.
+| `search_name_or_sku` | in list mode the plugin's own search, not WooCommerce's: tokens split on whitespace, each must match the product's name or SKU **or the SKU of one of its variations**. Rows are always products (WooCommerce's search lists matching variations as rows of their own). |
+
+The app always sends `_fields` (union of visible fields' `rest.fields` + `id,type,status,parent_id,wc_products_list`), `image_size=thumbnail`, `per_page ≤ 100`, `search_name_or_sku` instead of `search`. Response headers `X-WP-Total`, `X-WP-TotalPages` are read. On list-mode reads `images` carries the featured image only (`wc_products_list/drop_gallery`).
 
 Row (`Rest\Rows`, list mode only) adds:
 
@@ -120,7 +127,7 @@ Writes: `POST /wc/v3/products/{id}`, `POST /wc/v3/products/batch {update:[{id,�
     {"id": 1, "ok": true,  "data": {"new_id": 901}},
     {"id": 2, "ok": false, "code": "forbidden", "message": "…"}
   ],
-  "items": [ /* refreshed wc/v3 rows of the ids that still exist, list-mode shape, with _fields from ?_fields */ ]
+  "items": [ /* refreshed wc/v3 rows of the ids that still exist, list-mode shape, trimmed to ?fields=id,status,… (not `_fields`: core would trim this whole response to those keys) */ ]
 }
 ```
 
@@ -138,7 +145,7 @@ interface Action
 }
 ```
 
-registered through `wc_products_list/action_handlers`. Every id gets one log row (`source=action`, `action=<id>`, `old_value`/`new_value` as the handler returns them in `data.changes` if any).
+registered through `wc_products_list/action_handlers`. The built-ins are registered as handlers only (priority 5), not as declarative `wc_products_list/actions` entries: the app has its own UI for them and calls `POST /actions/{id}` by id. Every id gets one log row (`source=action`, `action=<id>`), or one row per field when `run()` returns `changes => [field => [old, new]]`. Per-id result codes: `not_found`, `not_applicable` (outside `appliesTo()`), `forbidden` (`can()` false), `exception`, or the handler's `WP_Error` code. Request-level errors: 400 `wc_products_list_no_ids` / `_too_many_ids` / `_invalid_ids`, 404 `wc_products_list_unknown_action`, 400 with the handler's code from `sanitizeArgs()`. The `items` refresh is one nested list request per (parent, status) group.
 
 ### 3.5 Log
 
@@ -149,7 +156,7 @@ interface LogRow {
   id: number; batch_id: string; created_at: string /* ISO, site tz */; created_at_gmt: string;
   user: { id: number; name: string };
   source: 'quick' | 'bulk' | 'action' | 'extension' | 'revert';
-  action: 'update' | 'trash' | 'restore' | 'delete' | 'duplicate' | string;
+  action: 'update' | 'create' | 'trash' | 'restore' | 'delete' | 'duplicate' | string;
   object_type: 'product' | 'variation'; object_id: number; parent_id: number;
   object_name: string; edit_link: string | null;
   field: string; old_value: string | null; new_value: string | null;
@@ -159,13 +166,13 @@ interface LogRow {
 
 `GET /wc-products-list/v1/log/batches?page=&per_page=` → `{"items": [{batch_id, created_at, user, source, rows: n, objects: n, fields: string[], revertable: bool}], total, totalPages}`.
 
-`POST /wc-products-list/v1/log/batch/{batch_id}/revert` → same shape as an action response (`results` per object), written as a new batch with `source=revert`. Only `update` rows revert; trash/delete/duplicate rows are reported as skipped.
+`POST /wc-products-list/v1/log/batch/{batch_id}/revert?fields=` → same shape as an action response (`results` per object, `items` trimmed to `fields`), written as a new batch with `source=revert`. Only `update` rows revert; trash/delete/duplicate rows are reported as skipped.
 
 Table `{prefix}wc_products_list_log`: `id BIGINT PK, batch_id VARCHAR(64), created_at DATETIME, user_id BIGINT, source VARCHAR(20), action VARCHAR(40), object_type VARCHAR(20), object_id BIGINT, parent_id BIGINT, field VARCHAR(100), old_value LONGTEXT NULL, new_value LONGTEXT NULL, status VARCHAR(10), message TEXT, context JSON/LONGTEXT`; indexes `batch_id`, `(object_id, created_at)`, `user_id`, `created_at`. Values are JSON-encoded when not scalar.
 
 ## 4. Logging rules (Rest\Saves + Log\Recorder)
 
-In list mode, `woocommerce_rest_pre_insert_product_object` / `_variation_object` snapshot the current value of every key present in the request body (top-level wc/v3 keys, each `meta_data[].key`, each extension write path such as `i18n.se.name`) from the loaded product; `woocommerce_rest_insert_*` diffs against the saved product and writes one row per changed field (no row for no-ops), `source` from header `X-WC-Products-List-Source` (`quick|bulk|extension`, default `quick`), `batch_id` from the batch header (generated when missing). Batch endpoints fire the same hooks per item. Errors also go to `wc_get_logger()` source `wc-products-list`.
+In list mode, `woocommerce_rest_pre_insert_product_object` / `_variation_object` snapshot the current value of every key present in the request body (top-level wc/v3 keys, each `meta_data[].key`, each extension write path such as `i18n.se.name`) from a fresh load of the product; `woocommerce_rest_insert_*` diffs against the saved product and writes one row per changed field (no row for no-ops; `null` and `''` compare equal), `action=update` (`create` for a new object), `source` from header `X-WC-Products-List-Source` (§1, default `quick`), `batch_id` from the batch header (generated when missing). Values are stored as strings in wc/v3 **input** shape (`true`/`false`, dates `Y-m-d\TH:i:s` site time, term lists `[{"id":n}]`), so a revert posts them back verbatim. Batch endpoints fire the same hooks per item. Validation errors that throw before `pre_insert` (duplicate SKU) are logged as `status=error` rows with the field list from the request body. Errors also go to `wc_get_logger()` source `wc-products-list`. One multi-row INSERT per request, at `rest_request_after_callbacks` (priority 1000) or shutdown.
 
 ## 5. Bootstrap payload (`window.wcProductsListSettings`)
 
@@ -259,9 +266,9 @@ Keys: `products:<json of query>`, `variations:<parentId>:<page>`, `counts`, `ter
 ```ts
 export function useProductList(view: View, tab: string, fields: ProductField[]): { items: ProductListItem[]; total: number; totalPages: number; isLoading: boolean; isFetching: boolean; error?: Error; refetch(): Promise<void> }
 export function useCounts(): { counts: Record<string, number>; refetch(): Promise<void> }
-export function patchItems(items: Array<Partial<ProductListItem> & { id: number }>): void   // into every cached list + variations page
-export function removeItems(ids: number[]): void
-export function invalidateProducts(options?: { counts?: boolean }): void
+export function patchItems(items: Array<Partial<ProductListItem> & { id: number }>): void   // into every cached list + variations page, and the hierarchy's children store (patchVariationRows)
+export function removeItems(ids: number[]): void                                           // likewise (removeVariationRows)
+export function invalidateProducts(options?: { counts?: boolean; variations?: boolean }): void  // variations: also invalidateVariations() of the hierarchy
 ```
 
 ### `resources/fields/registry.ts`
@@ -332,9 +339,9 @@ export const ACTIONS: { ready, loaded, saved, deleted }
 
 ### Boot order (`resources/index.tsx`)
 
-1. `createExtensionApi()` → `window.wcProductsList`; `doAction('wcProductsList.ready', api)`.
+1. `createExtensionApi()` assigns `window.wcProductsList` and fires `doAction('wcProductsList.ready', api)` itself, once; `index.tsx` does neither again.
 2. `domReady` → mount `<App />` into `#wc-products-list-root`.
-3. `App` builds fields (`createProductFields`) once per settings, renders `list/products-screen.tsx` or `history/history-screen.tsx` by `?screen=`.
+3. `App` builds fields (`createProductFields`) once per settings and registry version (`useRegistryVersion()`: a `registerField` after mount re-derives them), renders `list/products-screen.tsx` or, lazily (`build/history.js`), `history/history-screen.tsx` by `?screen=`. The edit modal is `build/edit.js`, loaded on first Quick/Bulk edit.
 
 Extension scripts (`wc_products_list/enqueue`, dep `wc-products-list`) run after the app script's module code and before `domReady`, so `window.wcProductsList` exists when they execute; registering in a `wcProductsList.ready` handler is equivalent.
 
@@ -370,3 +377,56 @@ List page (100 rows, `_fields` trimmed) < 1 s server time; expanding 100 variati
 ## 10. Testing contracts
 
 PHP integration tests extend `Tests\Integration\TestCase` (`actAs(role)`, `simpleProduct(props)`, `variableProduct(sizes, props)`) or `RestTestCase` (`request(method, route, params, headers)` adds the list-mode header and, on writes, a per-test batch id; `data(response)`, `assertStatus(code, response)`, `batchId()`). Run: `composer test` (unit), ddev/wp-env command in README (integration). JS: vitest, `tests/js/**/*.test.ts(x)`, jsdom, `sampleSettings()` in `tests/js/settings.test.ts` (move to `tests/js/fixtures.ts` when a second test needs it).
+
+## 11. Hierarchy
+
+`resources/hierarchy/` (see `docs/hierarchy-upstream.md` for the upstream mapping). The screen wires it like this:
+
+```tsx
+const hierarchy = useHierarchy( parents, visibleFields );   // parents: level-0 rows from useProductList
+
+<HierarchyProvider value={ hierarchy }>                       // full API for toolbar/actions/bulk edit
+  <HierarchicalDataViews
+    data={ hierarchy.rows }                                   // parents + expanded variations + placeholders
+    getItemParentId={ hierarchy.getItemParentId }
+    getItemHasChildren={ hierarchy.getItemHasChildren }
+    expandedItemIds={ hierarchy.expandedItemIds }
+    onChangeExpandedItemIds={ hierarchy.onChangeExpandedItemIds }
+    childrenState={ hierarchy.childrenState }
+    onRetryChildren={ hierarchy.retry }
+    getItemId={ getItemId }
+    { ...dataViewsProps }                                     // view, fields, actions, selection, paginationInfo…
+  />
+</HierarchyProvider>
+```
+
+`HierarchicalDataViews` sets `getItemLevel` (from `_level`), defaults `isItemClickable` to `() => false` (a chevron button inside DataViews' title link would be invalid HTML; the name field renders its own link), and strips placeholder ids (`"12:loading"`) from `selection` / `onChangeSelection`. Actions must still declare `isEligible: ( item ) => ! item._placeholder` so placeholder rows get no checkbox.
+
+**Name field.** Its `render` returns exactly
+
+```tsx
+<NameCell item={ item }>{ /* the link or text */ }</NameCell>
+```
+
+`NameCell` (from `resources/hierarchy`) draws the indentation (`--wc-pl-level`), the chevron with the variation count for level-0 parents (a spacer otherwise), the `id="wc-pl-row-<id>"` the parent's `aria-controls` points at, and the loading / error (+ Retry) / "N more" placeholder content. Do not add a second count badge or padding around it. The chevron reads the `HierarchyViewContext` that `HierarchicalDataViews` provides; outside it (tests, previews) `NameCell` renders without a chevron.
+
+**Hook API** (`Hierarchy`, returned by `useHierarchy(parents, fields, options?)`): `rows`, `expandedItemIds`, `onChangeExpandedItemIds`, `isExpanded(id)`, `toggle(id)`, `expand(id)` (resolves when loaded), `collapse(id)`, `retry(id)`, `expandAll({ force? })` → `Promise<boolean>` (false when the user declined the > 2000 rows confirm), `collapseAll()`, `getItemParentId`, `getItemHasChildren`, `getItemLevel`, `childrenOf(id)`, `childrenState`, `variationIdsOf(parentIds)` (loaded children or `_fields=id` fetch, 4 requests in flight, cached per parent), `selectVariations(parentId, currentSelection)` → new selection ids (expands first: DataViews drops selected ids that are not in `data`). Options: `fetchVariations` (defaults to `api/client` `getVariations`), `maxChildren` (`limits.maxChildrenPerParent`), `confirmExpandAll`, `storage`.
+
+`useHierarchyContext()` returns that object (throws outside `HierarchyProvider`); `useOptionalHierarchyContext()` returns null instead.
+
+**Variation loading.** `getVariations(parentId, page, { perPage: 100, fields })` where `fields` = `VARIATION_BASE_FIELDS` (`id,name,status,parent_id,attributes,image,sku,wc_products_list`) ∪ the visible fields' `rest.fields`. Page 1 first (gives the total), the rest in parallel through one limiter (4 in flight for the whole hierarchy), up to `ceil(min(total, maxChildren) / 100)` pages. Rows are normalised again with the parent row (`normalizeVariation(raw, parentRow)` copies `categories/tags/brands` read-only).
+
+**Children store.** Loaded variations live in a module-level store, not in the query cache, so `store/products.ts` must call, in addition to its cache patches:
+
+```ts
+import { patchVariationRows, removeVariationRows, invalidateVariations } from '../hierarchy';
+patchItems( items )        → patchVariationRows( items )
+removeItems( ids )         → removeVariationRows( ids )      // a parent id drops its whole subtree
+invalidateProducts( { variations: true } ) → invalidateVariations()
+```
+
+Independently of that wiring, the hierarchy listens to `wcProductsList.saved` (`result.updated` → patch) and `wcProductsList.deleted` (`ids` → remove), so confirmed writes always reach the variation rows; the explicit calls are what make optimistic patches show.
+
+**Placeholder rows**: `id = -parentId`, `_kind: 'variation'`, `_level: 1`, `_parentId`, `_placeholder: 'loading' | 'error' | 'more'`, `_placeholderMessage`; `getItemId` → `"<parentId>:<kind>"`.
+
+**Persistence**: `sessionStorage['wcProductsList.expanded']` = JSON array of parent ids; ids not on the current page are kept so paging back restores them.

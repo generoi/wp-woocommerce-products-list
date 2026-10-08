@@ -1,0 +1,139 @@
+// Hierarchy: indentation, the chevron and placeholder rows inside the name
+// cell. Imported by resources/style.scss as `@use 'hierarchy/style'`.
+
+$wc-pl-indent: 24px;
+$wc-pl-chevron-size: 24px;
+
+.wc-pl-name {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	padding-inline-start: calc(var(--wc-pl-level, 0) * #{$wc-pl-indent});
+}
+
+.wc-pl-name__content {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.wc-pl-name--level-1 .wc-pl-name__content {
+	color: var(--wpds-color-foreground-content-neutral, #1e1e1e);
+}
+
+.wc-pl-chevron {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	gap: 2px;
+	height: $wc-pl-chevron-size;
+	min-width: $wc-pl-chevron-size;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	border-radius: 2px;
+	background: transparent;
+	color: var(--wpds-color-foreground-content-neutral-muted, #757575);
+	cursor: pointer;
+	line-height: 1;
+
+	svg {
+		flex: none;
+		fill: currentColor;
+		transition: transform 0.12s ease-out;
+	}
+
+	&:hover,
+	&:focus-visible {
+		color: var(--wpds-color-foreground-content-neutral, #1e1e1e);
+		background: var(--wpds-color-background-surface-neutral-hover, rgba(0, 0, 0, 0.05));
+	}
+
+	&:focus-visible {
+		outline: 2px solid var(--wpds-color-border-focus, #3858e9);
+		outline-offset: -2px;
+	}
+
+	&.is-expanded svg {
+		transform: rotate(90deg);
+	}
+
+	&.is-loading svg {
+		animation: wc-pl-pulse 0.9s ease-in-out infinite;
+	}
+
+	&--spacer {
+		cursor: default;
+		pointer-events: none;
+	}
+}
+
+.wc-pl-chevron__count {
+	font-size: 11px;
+	font-weight: 500;
+	line-height: 16px;
+	padding: 0 5px;
+	border-radius: 8px;
+	background: var(--wpds-color-background-surface-neutral-subtle, #f0f0f0);
+	color: var(--wpds-color-foreground-content-neutral-muted, #757575);
+	font-variant-numeric: tabular-nums;
+}
+
+.wc-pl-name--placeholder {
+	color: var(--wpds-color-foreground-content-neutral-muted, #757575);
+	font-style: italic;
+
+	&.is-error {
+		color: var(--wpds-color-foreground-content-error, #cc1818);
+		font-style: normal;
+	}
+}
+
+.wc-pl-name__placeholder {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.wc-pl-name__retry {
+	margin-inline-start: 8px;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--wpds-color-foreground-content-link, #3858e9);
+	text-decoration: underline;
+	cursor: pointer;
+	font: inherit;
+}
+
+.wc-pl-spinner {
+	width: 12px;
+	height: 12px;
+	border: 2px solid currentColor;
+	border-right-color: transparent;
+	border-radius: 50%;
+	animation: wc-pl-spin 0.8s linear infinite;
+}
+
+@keyframes wc-pl-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes wc-pl-pulse {
+	50% {
+		opacity: 0.3;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.wc-pl-chevron svg,
+	.wc-pl-spinner {
+		transition: none;
+		animation: none;
+	}
+}

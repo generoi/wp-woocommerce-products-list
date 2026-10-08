@@ -3,12 +3,19 @@
 		'react',
 		'react-dom',
 		'react-jsx-runtime',
+		'wp-api-fetch',
+		'wp-components',
 		'wp-data',
 		'wp-date',
 		'wp-dom-ready',
 		'wp-element',
 		'wp-hooks',
-		'wp-i18n'
+		'wp-html-entities',
+		'wp-i18n',
+		'wp-notices',
+		'wp-preferences',
+		'wp-primitives',
+		'wp-url'
 	),
-	'version' => 'd37f8a8974e16420d251'
+	'version' => '73b3d0b4955327787f46'
 );

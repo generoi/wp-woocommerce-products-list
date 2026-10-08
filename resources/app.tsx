@@ -1,69 +1,34 @@
-import { useMemo, useState } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
-import { DataViews } from './dataviews';
-import type { Field, View } from './dataviews';
+import { Suspense, lazy, useMemo } from '@wordpress/element';
+import { getQueryArg } from '@wordpress/url';
+import { useRegistryVersion } from './extensions/api';
+import { createProductFields } from './fields/registry';
+import { ProductsScreen } from './list/products-screen';
 import { getSettings } from './settings';
-import { getItemId } from './types/product';
-import type { ProductListItem } from './types/product';
+import { Spinner } from './ui';
+
+// The History screen is its own chunk: most visits never open it.
+const HistoryScreen = lazy( () => import( /* webpackChunkName: "history" */ './history/history-screen' ) );
 
 /**
- * Scaffold: a table over three fixed rows to prove the bundle, the styles
- * and the React 18 runtime. The real screen (list/products-screen.tsx)
- * replaces this.
+ * Builds the field list once per settings payload and registry version
+ * (extensions have registered by now: `wcProductsList.ready` fired before
+ * mount; a late `registerField` bumps the version) and picks the screen
+ * from `?screen=`.
  */
-const SAMPLE: ProductListItem[] = [
-	{ id: 1, name: 'Saga wide toe boot', type: 'variable', sku: 'SAGA', status: 'publish', price: '189', _kind: 'product', _level: 0, _parentId: null, _hasChildren: true, _childCount: 3 },
-	{ id: 2, name: 'Vilja sandal', type: 'simple', sku: 'VILJA', status: 'publish', price: '129', _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0 },
-	{ id: 3, name: 'Aino sneaker', type: 'simple', sku: 'AINO', status: 'draft', price: '149', _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0 },
-];
-
-const DEFAULT_VIEW: View = {
-	type: 'table',
-	perPage: 20,
-	page: 1,
-	titleField: 'name',
-	fields: [ 'sku', 'type', 'status', 'price' ],
-};
-
 export function App() {
 	const settings = getSettings();
-	const [ view, setView ] = useState< View >( DEFAULT_VIEW );
+	const version = useRegistryVersion();
+	// eslint-disable-next-line react-hooks/exhaustive-deps -- version is the registry's change counter
+	const fields = useMemo( () => createProductFields( settings ), [ settings, version ] );
+	const screen = getQueryArg( window.location.href, 'screen' );
 
-	const fields = useMemo< Field< ProductListItem >[] >(
-		() => [
-			{ id: 'name', label: __( 'Name', 'wp-woocommerce-products-list' ), enableHiding: false },
-			{ id: 'sku', label: __( 'SKU', 'wp-woocommerce-products-list' ) },
-			{
-				id: 'type',
-				label: __( 'Type', 'wp-woocommerce-products-list' ),
-				elements: settings.productTypes,
-			},
-			{
-				id: 'status',
-				label: __( 'Status', 'wp-woocommerce-products-list' ),
-				elements: settings.statuses,
-			},
-			{
-				id: 'price',
-				label: __( 'Price', 'wp-woocommerce-products-list' ),
-				render: ( { item } ) => `${ item.price ?? '' } ${ settings.currency.symbol }`,
-			},
-		],
-		[ settings ]
-	);
+	if ( screen === 'history' ) {
+		return (
+			<Suspense fallback={ <div className="wc-products-list__placeholder"><Spinner /></div> }>
+				<HistoryScreen />
+			</Suspense>
+		);
+	}
 
-	return (
-		<div className="wc-products-list">
-			<DataViews< ProductListItem >
-				data={ SAMPLE }
-				fields={ fields }
-				view={ view }
-				onChangeView={ setView }
-				getItemId={ getItemId }
-				paginationInfo={ { totalItems: SAMPLE.length, totalPages: 1 } }
-				defaultLayouts={ { table: {} } }
-				actions={ [] }
-			/>
-		</div>
-	);
+	return <ProductsScreen fields={ fields } settings={ settings } />;
 }

@@ -1,6 +1,11 @@
 // DataViews' own stylesheet; its --wpds-* tokens come from core's
 // wp-components stylesheet, which the PHP side lists as a dependency.
 @use '@wordpress/dataviews/build-style/style';
+@use 'hierarchy/style' as hierarchy;
+
+$border: #dcdcde;
+$muted: #757575;
+$link: #2271b1;
 
 .wc-products-list-wrap {
 	margin: 0;
@@ -11,10 +16,237 @@
 	// The admin content area is the scroll container; the list fills it.
 	min-height: calc(100vh - 100px);
 	background: #fff;
-	border: 1px solid #dcdcde;
+	border: 1px solid $border;
 	border-radius: 4px;
+	display: flex;
+	flex-direction: column;
 
 	.dataviews-wrapper {
 		height: auto;
 	}
+
+	// Keep the previous page visible while the next one loads.
+	&.is-fetching .dataviews-view-table,
+	&.is-fetching .dataviews-view-grid,
+	&.is-fetching .dataviews-view-list {
+		opacity: 0.6;
+		transition: opacity 120ms ease 150ms;
+	}
+
+	.dataviews-view-table__row td {
+		vertical-align: middle;
+	}
+}
+
+// Status tabs: an ARIA tablist styled like the WordPress list-table tabs.
+.wc-products-list__tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px;
+	padding: 4px 12px 0;
+	border-bottom: 1px solid $border;
+}
+
+.wc-products-list__tab {
+	appearance: none;
+	background: none;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	padding: 10px 12px;
+	margin-bottom: -1px;
+	font: inherit;
+	font-size: 13px;
+	color: #1e1e1e;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+
+	&:hover {
+		color: $link;
+	}
+
+	&:focus-visible {
+		outline: 2px solid $link;
+		outline-offset: -2px;
+		border-radius: 2px;
+	}
+
+	&.is-active {
+		border-bottom-color: #1e1e1e;
+		font-weight: 600;
+	}
+
+	&.is-trash {
+		margin-inline-start: auto;
+	}
+}
+
+.wc-products-list__tab-count {
+	font-size: 11px;
+	line-height: 1;
+	padding: 3px 6px;
+	border-radius: 10px;
+	background: #f0f0f1;
+	color: $muted;
+
+	.is-active & {
+		background: #1e1e1e;
+		color: #fff;
+	}
+}
+
+.wc-products-list__panel {
+	flex: 1;
+	min-height: 0;
+}
+
+.wc-products-list__header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+// The name column: the hierarchy's NameCell (indent, chevron, count) around the link.
+.wc-products-list__name-link {
+	text-decoration: none;
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+
+	&:hover {
+		text-decoration: underline;
+	}
+}
+
+.wc-pl-name--level-1 .wc-products-list__name-link,
+.wc-pl-name--level-1 .wc-products-list__name-text {
+	font-weight: 400;
+	color: #3c434a;
+}
+
+.wc-products-list__image {
+	display: block;
+	width: 40px;
+	height: 40px;
+	object-fit: cover;
+	border-radius: 2px;
+	background: #f0f0f1;
+
+	&--empty {
+		border: 1px dashed $border;
+	}
+}
+
+.wc-products-list__sku {
+	font-size: 12px;
+	background: none;
+	padding: 0;
+}
+
+.wc-products-list__price {
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+
+	&--sale del {
+		color: $muted;
+		margin-inline-end: 4px;
+	}
+
+	&--sale ins {
+		text-decoration: none;
+		color: #1e1e1e;
+	}
+
+	&--empty {
+		color: $muted;
+	}
+}
+
+.wc-products-list__stock {
+	white-space: nowrap;
+
+	&--instock .wc-products-list__option {
+		color: #007017;
+	}
+
+	&--outofstock .wc-products-list__option {
+		color: #d63638;
+	}
+
+	&--onbackorder .wc-products-list__option {
+		color: #996800;
+	}
+}
+
+.wc-products-list__option--empty,
+.wc-products-list__terms--empty,
+.wc-products-list__date--empty,
+.wc-products-list__bool--empty {
+	color: $muted;
+}
+
+.wc-products-list__bool--parent {
+	color: $muted;
+	font-style: italic;
+}
+
+.wc-products-list__excerpt {
+	color: #3c434a;
+}
+
+.wc-products-list__qty {
+	font-variant-numeric: tabular-nums;
+}
+
+.wc-products-list__empty {
+	padding: 48px 24px;
+	text-align: center;
+	color: #3c434a;
+
+	p {
+		margin: 0 0 12px;
+		font-size: 14px;
+	}
+
+	&--error p {
+		color: #d63638;
+	}
+
+	&-detail {
+		color: $muted;
+		font-size: 12px;
+	}
+}
+
+.wc-products-list__notices {
+	position: fixed;
+	bottom: 24px;
+	left: calc(160px + 24px);
+	z-index: 100000;
+
+	.folded & {
+		left: calc(36px + 24px);
+	}
+
+	@media (max-width: 782px) {
+		left: 16px;
+	}
+}
+
+.wc-products-list__price-edit {
+	&.is-invalid input {
+		border-color: #d63638;
+	}
+}
+
+.wc-products-list__price-edit-suffix {
+	padding-inline-end: 8px;
+	color: $muted;
+}
+
+.wc-products-list__placeholder {
+	padding: 24px;
+	color: $muted;
 }

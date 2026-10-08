@@ -1,0 +1,168 @@
+import { describe, expect, it, vi } from 'vitest';
+import { prepareSave, runSave } from '../../resources/edit/save-runner';
+import type { SaveDeps } from '../../resources/edit/save-runner';
+import type { BatchResponse, ProductListItem, RawProduct, RawVariation } from '../../resources/types';
+import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
+
+const settings = editSettings();
+const fields = coreFields();
+
+type Update = { id: number } & Record< string, unknown >;
+
+function deps( overrides: Partial< SaveDeps > = {} ): SaveDeps & { calls: string[] } {
+	const calls: string[] = [];
+	const echo = < T extends { id: number } >( update: T[] ) => ( { update: update.map( ( row ) => ( { ...row, echoed: true } ) ) } );
+
+	return {
+		calls,
+		batchProducts: vi.fn( async ( update: Update[] ) => {
+			calls.push( `products:${ update.map( ( row ) => row.id ).join( ',' ) }` );
+
+			return echo( update ) as BatchResponse< RawProduct >;
+		} ),
+		batchVariations: vi.fn( async ( parentId: number, update: Update[] ) => {
+			calls.push( `variations:${ parentId }:${ update.map( ( row ) => row.id ).join( ',' ) }` );
+
+			return echo( update ) as BatchResponse< RawVariation >;
+		} ),
+		fetchVariations: vi.fn( async ( parentId: number ) => [ variation( parentId * 10 + 1, parentId, { regular_price: '100' } ), variation( parentId * 10 + 2, parentId, { regular_price: '50' } ) ] ),
+		patchItems: vi.fn(),
+		newBatchId: () => 'batch-1',
+		batchSize: 2,
+		...overrides,
+	};
+}
+
+describe( 'prepareSave', () => {
+	it( 'drops rows with nothing to send', async () => {
+		const d = deps();
+		const prepared = await prepareSave( d, [ simple( 1, { status: 'draft' } ), simple( 2, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false } );
+
+		expect( prepared.map( ( p ) => p.target.item.id ) ).toEqual( [ 2 ] );
+		expect( prepared[ 0 ]?.payload ).toEqual( { status: 'draft' } );
+		expect( prepared[ 0 ]?.snapshot ).toEqual( { id: 2, status: 'publish' } );
+	} );
+} );
+
+describe( 'runSave', () => {
+	it( 'saves variations per parent first, then parents, chunked, with progress', async () => {
+		const d = deps();
+		const progress: Array< [ number, number ] > = [];
+		const items = [ simple( 1 ), simple( 2 ), simple( 3 ), variation( 41, 4 ), variation( 42, 4 ), variation( 43, 4 ), variation( 51, 5 ) ];
+		const result = await runSave( d, items, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', onProgress: ( done, total ) => progress.push( [ done, total ] ) } );
+
+		expect( d.calls ).toEqual( [ 'variations:4:41,42', 'variations:4:43', 'variations:5:51', 'products:1,2', 'products:3' ] );
+		expect( result.batchId ).toBe( 'batch-1' );
+		expect( result.errors ).toEqual( [] );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 43, 51, 1, 2, 3 ] );
+		expect( progress ).toEqual( [ [ 0, 7 ], [ 2, 7 ], [ 3, 7 ], [ 4, 7 ], [ 6, 7 ], [ 7, 7 ] ] );
+		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 1, status: 'draft' }, { id: 2, status: 'draft' } ], { batchId: 'batch-1', source: 'bulk' } );
+	} );
+
+	it( 'patches optimistically, then with the returned rows', async () => {
+		const d = deps();
+		await runSave( d, [ simple( 1, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		const patches = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => call[ 0 ] );
+
+		expect( patches[ 0 ] ).toEqual( [ { id: 1, status: 'draft' } ] );
+		expect( patches[ 1 ] ).toEqual( [ { id: 1, status: 'draft', echoed: true } ] );
+	} );
+
+	it( 'does not optimistically patch object-shaped keys (extension row data differs from its write shape)', async () => {
+		const d = deps();
+		await runSave( d, [ simple( 1, { i18n: { se: { name: { value: 'Old' } } } } ) ], { 'i18n:se.name': 'New', status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		const first = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 0 ];
+
+		expect( first ).toEqual( [ { id: 1, status: 'draft' } ] );
+	} );
+
+	it( 'reports per-item errors from the batch response and rolls those rows back', async () => {
+		const d = deps( {
+			batchProducts: vi.fn( async ( update: Update[] ) => ( {
+				update: update.map( ( row ) => ( row.id === 2 ? { id: 2, error: { code: 'woocommerce_rest_invalid', message: 'Nope' } } : { ...row } ) ),
+			} ) ),
+		} );
+		const result = await runSave( d, [ simple( 1, { status: 'publish' } ), simple( 2, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
+		expect( result.errors ).toEqual( [ { id: 2, message: 'Nope', code: 'woocommerce_rest_invalid' } ] );
+
+		const patches = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => call[ 0 ] );
+
+		expect( patches.at( -1 ) ).toEqual( [ { id: 2, status: 'publish' } ] );
+	} );
+
+	it( 'a failed request fails every row of that chunk and continues with the next', async () => {
+		const d = deps( {
+			batchProducts: vi.fn( async ( update: Update[] ) => {
+				if ( update.some( ( row ) => row.id === 1 ) ) {
+					throw Object.assign( new Error( 'Server exploded' ), { code: 'rest_error' } );
+				}
+
+				return { update: update.map( ( row ) => ( { ...row } ) ) };
+			} ),
+		} );
+		const result = await runSave( d, [ simple( 1 ), simple( 2 ), simple( 3 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.errors ).toEqual( [
+			{ id: 1, message: 'Server exploded', code: 'rest_error' },
+			{ id: 2, message: 'Server exploded', code: 'rest_error' },
+		] );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 3 ] );
+	} );
+
+	it( 'a row the response forgot is an error', async () => {
+		const d = deps( { batchProducts: vi.fn( async () => ( { update: [] } ) ) } );
+		const result = await runSave( d, [ simple( 1 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		expect( result.errors ).toMatchObject( [ { id: 1, code: 'missing_result' } ] );
+	} );
+
+	it( 'applies a scheduled sale to the variations of variable parents and the parents themselves get the rest', async () => {
+		const d = deps( { batchSize: 50 } );
+		const edits = { sale_price: { operation: 'decrease', value: '20', percent: true }, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' };
+		const result = await runSave( d, [ variable( 4, { status: 'draft' } ), simple( 1, { regular_price: '10', sale_price: '', status: 'draft' } ) ], edits, fields, settings, { applyToVariations: true, source: 'bulk' } );
+
+		expect( d.calls ).toEqual( [ 'variations:4:41,42', 'products:4,1' ] );
+		expect( d.batchVariations ).toHaveBeenCalledWith(
+			4,
+			[
+				{ id: 41, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
+				{ id: 42, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
+			],
+			{ batchId: 'batch-1', source: 'bulk' }
+		);
+		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 4, status: 'publish' }, { id: 1, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' } ], expect.anything() );
+		expect( result.errors ).toEqual( [] );
+	} );
+
+	it( 'relative ops on the fetched variations use their own prices', async () => {
+		const d = deps( { batchSize: 50 } );
+		await runSave( d, [ variable( 4 ) ], { regular_price: { operation: 'decrease', value: '10', percent: true } }, fields, settings, { applyToVariations: true, source: 'bulk' } );
+
+		expect( d.batchVariations ).toHaveBeenCalledWith( 4, [ { id: 41, regular_price: '90.00' }, { id: 42, regular_price: '45.00' } ], expect.anything() );
+		expect( d.batchProducts ).not.toHaveBeenCalled();
+	} );
+
+	it( 'returns an empty result without requests when nothing changes', async () => {
+		const d = deps();
+		const result = await runSave( d, [ simple( 1, { status: 'draft' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		expect( result ).toEqual( { updated: [], errors: [], batchId: 'batch-1' } );
+		expect( d.batchProducts ).not.toHaveBeenCalled();
+	} );
+
+	it( 'updated rows merge the original row with the returned object', async () => {
+		const d = deps();
+		const original = simple( 1, { name: 'Keep me' } );
+		const result = await runSave( d, [ original ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+		const row = result.updated[ 0 ] as ProductListItem & { echoed?: boolean };
+
+		expect( row.name ).toBe( 'Keep me' );
+		expect( row.status ).toBe( 'draft' );
+		expect( row.echoed ).toBe( true );
+		expect( row._kind ).toBe( 'product' );
+	} );
+} );

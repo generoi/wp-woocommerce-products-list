@@ -1,6 +1,6 @@
 /**
  * wp.hooks names. Filters receive and return the value named; actions get
- * the payload named. See docs/contracts.md for signatures.
+ * the payload named. See docs/contracts.md §8 and docs/extension-api.md.
  */
 export const HOOK_NAMESPACE = 'wcProductsList';
 
@@ -39,3 +39,16 @@ export const ACTIONS = {
 	/** ( ids: number[], context: { action: 'trash' | 'delete'; batchId: string } ) */
 	deleted: 'wcProductsList.deleted',
 } as const;
+
+export type FilterName = ( typeof FILTERS )[ keyof typeof FILTERS ];
+
+export type ActionName = ( typeof ACTIONS )[ keyof typeof ACTIONS ];
+
+/**
+ * The namespace an extension should pass as the third argument of
+ * `addFilter`/`addAction` when it has no better one: `hookNamespace( 'gds-woo-i18n' )`
+ * → `gds-woo-i18n/wc-products-list`.
+ */
+export function hookNamespace( extensionId: string ): string {
+	return `${ extensionId }/wc-products-list`;
+}
