@@ -19,6 +19,15 @@ final class ListMode
 
     public const BATCH_HEADER = 'X-WC-Products-List-Batch';
 
+    /**
+     * Where a write came from. The app sends `quick`, `bulk` or `extension`;
+     * the plugin itself sets `action` and `revert` on its own nested
+     * requests. Defaults to `quick`. The log table stores exactly these.
+     */
+    public const SOURCE_HEADER = 'X-WC-Products-List-Source';
+
+    public const SOURCES = ['quick', 'bulk', 'action', 'extension', 'revert'];
+
     private static ?bool $active = null;
 
     private static ?string $batchId = null;
@@ -91,6 +100,32 @@ final class ListMode
         }
 
         return self::$batchId = $value;
+    }
+
+    /**
+     * The source declared for this write (one of SOURCES); anything else, or
+     * no header, is `quick`. The log stores it per row.
+     */
+    public static function source(): string
+    {
+        $value = self::header(self::SOURCE_HEADER);
+        $value = $value === null ? null : strtolower(trim($value));
+
+        return $value !== null && in_array($value, self::SOURCES, true) ? $value : 'quick';
+    }
+
+    /**
+     * The HTTP method of the request being dispatched (`GET`, `POST`, ...),
+     * or null outside a request. Batch sub-requests are not dispatched, so
+     * during `POST /wc/v3/products/batch` this stays `POST`.
+     */
+    public static function method(): ?string
+    {
+        if (self::$request !== null) {
+            return self::$request->get_method();
+        }
+
+        return isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : null;
     }
 
     /**

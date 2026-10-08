@@ -9,10 +9,10 @@ namespace GeneroWP\ProductsList;
  * them into DataViews fields, filters and actions. An integration such as
  * gds-woo-i18n needs no JavaScript for this.
  *
- * Skeleton: the shapes and defaults are final, the deep validation (option
- * lists, operators, write paths against the schema) is added with the Rest
- * module. Keep `normaliseField()` and friends pure: the unit suite runs them
- * without WordPress.
+ * The lists are collected once per request (`reset()` drops the memo, for
+ * tests and for code that registers definitions late). Keep
+ * `normaliseField()` and friends pure: the unit suite runs them without
+ * WordPress.
  *
  * @phpstan-type FieldDef array{
  *     id: string, label: string, type: string, description: string,
@@ -57,6 +57,36 @@ final class Registry
 
     public const ARG_TYPES = ['text', 'select', 'boolean', 'integer', 'number'];
 
+    /** The DataViews filter operators. Unknown ones are dropped; none left means `is`. */
+    public const OPERATORS = [
+        'is', 'isNot', 'isAny', 'isNone', 'isAll', 'isNotAll',
+        'lessThan', 'greaterThan', 'lessThanOrEqual', 'greaterThanOrEqual', 'between',
+        'on', 'notOn', 'before', 'after', 'beforeInc', 'afterInc', 'inThePast', 'over',
+        'contains', 'notContains', 'startsWith',
+    ];
+
+    /** A dot path into a row or a request body: `i18n.se.name.value`. */
+    private const PATH = '/^[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*$/';
+
+    /** @var array<int, FieldDef>|null */
+    private static ?array $fields = null;
+
+    /** @var array<int, FilterDef>|null */
+    private static ?array $filters = null;
+
+    /** @var array<int, ActionDef>|null */
+    private static ?array $actions = null;
+
+    /**
+     * Forget the collected definitions so the filters run again.
+     */
+    public static function reset(): void
+    {
+        self::$fields = null;
+        self::$filters = null;
+        self::$actions = null;
+    }
+
     /**
      * @return array<int, FieldDef>
      */
@@ -69,7 +99,21 @@ final class Registry
          *
          * @param  array<int|string, array<string, mixed>>  $fields
          */
-        return self::collect(apply_filters(self::FILTER_FIELDS, []), [self::class, 'normaliseField']);
+        return self::$fields ??= self::collect(apply_filters(self::FILTER_FIELDS, []), [self::class, 'normaliseField']);
+    }
+
+    /**
+     * @return FieldDef|null
+     */
+    public static function field(string $id): ?array
+    {
+        foreach (self::fields() as $field) {
+            if ($field['id'] === $id) {
+                return $field;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -82,7 +126,7 @@ final class Registry
          *
          * @param  array<int|string, array<string, mixed>>  $filters
          */
-        return self::collect(apply_filters(self::FILTER_FILTERS, []), [self::class, 'normaliseFilter']);
+        return self::$filters ??= self::collect(apply_filters(self::FILTER_FILTERS, []), [self::class, 'normaliseFilter']);
     }
 
     /**
@@ -98,7 +142,7 @@ final class Registry
          *
          * @param  array<int|string, array<string, mixed>>  $actions
          */
-        return self::collect(apply_filters(self::FILTER_ACTIONS, []), [self::class, 'normaliseAction']);
+        return self::$actions ??= self::collect(apply_filters(self::FILTER_ACTIONS, []), [self::class, 'normaliseAction']);
     }
 
     /**
@@ -118,6 +162,20 @@ final class Registry
         }
 
         return array_keys($keys);
+    }
+
+    /**
+     * The fields that write under a request key, e.g. every `i18n` field.
+     * The save hook uses it to know which paths of the body to snapshot.
+     *
+     * @return array<int, FieldDef>
+     */
+    public static function fieldsByWriteKey(string $writeKey): array
+    {
+        return array_values(array_filter(
+            self::fields(),
+            static fn (array $field): bool => $field['writeKey'] === $writeKey && $field['editable']
+        ));
     }
 
     /**
@@ -156,18 +214,26 @@ final class Registry
 
         $filter = null;
 
-        if (is_array($def['filter'] ?? null) && isset($def['filter']['param'])) {
+        if (is_array($def['filter'] ?? null) && isset($def['filter']['param']) && is_scalar($def['filter']['param'])) {
             $filter = [
                 'param' => (string) $def['filter']['param'],
-                'operators' => self::strings($def['filter']['operators'] ?? ['is']),
+                'operators' => self::operators($def['filter']['operators'] ?? null),
             ];
         }
 
-        $writePath = isset($def['writePath']) ? (string) $def['writePath'] : null;
-        $writeKey = isset($def['writeKey']) ? (string) $def['writeKey'] : null;
+        $path = self::path($def['path'] ?? null) ?? $id;
+        $reference = self::path($def['reference'] ?? null);
+        $writePath = self::path($def['writePath'] ?? null);
+        $writeKey = isset($def['writeKey']) && is_scalar($def['writeKey']) ? self::path((string) $def['writeKey']) : null;
 
         if ($writeKey === null && $writePath !== null) {
             $writeKey = explode('.', $writePath, 2)[0];
+        }
+
+        $restFields = self::strings($def['restFields'] ?? []);
+
+        if ($restFields === []) {
+            $restFields = [explode('.', $path, 2)[0]];
         }
 
         return [
@@ -175,8 +241,8 @@ final class Registry
             'label' => (string) ($def['label'] ?? $id),
             'type' => $type,
             'description' => (string) ($def['description'] ?? ''),
-            'path' => (string) ($def['path'] ?? $id),
-            'reference' => isset($def['reference']) ? (string) $def['reference'] : null,
+            'path' => $path,
+            'reference' => $reference,
             'writeKey' => $writeKey,
             'writePath' => $writePath,
             'editable' => $editable && ! $readonly,
@@ -193,7 +259,7 @@ final class Registry
             'order' => (int) ($def['order'] ?? 100),
             'enableSorting' => (bool) ($def['enableSorting'] ?? false),
             'sortParam' => isset($def['sortParam']) ? (string) $def['sortParam'] : null,
-            'restFields' => self::strings($def['restFields'] ?? [explode('.', (string) ($def['path'] ?? $id), 2)[0]]),
+            'restFields' => $restFields,
             'filter' => $filter,
             'width' => isset($def['width']) ? (int) $def['width'] : null,
             'source' => (string) ($def['source'] ?? 'extension'),
@@ -247,7 +313,7 @@ final class Registry
             'type' => $type,
             'param' => $param,
             'options' => $options,
-            'operators' => self::strings($def['operators'] ?? ['is']),
+            'operators' => self::operators($def['operators'] ?? null),
             'isPrimary' => (bool) ($def['isPrimary'] ?? false),
             'multiple' => (bool) ($def['multiple'] ?? false),
             'variations' => (bool) ($def['variations'] ?? false),
@@ -364,6 +430,31 @@ final class Registry
         $id = (string) $id;
 
         return preg_match('/^[a-z0-9][a-z0-9_:.\-]{0,99}$/', $id) === 1 ? $id : null;
+    }
+
+    /**
+     * A dot path, or null when the value is not one.
+     */
+    private static function path(mixed $value): ?string
+    {
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        return preg_match(self::PATH, $value) === 1 ? $value : null;
+    }
+
+    /**
+     * The known operators among the given ones, in the given order; `is`
+     * when none is left.
+     *
+     * @return array<int, string>
+     */
+    private static function operators(mixed $values): array
+    {
+        $operators = array_values(array_intersect(self::strings($values ?? ['is']), self::OPERATORS));
+
+        return $operators === [] ? ['is'] : $operators;
     }
 
     /**

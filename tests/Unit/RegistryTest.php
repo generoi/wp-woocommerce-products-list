@@ -84,4 +84,40 @@ class RegistryTest extends TestCase
         $this->assertFalse($action['args'][1]['default']);
         $this->assertSame('product', Registry::normaliseAction(['id' => 'x', 'scope' => 'galaxy'])['scope']);
     }
+
+    public function test_paths_and_operators_are_validated(): void
+    {
+        $field = Registry::normaliseField([
+            'id' => 'i18n:se.name',
+            'path' => 'i18n.se.name.value',
+            'reference' => 'bad path!',
+            'writePath' => 'i18n.se.name',
+            'restFields' => ['i18n', 'name'],
+            'filter' => ['param' => 'gds_i18n', 'operators' => ['is', 'rocket', 'isAny']],
+        ]);
+
+        $this->assertNull($field['reference']);
+        $this->assertSame(['i18n', 'name'], $field['restFields']);
+        $this->assertSame(['is', 'isAny'], $field['filter']['operators']);
+
+        $broken = Registry::normaliseField(['id' => 'x', 'path' => 'not a path', 'writePath' => '..', 'writeKey' => 'ok']);
+        $this->assertSame('x', $broken['path']);
+        $this->assertSame(['x'], $broken['restFields']);
+        $this->assertNull($broken['writePath']);
+        $this->assertSame('ok', $broken['writeKey']);
+
+        $filter = Registry::normaliseFilter(['id' => 'stock', 'param' => 'min_stock_quantity', 'type' => 'number', 'operators' => ['nope']]);
+        $this->assertSame(['is'], $filter['operators']);
+        $this->assertSame('number', $filter['type']);
+    }
+
+    public function test_explicit_write_key_wins_over_the_path(): void
+    {
+        $field = Registry::normaliseField(['id' => 'meta:cost', 'writePath' => 'meta_data.cost', 'writeKey' => 'meta_data']);
+        $this->assertSame('meta_data', $field['writeKey']);
+
+        $field = Registry::normaliseField(['id' => 'plain']);
+        $this->assertNull($field['writeKey']);
+        $this->assertNull($field['writePath']);
+    }
 }
