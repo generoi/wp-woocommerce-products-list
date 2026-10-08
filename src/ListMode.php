@@ -28,6 +28,16 @@ final class ListMode
 
     public const SOURCES = ['quick', 'bulk', 'action', 'extension', 'revert'];
 
+    /**
+     * A batch id is a UUID v4, as the app generates. Anything else in the
+     * header is ignored and the request gets a generated id: the log
+     * groups rows by batch id and a revert puts back everything under
+     * one, so a client-chosen literal (`audit-r3`) reused across saves,
+     * or across users, would merge unrelated operations into one
+     * revertable unit.
+     */
+    public const BATCH_ID_PATTERN = '/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i';
+
     private static ?bool $active = null;
 
     private static ?string $batchId = null;
@@ -173,11 +183,19 @@ final class ListMode
 
         $value = self::header(self::BATCH_HEADER);
 
-        if ($value === null || ! preg_match('/^[A-Za-z0-9_-]{1,64}$/', $value)) {
+        if ($value === null || ! self::isBatchId($value)) {
             return self::$batchId = null;
         }
 
         return self::$batchId = $value;
+    }
+
+    /**
+     * Whether a value is acceptable as a batch id (a UUID v4).
+     */
+    public static function isBatchId(mixed $value): bool
+    {
+        return is_string($value) && preg_match(self::BATCH_ID_PATTERN, $value) === 1;
     }
 
     /**
@@ -199,6 +217,16 @@ final class ListMode
     public static function request(): ?WP_REST_Request
     {
         return self::$request;
+    }
+
+    /**
+     * Whether the request being dispatched was dispatched from inside
+     * another one (the actions refresh, the revert's wc/v3 writes, the
+     * variations batch's per-parent batches).
+     */
+    public static function nested(): bool
+    {
+        return count(self::$stack) > 1;
     }
 
     /**

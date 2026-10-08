@@ -323,6 +323,41 @@ class SaveHookTest extends RestTestCase
         $this->assertCount(2, $this->rows($batches[0]));
     }
 
+    /**
+     * Only a UUID v4 is taken as a batch id. A client-chosen literal
+     * reused across saves (or across users) would merge unrelated
+     * operations into one revertable batch.
+     */
+    public function test_a_batch_header_that_is_not_a_uuid_is_replaced_by_a_generated_id(): void
+    {
+        global $wpdb;
+
+        $product = $this->simpleProduct();
+
+        foreach (['audit-r3', 'AUDIT', '12345678-1234-1234-1234-123456789012', str_repeat('a', 36)] as $literal) {
+            $this->assertFalse(ListMode::isBatchId($literal), $literal);
+        }
+
+        $this->assertTrue(ListMode::isBatchId(wp_generate_uuid4()));
+        $this->assertTrue(ListMode::isBatchId(strtoupper(wp_generate_uuid4())));
+
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['regular_price' => '2'], [ListMode::BATCH_HEADER => 'audit-r3']);
+        $this->assertStatus(200, $response);
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['regular_price' => '3'], [ListMode::BATCH_HEADER => 'audit-r3']);
+        $this->assertStatus(200, $response);
+
+        $this->assertSame([], $this->rows('audit-r3'));
+
+        $table = Table::name();
+        $batches = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT batch_id FROM {$table} WHERE object_id = %d", $product->get_id())); // phpcs:ignore
+        // Two saves, two batches: each request gets its own generated id.
+        $this->assertCount(2, $batches);
+
+        foreach ($batches as $batch) {
+            $this->assertTrue(ListMode::isBatchId($batch), $batch);
+        }
+    }
+
     public function test_logged_action_fires_with_the_rows(): void
     {
         $seen = [];

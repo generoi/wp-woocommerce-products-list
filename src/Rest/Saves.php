@@ -63,6 +63,10 @@ final class Saves
     {
         self::$writeKeys = null;
 
+        if (! ListMode::nested()) {
+            Recorder::forgetLoggedErrors();
+        }
+
         return $response;
     }
 

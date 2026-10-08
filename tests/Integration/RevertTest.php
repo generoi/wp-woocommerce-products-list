@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Tests\Integration;
 
+use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Table;
@@ -169,6 +170,97 @@ class RevertTest extends RestTestCase
         $this->assertFalse($reverted->get_manage_stock());
         $this->assertNull($reverted->get_stock_quantity());
         $this->assertSame('', $reverted->get_meta('_custom'));
+    }
+
+    /**
+     * An extension action that reports `changes` (a translation copy) is
+     * undone from History like a bulk edit: its rows carry field, old and
+     * new value, so the batch is revertable and the revert writes the old
+     * values back through wc/v3 (a null old value deletes the key).
+     */
+    public function test_extension_action_rows_revert_like_updates(): void
+    {
+        add_filter('wc_products_list/action_handlers', static function (array $handlers): array {
+            $handlers[] = new class implements Action
+            {
+                public function id(): string
+                {
+                    return 'tint';
+                }
+
+                public function run(WC_Product $product, array $args, WP_REST_Request $request): array
+                {
+                    $old = get_post_meta($product->get_id(), '_tint', true);
+
+                    if ($old === $args['colour']) {
+                        return [];
+                    }
+
+                    update_post_meta($product->get_id(), '_tint', $args['colour']);
+                    update_post_meta($product->get_id(), '_i18n_name_se', 'Ullsockor');
+
+                    return ['changes' => [
+                        'meta_data._tint' => [$old === '' ? null : $old, $args['colour']],
+                        'i18n.se.name' => ['', 'Ullsockor'],
+                    ]];
+                }
+
+                public function can(WC_Product $product): bool
+                {
+                    return true;
+                }
+
+                public function appliesTo(): string
+                {
+                    return 'both';
+                }
+
+                public function sanitizeArgs(array $args): array
+                {
+                    return ['colour' => (string) ($args['colour'] ?? 'red')];
+                }
+            };
+
+            return $handlers;
+        });
+
+        $product = $this->simpleProduct();
+        $same = $this->simpleProduct();
+        update_post_meta($same->get_id(), '_tint', 'red');
+        $trashed = $this->simpleProduct();
+
+        $response = $this->request('POST', '/wc-products-list/v1/actions/tint', ['ids' => [$product->get_id(), $same->get_id()], 'args' => ['colour' => 'red']]);
+        $this->assertStatus(200, $response);
+        $results = array_column($this->data($response)['results'], null, 'id');
+        // How many fields each id changed: the app's notice counts on it and offers Undo only when something was written.
+        $this->assertSame(2, $results[$product->get_id()]['changed']);
+        $this->assertSame(0, $results[$same->get_id()]['changed']);
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/actions/trash', ['ids' => [$trashed->get_id()]]));
+
+        $this->assertSame('red', get_post_meta($product->get_id(), '_tint', true));
+        $this->assertSame('Ullsockor', get_post_meta($product->get_id(), '_i18n_name_se', true));
+
+        $batches = $this->data($this->request('GET', '/wc-products-list/v1/log/batches'));
+        $this->assertTrue($batches['items'][0]['revertable']);
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $this->assertTrue($plan['revertable']);
+        $this->assertSame([$product->get_id()], array_merge(...$plan['chunks']));
+        $this->assertSame(['tint', 'trash'], array_column($plan['skipped'], 'action'));
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $results = array_column($data['results'], null, 'id');
+        $this->assertTrue($results[$product->get_id()]['ok']);
+        $this->assertSame('skipped', $results[$same->get_id()]['code']);
+        $this->assertSame('skipped', $results[$trashed->get_id()]['code']);
+
+        $this->assertFalse(metadata_exists('post', $product->get_id(), '_tint'));
+        $this->assertFalse(metadata_exists('post', $product->get_id(), '_i18n_name_se'));
+        $this->assertSame('red', get_post_meta($same->get_id(), '_tint', true));
+        $this->assertSame('trash', get_post_status($trashed->get_id()));
+
+        $revert = $this->rows($data['batch_id']);
+        $this->assertSame(['revert'], array_unique(array_column($revert, 'source')));
+        $this->assertEqualsCanonicalizing(['i18n.se.name', 'meta_data._tint'], array_column($revert, 'field'));
     }
 
     public function test_reverting_a_change_that_created_a_meta_key_removes_the_key(): void

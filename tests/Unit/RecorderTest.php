@@ -95,16 +95,36 @@ class RecorderTest extends TestCase
             ['id' => 5, 'object_type' => 'product', 'object_id' => 30, 'parent_id' => 0, 'action' => 'trash', 'status' => 'ok', 'field' => 'status', 'old_value' => 'publish', 'new_value' => 'trash'],
             ['id' => 6, 'object_type' => 'product', 'object_id' => 31, 'parent_id' => 0, 'action' => 'update', 'status' => 'error', 'field' => '', 'old_value' => null, 'new_value' => null],
             ['id' => 7, 'object_type' => 'product', 'object_id' => 10, 'parent_id' => 0, 'action' => 'duplicate', 'status' => 'ok', 'field' => '', 'old_value' => null, 'new_value' => null],
+            // An extension action that reported its changes: reverted like an update.
+            ['id' => 8, 'object_type' => 'product', 'object_id' => 40, 'parent_id' => 0, 'action' => 'i18n_copy', 'status' => 'ok', 'field' => 'i18n.se.name', 'old_value' => '', 'new_value' => 'Ullsockor'],
+            ['id' => 9, 'object_type' => 'variation', 'object_id' => 23, 'parent_id' => 20, 'action' => 'i18n_clear', 'status' => 'ok', 'field' => 'i18n.se.regular_price', 'old_value' => '200', 'new_value' => null],
+            // Its no-op row (nothing to copy) and a restore row are not.
+            ['id' => 10, 'object_type' => 'product', 'object_id' => 41, 'parent_id' => 0, 'action' => 'i18n_copy', 'status' => 'ok', 'field' => '', 'old_value' => null, 'new_value' => null],
+            ['id' => 11, 'object_type' => 'product', 'object_id' => 42, 'parent_id' => 0, 'action' => 'restore', 'status' => 'ok', 'field' => 'status', 'old_value' => 'trash', 'new_value' => 'publish'],
         ]);
 
         // The earliest old value is the original, even when rows arrive out of order.
-        $this->assertSame([10 => ['sale_price' => '']], $plan['products']);
-        $this->assertSame([20 => [21 => ['regular_price' => '189'], 22 => ['date_on_sale_from' => null]]], $plan['variations']);
-        // Product 10 also has a duplicate row but is reverted, so only 30 and 31 are skipped.
+        $this->assertSame([10 => ['sale_price' => ''], 40 => ['i18n.se.name' => '']], $plan['products']);
+        $this->assertSame([20 => [21 => ['regular_price' => '189'], 22 => ['date_on_sale_from' => null], 23 => ['i18n.se.regular_price' => '200']]], $plan['variations']);
+        $this->assertSame(['i18n.se.regular_price' => null], $plan['final'][23]);
+        // Product 10 also has a duplicate row but is reverted, so only 30, 31, 41 and 42 are skipped.
         $this->assertSame([
             ['id' => 30, 'object_type' => 'product', 'action' => 'trash'],
             ['id' => 31, 'object_type' => 'product', 'action' => 'update'],
+            ['id' => 41, 'object_type' => 'product', 'action' => 'i18n_copy'],
+            ['id' => 42, 'object_type' => 'product', 'action' => 'restore'],
         ], $plan['skipped']);
+    }
+
+    public function test_only_the_built_in_actions_without_a_way_back_are_not_revertable(): void
+    {
+        foreach (['trash', 'restore', 'delete', 'duplicate', 'create'] as $action) {
+            $this->assertFalse(Revert::revertable($action), $action);
+        }
+
+        foreach (['update', 'publish', 'draft', 'feature', 'i18n_copy', 'i18n_clear'] as $action) {
+            $this->assertTrue(Revert::revertable($action), $action);
+        }
     }
 
     public function test_revert_body_rebuilds_the_request_shape(): void

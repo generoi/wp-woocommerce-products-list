@@ -4,6 +4,7 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 
 use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\Actions\Duplicate;
+use GeneroWP\ProductsList\Bootstrap;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Table;
 use WC_Product;
@@ -82,6 +83,7 @@ class ActionsTest extends RestTestCase
         $parent = $this->variableProduct(['38', '39']);
         $children = $parent->get_children();
         $gone = $parent->get_id() + 100000;
+        wp_trash_post($parent->get_id());
 
         $data = $this->act('delete', [$parent->get_id(), $gone]);
 
@@ -94,8 +96,44 @@ class ActionsTest extends RestTestCase
 
         $rows = $this->rows();
         $this->assertCount(2, $rows);
-        $this->assertSame(['delete', 'status', 'publish', null, 'ok'], [$rows[0]['action'], $rows[0]['field'], $rows[0]['old_value'], $rows[0]['new_value'], $rows[0]['status']]);
+        $this->assertSame(['delete', 'status', 'trash', null, 'ok'], [$rows[0]['action'], $rows[0]['field'], $rows[0]['old_value'], $rows[0]['new_value'], $rows[0]['status']]);
         $this->assertSame(['error', $gone], [$rows[1]['status'], (int) $rows[1]['object_id']]);
+    }
+
+    /**
+     * The UI offers "Delete permanently" outside the Trash only behind
+     * `wc_products_list/allow_hard_delete`; the route enforces the same.
+     */
+    public function test_delete_outside_the_trash_needs_the_hard_delete_filter(): void
+    {
+        $published = $this->simpleProduct();
+        $draft = $this->simpleProduct(['status' => 'draft']);
+        $parent = $this->variableProduct(['38']);
+        $variation = $parent->get_children()[0];
+
+        $data = $this->act('delete', [$published->get_id(), $draft->get_id(), $variation]);
+
+        $this->assertSame([false, false, false], array_column($data['results'], 'ok'));
+        $this->assertSame(['wc_products_list_not_trashed'], array_unique(array_column($data['results'], 'code')));
+        $this->assertSame('publish', get_post_status($published->get_id()));
+        $this->assertSame('draft', get_post_status($draft->get_id()));
+        $this->assertSame('publish', get_post_status($variation));
+
+        $rows = $this->rows();
+        $this->assertCount(3, $rows);
+        $this->assertSame(['error'], array_unique(array_column($rows, 'status')));
+        $this->assertSame('wc_products_list_not_trashed', json_decode($rows[0]['context'], true)['code']);
+
+        add_filter(Bootstrap::FILTER_ALLOW_HARD_DELETE, '__return_true');
+
+        try {
+            $data = $this->act('delete', [$published->get_id()]);
+        } finally {
+            remove_filter(Bootstrap::FILTER_ALLOW_HARD_DELETE, '__return_true');
+        }
+
+        $this->assertTrue($data['results'][0]['ok']);
+        $this->assertNull(get_post($published->get_id()));
     }
 
     public function test_duplicate_returns_the_draft_copy(): void

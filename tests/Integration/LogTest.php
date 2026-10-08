@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Tests\Integration;
 
+use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Prune;
 use GeneroWP\ProductsList\Log\Table;
@@ -320,6 +321,60 @@ class LogTest extends RestTestCase
 
         $this->actAs('shop_manager');
         $this->assertStatus(200, $this->request('GET', '/wc-products-list/v1/log'));
+    }
+
+    /**
+     * A batch id the log holds for two users is one somebody replayed:
+     * neither the plan nor the revert treats it as one operation.
+     */
+    public function test_a_batch_with_rows_of_two_users_is_not_revertable(): void
+    {
+        $product = $this->simpleProduct(['sale_price' => '1']);
+        $other = $this->simpleProduct();
+        $mine = get_current_user_id();
+        $colleague = self::factory()->user->create(['role' => 'shop_manager']);
+        $shared = wp_generate_uuid4();
+        $own = wp_generate_uuid4();
+
+        $this->seed([
+            ['batch_id' => $shared, 'object_id' => $product->get_id(), 'field' => 'regular_price', 'old_value' => '1', 'new_value' => '2', 'user_id' => $mine],
+            ['batch_id' => $shared, 'object_id' => $other->get_id(), 'field' => 'regular_price', 'old_value' => '5', 'new_value' => '6', 'user_id' => $colleague],
+            ['batch_id' => $own, 'object_id' => $product->get_id(), 'field' => 'sale_price', 'old_value' => '', 'new_value' => '1', 'user_id' => $mine],
+        ]);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$shared));
+        $this->assertSame(2, $plan['users']);
+        $this->assertSame(2, $plan['objects']);
+        $this->assertFalse($plan['revertable']);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$own));
+        $this->assertSame(1, $plan['users']);
+        $this->assertTrue($plan['revertable']);
+
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertFalse($batches[$shared]['revertable']);
+        $this->assertSame(2, $batches[$shared]['users']);
+        $this->assertTrue($batches[$own]['revertable']);
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$shared.'/revert');
+        $this->assertStatus(409, $response);
+        $this->assertSame('wc_products_list_batch_shared', $this->data($response)['code']);
+        $this->assertSame('189', wc_get_product($product->get_id())->get_regular_price());
+
+        // One chunk of it is refused just the same.
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$shared.'/revert', ['ids' => [$product->get_id()]]);
+        $this->assertStatus(409, $response);
+
+        // The revert's own batch id has to be a UUID too.
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$own.'/revert', ['revert_batch_id' => 'undo-1']);
+        $this->assertStatus(400, $response);
+        $this->assertSame('rest_invalid_param', $this->data($response)['code']);
+        $this->assertSame('1', wc_get_product($product->get_id())->get_sale_price());
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$own.'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+        $this->assertTrue(ListMode::isBatchId($data['batch_id']));
+        $this->assertSame('', wc_get_product($product->get_id())->get_sale_price());
     }
 
     public function test_prune_drops_rows_older_than_the_retention(): void

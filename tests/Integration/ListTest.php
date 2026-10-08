@@ -155,6 +155,75 @@ class ListTest extends RestTestCase
         $this->assertCount(6, $this->ids(['sale_scheduled' => 'true'], [ListMode::HEADER => '']));
     }
 
+    public function test_variable_rows_summarise_their_variations_stock_and_sales(): void
+    {
+        $sizes = array_map('strval', range(30, 45));
+        $variable = $this->variableProduct($sizes);
+        $children = $variable->get_children();
+        $this->assertCount(16, $children);
+
+        $from = strtotime('2026-12-12 00:00:00 UTC');
+        $to = strtotime('2026-12-18 23:59:00 UTC');
+
+        foreach ($children as $index => $id) {
+            $variation = wc_get_product($id);
+
+            if ($index < 4) {
+                $variation->set_stock_status('outofstock');
+            }
+
+            if ($index < 12) {
+                $variation->set_sale_price('99');
+                $variation->set_date_on_sale_from((string) $from);
+                $variation->set_date_on_sale_to((string) $to);
+            }
+
+            $variation->save();
+        }
+
+        $plain = $this->variableProduct(['38'])->get_id();
+        $simple = $this->simpleProduct(['stock_status' => 'outofstock'])->get_id();
+
+        global $wpdb;
+        $queries = 0;
+        $count = static function (string $query) use (&$queries, $wpdb): string {
+            if (str_contains($query, 'GROUP BY v.post_parent') && str_contains($query, $wpdb->wc_product_meta_lookup)) {
+                $queries++;
+            }
+
+            return $query;
+        };
+        add_filter('query', $count);
+        $response = $this->request('GET', '/wc/v3/products', ['include' => [$variable->get_id(), $plain, $simple], 'orderby' => 'include', '_fields' => 'id,wc_products_list']);
+        remove_filter('query', $count);
+        $this->assertStatus(200, $response);
+        $this->assertSame(1, $queries, 'one summary query per page');
+
+        $rows = array_column($this->data($response), Rows::KEY, 'id');
+        $this->assertSame(['out_of_stock' => 4, 'total' => 16], $rows[$variable->get_id()]['variation_stock']);
+        $this->assertSame(0, $rows[$variable->get_id()]['sale_summary']['on_sale']);
+        $this->assertSame(12, $rows[$variable->get_id()]['sale_summary']['scheduled']);
+        $timezone = wp_timezone();
+        $this->assertSame((new \DateTimeImmutable('@'.$from))->setTimezone($timezone)->format('Y-m-d\\TH:i:s'), $rows[$variable->get_id()]['sale_summary']['from']);
+        $this->assertSame((new \DateTimeImmutable('@'.$to))->setTimezone($timezone)->format('Y-m-d\\TH:i:s'), $rows[$variable->get_id()]['sale_summary']['to']);
+        $this->assertSame(['out_of_stock' => 0, 'total' => 1], $rows[$plain]['variation_stock']);
+        $this->assertSame(['on_sale' => 0, 'scheduled' => 0, 'from' => null, 'to' => null], $rows[$plain]['sale_summary']);
+        $this->assertArrayNotHasKey('variation_stock', $rows[$simple]);
+
+        // A running sale counts as on sale, not scheduled.
+        $running = wc_get_product($children[0]);
+        $running->set_date_on_sale_from((string) (time() - DAY_IN_SECONDS));
+        $running->save();
+        $row = $this->data($this->request('GET', '/wc/v3/products', ['include' => [$variable->get_id()], '_fields' => 'id,wc_products_list']))[0][Rows::KEY];
+        $this->assertSame(1, $row['sale_summary']['on_sale']);
+        $this->assertSame(11, $row['sale_summary']['scheduled']);
+
+        // The restock list: parents with an out-of-stock variation.
+        $this->assertSame([$variable->get_id()], $this->ids(['variation_stock_status' => 'outofstock']));
+        $this->assertEqualsCanonicalizing([$variable->get_id(), $plain], $this->ids(['variation_stock_status' => 'instock']));
+        $this->assertStatus(400, $this->request('GET', '/wc/v3/products', ['variation_stock_status' => 'gone']));
+    }
+
     public function test_orderby_sku_stock_quantity_and_menu_order(): void
     {
         $b = $this->simpleProduct(['sku' => 'B-2', 'manage_stock' => true, 'stock_quantity' => 20, 'menu_order' => 3])->get_id();
@@ -239,9 +308,28 @@ class ListTest extends RestTestCase
         $data = $this->data($this->request('GET', '/wc/v3/products/'.$id, [], [ListMode::HEADER => '']));
         $this->assertCount(2, $data['images']);
 
-        // A list-mode write neither sees nor loses the gallery.
-        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['name' => 'Renamed']));
+        // A list-mode write answers with the list's row (featured image
+        // only) and does not lose the gallery.
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['name' => 'Renamed']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([$featured], array_column($this->data($response)['images'], 'id'));
         $this->assertSame([$gallery], wc_get_product($id)->get_gallery_image_ids('edit'));
+
+        // Batch writes too: `images` is among the row fields of every save.
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $id, 'name' => 'Renamed again']]], [], ['fields' => 'id,name,images']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([$featured], array_column($this->data($response)['update'][0]['images'], 'id'));
+        $this->assertSame([$gallery], wc_get_product($id)->get_gallery_image_ids('edit'));
+
+        // A write that sets the gallery is stored, answered and logged in full.
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $id, 'images' => [['id' => $featured], ['id' => $gallery], ['id' => $featured]]]]], [], ['fields' => 'id,images']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([$featured, $gallery, $featured], array_column($this->data($response)['update'][0]['images'], 'id'));
+        $this->assertSame([$gallery, $featured], wc_get_product($id)->get_gallery_image_ids('edit'));
+        $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $id, 'field' => 'images']));
+        $this->assertCount(1, $log['items']);
+        $this->assertSame([['id' => $featured], ['id' => $gallery]], json_decode($log['items'][0]['old_value'], true));
+        $this->assertSame([['id' => $featured], ['id' => $gallery], ['id' => $featured]], json_decode($log['items'][0]['new_value'], true));
 
         // No featured image: the first gallery image stands in, as everywhere else.
         $second = self::factory()->attachment->create(['post_mime_type' => 'image/jpeg']);
@@ -400,6 +488,95 @@ class ListTest extends RestTestCase
      * Pinned so a per-row query (terms, brands, gallery, children) shows
      * up here before it shows up in the dev audit.
      */
+    /**
+     * WooCommerce computes the variation price hash (our priming hook)
+     * before it reads its price transient, and loads the variations only
+     * on a miss. With warm transients a list page must not load a single
+     * variation, whatever the sort order, and must read the page's
+     * transients in one query rather than one per variable product.
+     */
+    public function test_a_warm_price_cache_loads_no_variation_on_a_list_page(): void
+    {
+        global $wpdb;
+
+        $parents = [];
+        $children = [];
+
+        for ($i = 0; $i < 6; $i++) {
+            $parent = $this->variableProduct(['36', '37', '38', '39', '40', '41', '42', '43', '44', '45'], ['sku' => 'W'.$i]);
+            $parents[] = $parent->get_id();
+            $children = array_merge($children, array_map('intval', $parent->get_children()));
+        }
+
+        $this->assertCount(60, $children);
+
+        // Warm WooCommerce's caches the way a storefront visit does.
+        foreach ($parents as $id) {
+            $product = wc_get_product($id);
+            $this->assertNotSame([], $product->get_variation_prices()['price']);
+            $this->assertTrue(Rows::pricesCached($product));
+        }
+
+        wp_cache_flush();
+
+        $seen = [];
+        $transientReads = 0;
+        $filter = static function (string $query) use (&$seen, &$transientReads, $children, $wpdb): string {
+            if (preg_match('/SELECT\s+'.preg_quote($wpdb->posts, '/').'\.\*\s+FROM\s+'.preg_quote($wpdb->posts, '/').'\s+WHERE\s+ID\s+IN\s*\(([^)]*)\)/i', $query, $m)) {
+                $ids = array_map('intval', explode(',', $m[1]));
+
+                if (array_intersect($ids, $children) !== []) {
+                    $seen[] = $query;
+                }
+            }
+
+            if (str_contains($query, '_transient_wc_var_prices_')) {
+                $transientReads++;
+            }
+
+            return $query;
+        };
+
+        add_filter('query', $filter);
+        $response = $this->request('GET', '/wc/v3/products', [
+            'per_page' => 100,
+            'tab' => 'all',
+            'orderby' => 'title',
+            'order' => 'asc',
+            '_fields' => 'id,name,type,status,sku,price,regular_price,sale_price,price_html,on_sale,stock_status,images,wc_products_list',
+        ]);
+        remove_filter('query', $filter);
+
+        $this->assertStatus(200, $response);
+        $data = $this->data($response);
+        $this->assertCount(6, $data);
+        $this->assertSame([], $seen, 'Variations were loaded on a list page with a warm price cache: '.implode("\n", $seen));
+        $this->assertSame(1, $transientReads, 'The page\'s price and children transients are read in one query');
+
+        foreach ($data as $row) {
+            $this->assertSame(10, $row['wc_products_list']['variation_count']);
+            // The price range came from the transient.
+            $this->assertStringContainsString('189', $row['price_html']);
+            $this->assertFalse($row['on_sale']);
+        }
+
+        // Cold: the price is computed from the variations, which are loaded in bulk.
+        foreach ($parents as $id) {
+            delete_transient('wc_var_prices_'.$id);
+        }
+
+        wp_cache_flush();
+        $before = $wpdb->num_queries;
+        $response = $this->request('GET', '/wc/v3/products', ['per_page' => 100, 'tab' => 'all', 'orderby' => 'title', '_fields' => 'id,price_html,wc_products_list']);
+        $this->assertStatus(200, $response);
+
+        foreach ($this->data($response) as $row) {
+            $this->assertStringContainsString('189', $row['price_html']);
+        }
+
+        $this->assertLessThan(60, $wpdb->num_queries - $before, 'A cold price cache loads the variations in a few queries per parent, not per variation');
+    }
+
     public function test_a_list_page_stays_within_the_query_budget(): void
     {
         global $wpdb;

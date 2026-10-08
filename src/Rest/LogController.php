@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Rest;
 
+use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Plugin;
@@ -78,8 +79,10 @@ final class LogController
                 ],
                 'revert_batch_id' => [
                     'type' => 'string',
-                    'pattern' => '^[A-Za-z0-9_-]{1,64}$',
-                    'description' => 'The batch id to log the revert under; the same for every chunk of one revert. Generated when absent.',
+                    'description' => 'The batch id (a UUID v4) to log the revert under; the same for every chunk of one revert. Generated when absent.',
+                    'validate_callback' => static fn ($value): bool|WP_Error => ListMode::isBatchId($value)
+                        ? true
+                        : new WP_Error('rest_invalid_param', __('revert_batch_id must be a UUID v4.', 'wp-woocommerce-products-list'), ['status' => 400]),
                 ],
                 'force' => [
                     'type' => 'boolean',
@@ -151,12 +154,14 @@ final class LogController
         $page = max(1, (int) $request['page']);
         $perPage = min(self::PER_PAGE_MAX, max(1, (int) $request['per_page']));
 
+        // The same rule as Revert::plan(): a batch is revertable when an ok row with a field is not a trash/restore/delete/duplicate/create row.
+        $notRevertable = implode(',', array_map(static fn (string $action): string => "'".esc_sql($action)."'", Revert::NOT_REVERTABLE));
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $total = (int) $wpdb->get_var($this->prepare("SELECT COUNT(DISTINCT batch_id) FROM {$table} WHERE {$where}", $values));
         $rows = $wpdb->get_results($this->prepare(
             "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, MIN(source) AS source,
-                COUNT(*) AS row_count, COUNT(DISTINCT object_id) AS object_count, MAX(id) AS last_id,
-                SUM(action = 'update' AND status = 'ok' AND field <> '') AS updates,
+                COUNT(*) AS row_count, COUNT(DISTINCT object_id) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
+                SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
                 GROUP_CONCAT(DISTINCT field ORDER BY field SEPARATOR ',') AS fields
              FROM {$table} WHERE {$where}
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
@@ -177,8 +182,9 @@ final class LogController
                 'source' => (string) $row['source'],
                 'rows' => (int) $row['row_count'],
                 'objects' => (int) $row['object_count'],
+                'users' => (int) $row['user_count'],
                 'fields' => array_values(array_filter(explode(',', (string) $row['fields']), static fn (string $field): bool => $field !== '')),
-                'revertable' => (int) $row['updates'] > 0,
+                'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
             ];
         }
 
@@ -198,7 +204,7 @@ final class LogController
         $table = Table::name();
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
 
         if (! is_array($rows) || $rows === []) {
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
@@ -207,15 +213,17 @@ final class LogController
         $plan = Revert::objects($rows);
         $ids = array_column($plan['objects'], 'id');
         $chunk = Revert::chunk();
+        $users = count(array_unique(array_map('intval', array_column($rows, 'user_id'))));
 
         return rest_ensure_response([
             'batch_id' => $batchId,
             'rows' => count($rows),
             'objects' => count($ids),
+            'users' => $users,
             'chunk' => $chunk,
             'chunks' => array_chunk($ids, $chunk),
             'skipped' => $plan['skipped'],
-            'revertable' => $ids !== [],
+            'revertable' => $ids !== [] && $users <= 1,
         ]);
     }
 
@@ -257,6 +265,10 @@ final class LogController
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
         }
 
+        if ($this->isShared($batchId)) {
+            return new WP_Error('wc_products_list_batch_shared', __('This batch holds changes by more than one user and cannot be reverted as one.', 'wp-woocommerce-products-list'), ['status' => 409]);
+        }
+
         if ($ids === null) {
             $objects = array_column(Revert::objects($rows)['objects'], 'id');
 
@@ -279,6 +291,23 @@ final class LogController
             is_string($revertBatchId) ? $revertBatchId : null,
             (bool) $request->get_param('force')
         ));
+    }
+
+    /**
+     * Whether rows of more than one user share the batch id. The id is a
+     * UUID the app generates per gesture (`ListMode::isBatchId()`), so
+     * this only happens when a client replays somebody else's id; a
+     * revert works on the batch as a whole and must not reach into
+     * another user's changes.
+     */
+    private function isShared(string $batchId): bool
+    {
+        global $wpdb;
+
+        $table = Table::name();
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT user_id) FROM {$table} WHERE batch_id = %s", $batchId)) > 1;
     }
 
     /**

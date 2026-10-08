@@ -7,15 +7,19 @@ use GeneroWP\ProductsList\Rest\Rows;
 use WP_REST_Request;
 
 /**
- * Puts a batch's `update` rows back: the old value of every field goes
+ * Puts a batch's field changes back: the old value of every field goes
  * through the same wc/v3 batch endpoints the app writes with (products in
  * one `products/batch`, variations per parent), so WooCommerce's own
  * validation, lookups and the extension save hooks all run. The writes are
  * logged as a new batch with `source=revert`, so a revert can itself be
  * reverted.
  *
- * Rows of other actions (trash, restore, delete, duplicate, create) are
- * skipped and reported as such: trash has restore, delete is final.
+ * A row takes part when it is an ok row with a field: an `update` row, or
+ * a row of an extension action that reported `changes` (a translation
+ * copy's `i18n.se.name`), whose field path is a write path of the same
+ * endpoints. Rows of the built-in trash, restore, delete, duplicate and
+ * create actions are skipped and reported as such: trash has restore,
+ * delete is final.
  *
  * A field somebody changed again after the batch is not put back: its
  * current value is compared with the value the batch left (the last
@@ -45,6 +49,23 @@ final class Revert
     public const FILTER_CHUNK = 'wc_products_list/revert_chunk';
 
     /**
+     * Actions whose rows a revert never writes back, whatever field they
+     * carry: the built-in ones that have their own way back (or none).
+     * Mirrored in resources/history/batch-scope.ts.
+     */
+    public const NOT_REVERTABLE = ['trash', 'restore', 'delete', 'duplicate', 'create'];
+
+    /**
+     * Whether the rows of an action are put back by a revert: any action
+     * but the built-in trash/restore/delete/duplicate/create, so an
+     * extension action that logs `changes` is undone the way an update is.
+     */
+    public static function revertable(string $action): bool
+    {
+        return ! in_array($action, self::NOT_REVERTABLE, true);
+    }
+
+    /**
      * Objects one revert request writes at most.
      */
     public static function chunk(): int
@@ -59,9 +80,10 @@ final class Revert
     }
 
     /**
-     * Group a batch's rows into the writes that undo them. Only ok `update`
-     * rows take part; when a field was changed more than once within the
-     * batch the earliest row's old value wins, as it is the original.
+     * Group a batch's rows into the writes that undo them. Only ok rows
+     * with a field of a revertable action take part (see `revertable()`);
+     * when a field was changed more than once within the batch the earliest
+     * row's old value wins, as it is the original.
      *
      * @param  array<int, array<string, mixed>>  $rows  log rows, any order
      * @return Plan
@@ -83,7 +105,7 @@ final class Revert
                 continue;
             }
 
-            if ($action !== 'update' || ($row['status'] ?? 'ok') !== 'ok' || $field === '') {
+            if (! self::revertable($action) || ($row['status'] ?? 'ok') !== 'ok' || $field === '') {
                 $skipped[$type.':'.$id] ??= ['id' => $id, 'object_type' => $type, 'action' => $action];
 
                 continue;

@@ -19,8 +19,9 @@ use WP_REST_Response;
  * POST /wc-products-list/v1/actions/{action} {ids, args}: runs one Action
  * per id, logs one row per id (or per change the handler reports, with
  * any `context` it returns stored next to the args), and returns per-id
- * results plus the refreshed rows of the ids that still exist, so the app
- * can patch its cache without a reload.
+ * results (`changed`: how many fields the handler reported) plus the
+ * refreshed rows of the ids that still exist, so the app can patch its
+ * cache without a reload.
  */
 final class ActionsController
 {
@@ -244,7 +245,10 @@ final class ActionsController
             $rows[] = $base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'ok', 'message' => ''];
         }
 
-        $result = ['id' => $id, 'ok' => true];
+        // How many fields the handler changed on this id: the app's notice
+        // says "2 items updated, 1 unchanged" and offers Undo only when
+        // something was written (a no-op logs a row without a field).
+        $result = ['id' => $id, 'ok' => true, 'changed' => count($changes)];
 
         if ($data !== []) {
             $result['data'] = $data;

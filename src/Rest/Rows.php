@@ -11,7 +11,8 @@ use WP_REST_Response;
 /**
  * What the Catalog app needs on every row beyond the wc/v3 fields: the
  * `wc_products_list` object (`variation_count`, `edit_link`, `can_edit`,
- * `can_delete`, `parent_id`) and the integrations' keys through
+ * `can_delete`, `parent_id`, and on variable products `variation_stock`
+ * and `sale_summary`, one query per page) and the integrations' keys through
  * `wc_products_list/row`. Only in list mode.
  *
  * Kept cheap on purpose: a page of 100 rows must not add a query per row.
@@ -41,6 +42,23 @@ final class Rows
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */
     private static ?WeakMap $fields = null;
 
+    /** @var WeakMap<WP_REST_Request, bool>|null whether a write request carries `images`, per request object */
+    private static ?WeakMap $writesImages = null;
+
+    /** Nesting depth of `withGallery()`: while above zero the gallery is never dropped. */
+    private static int $keepGallery = 0;
+
+    /**
+     * Variation stock and sale summaries of the variable products on the
+     * current list page, keyed by parent id, and the request they were
+     * computed for (a different request starts over).
+     *
+     * @var array<int, array{variation_stock: array{out_of_stock: int, total: int}, sale_summary: array{on_sale: int, scheduled: int, from: ?string, to: ?string}}|null>
+     */
+    private static array $summaries = [];
+
+    private static ?WP_REST_Request $summariesFor = null;
+
     /** @var callable|null WooCommerce Brands' own response callback, once taken over */
     private $brandsCallback = null;
 
@@ -53,6 +71,8 @@ final class Rows
         add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_product_get_gallery_image_ids', [$this, 'dropGallery'], 10, 2);
         add_filter('the_posts', [$this, 'primeVariationTerms'], 10, 2);
+        add_filter('the_posts', [$this, 'primeChildTransients'], 10, 2);
+        add_filter('the_posts', [$this, 'primeSummaries'], 10, 2);
         add_filter('woocommerce_get_variation_prices_hash', [$this, 'primeChildren'], 10, 2);
         add_action('woocommerce_before_product_object_save', [$this, 'primeChildrenBeforeSave']);
         add_action('rest_api_init', [$this, 'registerSchema']);
@@ -157,12 +177,19 @@ final class Rows
      * The list only ever shows one image per row, but wc/v3 serialises the
      * whole gallery of every product (two `wp_get_attachment_image_src()`
      * calls and four date conversions per image), which is most of the
-     * time of a 100-row page on an image-heavy catalog. On list-mode read
-     * requests a product therefore has no gallery: `images` holds the
-     * featured image only (or the first gallery image when there is no
-     * featured one, so the thumbnail is the same as everywhere else).
-     * Writes are untouched (the batch sub-requests of a save run inside one
-     * POST), so a save never sees a trimmed gallery.
+     * time of a 100-row page on an image-heavy catalog. In list mode a
+     * product therefore has no gallery: `images` holds the featured image
+     * only (or the first gallery image when there is no featured one, so
+     * the thumbnail is the same as everywhere else).
+     *
+     * Writes too: the rows a batch write answers with are the same rows
+     * the list shows, and a 50-product batch response is otherwise over a
+     * megabyte of gallery JSON (`images` is among the row fields). The
+     * gallery is left alone when the request (or any item of its batch
+     * body) sets `images`, so a gallery write is stored, logged and
+     * answered in full, and inside `withGallery()`, which the recorder
+     * uses to read the stored gallery. Saving never goes through this
+     * filter: the data store reads props in the `edit` context.
      *
      * @param  mixed  $ids
      * @param  mixed  $product
@@ -170,12 +197,16 @@ final class Rows
      */
     public function dropGallery($ids, $product = null)
     {
-        if (! ListMode::active() || ListMode::method() !== 'GET' || ! is_array($ids)) {
+        if (self::$keepGallery > 0 || ! ListMode::active() || ! is_array($ids)) {
+            return $ids;
+        }
+
+        if (ListMode::method() !== 'GET' && self::requestWritesImages()) {
             return $ids;
         }
 
         /**
-         * Filters whether list-mode reads skip the product gallery.
+         * Filters whether list-mode requests skip the product gallery.
          *
          * @param  bool  $drop
          */
@@ -186,6 +217,60 @@ final class Rows
         $featured = $product instanceof WC_Product ? (int) $product->get_image_id('edit') : 0;
 
         return $featured > 0 ? [] : array_slice($ids, 0, 1);
+    }
+
+    /**
+     * Run a callback with the gallery intact, whatever the request.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    public static function withGallery(callable $callback): mixed
+    {
+        self::$keepGallery++;
+
+        try {
+            return $callback();
+        } finally {
+            self::$keepGallery--;
+        }
+    }
+
+    /**
+     * Whether the request being dispatched sets `images`: at its top level
+     * (a single write) or in any `create`/`update` item (a batch). Outside
+     * a dispatched request nothing is known about the write, and the
+     * gallery is kept. Memoised per request object: it is asked for on
+     * every row of a batch.
+     */
+    private static function requestWritesImages(): bool
+    {
+        $request = ListMode::request();
+
+        if ($request === null) {
+            return true;
+        }
+
+        self::$writesImages ??= new WeakMap;
+
+        if (self::$writesImages->offsetExists($request)) {
+            return self::$writesImages[$request];
+        }
+
+        $body = array_merge($request->get_body_params(), $request->get_json_params() ?: []);
+        $writes = array_key_exists('images', $body);
+
+        foreach (['create', 'update'] as $type) {
+            foreach (is_array($body[$type] ?? null) ? $body[$type] : [] as $item) {
+                if (is_array($item) && array_key_exists('images', $item)) {
+                    $writes = true;
+                }
+            }
+        }
+
+        return self::$writesImages[$request] = $writes;
     }
 
     /**
@@ -227,12 +312,183 @@ final class Rows
     }
 
     /**
+     * `the_posts` of a list-mode products query: read, in one query, the
+     * transients WooCommerce keeps per variable product (the children
+     * list and the variation prices). Neither is autoloaded, so
+     * `get_transient()` otherwise queries the options table once per
+     * variable product on the page, a hundred one-row queries a page.
+     * Products of other types have no such transients; the query marks
+     * them as missing, which is as cheap as not asking.
+     *
+     * @param  mixed  $posts
+     * @param  mixed  $query
+     * @return mixed
+     */
+    public function primeChildTransients($posts, $query = null)
+    {
+        if (! is_array($posts) || $posts === [] || ! $query instanceof \WP_Query || ! ListMode::active() || ListMode::method() !== 'GET') {
+            return $posts;
+        }
+
+        // With a persistent object cache transients are not options.
+        if ($query->get('post_type') !== 'product' || wp_using_ext_object_cache() || ! function_exists('wp_prime_option_caches')) {
+            return $posts;
+        }
+
+        $names = [];
+
+        foreach ($posts as $post) {
+            $id = is_object($post) ? (int) ($post->ID ?? 0) : (int) $post;
+
+            if ($id <= 0) {
+                continue;
+            }
+
+            foreach (['wc_product_children_', 'wc_var_prices_'] as $transient) {
+                $names[] = '_transient_'.$transient.$id;
+                $names[] = '_transient_timeout_'.$transient.$id;
+            }
+        }
+
+        if ($names !== []) {
+            wp_prime_option_caches($names);
+        }
+
+        return $posts;
+    }
+
+    /**
+     * `the_posts` of a list-mode products query: the variation stock and
+     * sale summaries of every variable product on the page, in one query.
+     *
+     * @param  mixed  $posts
+     * @param  mixed  $query
+     * @return mixed
+     */
+    public function primeSummaries($posts, $query = null)
+    {
+        if (! is_array($posts) || $posts === [] || ! $query instanceof \WP_Query || ! ListMode::active() || ListMode::method() !== 'GET') {
+            return $posts;
+        }
+
+        if ($query->get('post_type') !== 'product') {
+            return $posts;
+        }
+
+        $ids = [];
+
+        foreach ($posts as $post) {
+            $id = is_object($post) ? (int) ($post->ID ?? 0) : (int) $post;
+
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        self::summaries($ids);
+
+        return $posts;
+    }
+
+    /**
+     * The summaries of these parents, computed with one query for the ones
+     * the current request has not computed yet. Parents without published
+     * variations (and products that are not variable) get none.
+     *
+     * @param  array<int, int>  $ids
+     * @return array<int, array{variation_stock: array{out_of_stock: int, total: int}, sale_summary: array{on_sale: int, scheduled: int, from: ?string, to: ?string}}>
+     */
+    public static function summaries(array $ids): array
+    {
+        $request = ListMode::request();
+
+        if ($request !== self::$summariesFor) {
+            self::$summaries = [];
+            self::$summariesFor = $request;
+        }
+
+        $missing = array_values(array_unique(array_filter(array_map('intval', $ids), static fn (int $id): bool => $id > 0 && ! array_key_exists($id, self::$summaries))));
+
+        if ($missing !== []) {
+            global $wpdb;
+
+            $now = time();
+            $in = implode(',', $missing);
+            $relevant = "s.meta_value <> '' AND (l.onsale = 1 OR CAST(f.meta_value AS UNSIGNED) > {$now})";
+
+            // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+            $rows = $wpdb->get_results(
+                "SELECT v.post_parent AS parent_id, COUNT(*) AS total,
+                    SUM(l.stock_status = 'outofstock') AS out_of_stock,
+                    SUM(l.onsale = 1) AS on_sale,
+                    SUM(s.meta_value <> '' AND l.onsale = 0 AND CAST(f.meta_value AS UNSIGNED) > {$now}) AS scheduled,
+                    MIN(CASE WHEN {$relevant} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS from_ts,
+                    MAX(CASE WHEN {$relevant} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS to_ts
+                FROM {$wpdb->posts} v
+                INNER JOIN {$wpdb->wc_product_meta_lookup} l ON l.product_id = v.ID
+                LEFT JOIN {$wpdb->postmeta} s ON s.post_id = v.ID AND s.meta_key = '_sale_price'
+                LEFT JOIN {$wpdb->postmeta} f ON f.post_id = v.ID AND f.meta_key = '_sale_price_dates_from'
+                LEFT JOIN {$wpdb->postmeta} t ON t.post_id = v.ID AND t.meta_key = '_sale_price_dates_to'
+                WHERE v.post_parent IN ({$in}) AND v.post_type = 'product_variation' AND v.post_status = 'publish'
+                GROUP BY v.post_parent",
+                ARRAY_A
+            );
+            // phpcs:enable
+
+            foreach ($missing as $id) {
+                self::$summaries[$id] = null;
+            }
+
+            foreach (is_array($rows) ? $rows : [] as $row) {
+                self::$summaries[(int) $row['parent_id']] = [
+                    'variation_stock' => [
+                        'out_of_stock' => (int) $row['out_of_stock'],
+                        'total' => (int) $row['total'],
+                    ],
+                    'sale_summary' => [
+                        'on_sale' => (int) $row['on_sale'],
+                        'scheduled' => (int) $row['scheduled'],
+                        'from' => self::siteTime($row['from_ts']),
+                        'to' => self::siteTime($row['to_ts']),
+                    ],
+                ];
+            }
+        }
+
+        $result = array_filter(array_intersect_key(self::$summaries, array_flip($ids)));
+
+        // A write changes what the summaries count: only reads keep them.
+        if (ListMode::method() !== 'GET') {
+            self::$summaries = [];
+        }
+
+        return $result;
+    }
+
+    /**
+     * A stored sale date (a UTC timestamp) as a zone-less site-local ISO string.
+     */
+    private static function siteTime(mixed $timestamp): ?string
+    {
+        if (! is_numeric($timestamp) || (int) $timestamp <= 0) {
+            return null;
+        }
+
+        return (new \DateTimeImmutable('@'.(int) $timestamp))->setTimezone(wp_timezone())->format('Y-m-d\\TH:i:s');
+    }
+
+    /**
      * `woocommerce_get_variation_prices_hash`: fires right before
      * WooCommerce reads the price of every variation of a variable
-     * product (a cache miss after any save of the parent, so after every
-     * item of a batch write). Each variation load is three queries (post,
-     * meta, terms) unless the caches are warm; one query each for all of
-     * them here.
+     * product. Each variation load is three queries (post, meta, terms)
+     * unless the caches are warm; one query each for all of them here.
+     *
+     * WooCommerce computes the hash before it looks at its price
+     * transient and loads the variations only when the transient misses
+     * (after any save of the parent, so after every item of a batch
+     * write). On a read with a warm transient nothing is loaded, so
+     * nothing is primed: a page sorted by title holds thousands of
+     * variations whose posts the list never needs.
      *
      * @param  mixed  $hash
      * @param  mixed  $product
@@ -240,11 +496,48 @@ final class Rows
      */
     public function primeChildren($hash, $product = null)
     {
-        if (ListMode::active() && $product instanceof WC_Product) {
-            self::primeChildrenOf($product);
+        if (! ListMode::active() || ! $product instanceof WC_Product) {
+            return $hash;
         }
 
+        if (ListMode::method() === 'GET' && self::pricesCached($product)) {
+            return $hash;
+        }
+
+        self::primeChildrenOf($product);
+
         return $hash;
+    }
+
+    /**
+     * Whether WooCommerce's variation price transient of a product holds
+     * data it would accept (the shape its own validation checks: one
+     * entry per price hash with the three price lists), so a read of the
+     * price range is a cache hit and loads no variation.
+     */
+    public static function pricesCached(WC_Product $product): bool
+    {
+        if (! $product->is_type('variable')) {
+            return false;
+        }
+
+        $prices = json_decode((string) get_transient('wc_var_prices_'.$product->get_id()), true);
+
+        if (! is_array($prices) || $prices === []) {
+            return false;
+        }
+
+        $hasPrice = false;
+
+        foreach ($prices as $entry) {
+            if (! is_array($entry) || ! is_array($entry['price'] ?? null) || ! is_array($entry['regular_price'] ?? null) || ! is_array($entry['sale_price'] ?? null)) {
+                return false;
+            }
+
+            $hasPrice = $hasPrice || $entry['price'] !== [];
+        }
+
+        return $hasPrice;
     }
 
     /**
@@ -474,7 +767,7 @@ final class Rows
     }
 
     /**
-     * @return array{variation_count: int, edit_link: string, can_edit: bool, can_delete: bool, parent_id: int}
+     * @return array{variation_count: int, edit_link: string, can_edit: bool, can_delete: bool, parent_id: int, variation_stock?: array{out_of_stock: int, total: int}|null, sale_summary?: array{on_sale: int, scheduled: int, from: ?string, to: ?string}|null}
      */
     public static function row(WC_Product $product, ?bool $isVariation = null): array
     {
@@ -482,7 +775,7 @@ final class Rows
         $id = $product->get_id();
         $parentId = $isVariation ? $product->get_parent_id() : 0;
 
-        return [
+        $row = [
             // Children are already loaded for variable products by the
             // serialiser; for anything else this is a type check.
             'variation_count' => $product->is_type('variable') ? count($product->get_children()) : 0,
@@ -492,6 +785,16 @@ final class Rows
             'can_delete' => current_user_can('delete_post', $id),
             'parent_id' => $parentId,
         ];
+
+        if (! $isVariation && $product->is_type('variable')) {
+            // Primed for the whole page by `primeSummaries()`; a single
+            // write or a batch response asks for its own rows.
+            $summary = self::summaries([$id])[$id] ?? null;
+            $row['variation_stock'] = $summary['variation_stock'] ?? null;
+            $row['sale_summary'] = $summary['sale_summary'] ?? null;
+        }
+
+        return $row;
     }
 
     /**
@@ -580,6 +883,24 @@ final class Rows
                 'can_edit' => ['type' => 'boolean'],
                 'can_delete' => ['type' => 'boolean'],
                 'parent_id' => ['type' => 'integer', 'description' => 'The parent product id of a variation, 0 for products.'],
+                'variation_stock' => [
+                    'type' => ['object', 'null'],
+                    'description' => 'Variable products: how many published variations are out of stock, of how many.',
+                    'properties' => [
+                        'out_of_stock' => ['type' => 'integer'],
+                        'total' => ['type' => 'integer'],
+                    ],
+                ],
+                'sale_summary' => [
+                    'type' => ['object', 'null'],
+                    'description' => 'Variable products: variations on sale now and with a sale scheduled, earliest start and latest end (site-local ISO).',
+                    'properties' => [
+                        'on_sale' => ['type' => 'integer'],
+                        'scheduled' => ['type' => 'integer'],
+                        'from' => ['type' => ['string', 'null']],
+                        'to' => ['type' => ['string', 'null']],
+                    ],
+                ],
             ],
         ];
     }

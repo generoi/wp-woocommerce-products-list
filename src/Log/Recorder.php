@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Log;
 
+use GeneroWP\ProductsList\Rest\Rows;
 use WC_Product;
 use WC_Product_Variation;
 use WP_REST_Request;
@@ -63,6 +64,17 @@ final class Recorder
 
     /** @var array<int, Pending> keyed by spl_object_id of the request */
     private static array $pending = [];
+
+    /**
+     * The error rows already written during this request, as
+     * `object_id|code`. A route of the plugin that dispatches wc/v3
+     * batches from inside itself (the variations batch) answers with the
+     * items those batches rejected; the nested request logged them, the
+     * outer one must not log them again.
+     *
+     * @var array<string, true>
+     */
+    private static array $loggedErrors = [];
 
     /**
      * The stored form of a sensitive value: empty stays empty (so "no
@@ -323,6 +335,7 @@ final class Recorder
         foreach ($pending as $item) {
             $error = $errors[$item['object_id']] ?? $errors[0] ?? null;
             $seen[$item['object_id']] = true;
+            self::$loggedErrors[$item['object_id'].'|'.($error['code'] ?? '')] = true;
 
             $rows[] = self::errorRow($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error);
         }
@@ -337,10 +350,11 @@ final class Recorder
                     $id = (int) ($request['id'] ?? 0);
                 }
 
-                if ($id === 0 || isset($seen[$id])) {
+                if ($id === 0 || isset($seen[$id]) || isset(self::$loggedErrors[$id.'|'.$error['code']])) {
                     continue;
                 }
 
+                self::$loggedErrors[$id.'|'.$error['code']] = true;
                 $body = $bodies[$id] ?? [];
                 $paths = self::paths($body);
 
@@ -411,6 +425,17 @@ final class Recorder
     public static function reset(): void
     {
         self::$pending = [];
+        self::$loggedErrors = [];
+    }
+
+    /**
+     * Forget which errors were logged: at the start of an outermost
+     * request, so a nested dispatch's rows are only deduplicated against
+     * the request that contains it.
+     */
+    public static function forgetLoggedErrors(): void
+    {
+        self::$loggedErrors = [];
     }
 
     /**
@@ -461,7 +486,8 @@ final class Recorder
             'categories' => self::ids($product->get_category_ids()),
             'tags' => self::ids($product->get_tag_ids()),
             'brands' => self::ids(wc_get_product_term_ids($product->get_id(), 'product_brand')),
-            'images' => self::ids(array_filter(array_merge([$product->get_image_id()], $product->get_gallery_image_ids()))),
+            // The list drops the gallery (Rows::dropGallery); the log must hold the stored one.
+            'images' => Rows::withGallery(static fn (): array => self::ids(array_filter(array_merge([$product->get_image_id()], $product->get_gallery_image_ids())))),
             'image' => $product->get_image_id() ? ['id' => (int) $product->get_image_id()] : null,
             'dimensions' => [
                 'length' => (string) $product->get_length(),

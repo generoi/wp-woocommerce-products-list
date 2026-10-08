@@ -40,6 +40,9 @@ class ListQueryTest extends TestCase
         $this->assertNull($vars['sale_scheduled']);
         $this->assertTrue(ListQuery::vars(['sale_scheduled' => 'true'])['sale_scheduled']);
         $this->assertSame('sku', $vars['orderby']);
+        $this->assertNull($vars['variation_stock_status']);
+        $this->assertSame('outofstock', ListQuery::vars(['variation_stock_status' => 'outofstock'])['variation_stock_status']);
+        $this->assertNull(ListQuery::vars(['variation_stock_status' => "x' OR 1=1"])['variation_stock_status']);
     }
 
     public function test_vars_from_an_empty_request_are_all_off(): void
@@ -89,7 +92,7 @@ class ListQueryTest extends TestCase
         $params = ListQuery::params();
 
         $this->assertSame(
-            ['tab', 'brand', 'exclude_category', 'exclude_tag', 'min_stock_quantity', 'max_stock_quantity', 'has_variations', 'sale_scheduled'],
+            ['tab', 'brand', 'exclude_category', 'exclude_tag', 'min_stock_quantity', 'max_stock_quantity', 'has_variations', 'sale_scheduled', 'variation_stock_status'],
             array_keys($params)
         );
         $this->assertSame(ListQuery::TABS, $params['tab']['enum']);

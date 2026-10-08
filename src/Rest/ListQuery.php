@@ -48,6 +48,9 @@ final class ListQuery
     /** Orderings the plugin adds to wc/v3's own (`id, title, date, modified, price, ...`). */
     public const ORDERBY = ['sku', 'stock_quantity', 'menu_order', 'post_status'];
 
+    /** Stock statuses the `variation_stock_status` parameter accepts. */
+    public const VARIATION_STOCK_STATUSES = ['instock', 'outofstock', 'onbackorder'];
+
     private const LOOKUP_ALIAS = 'wc_product_meta_lookup';
 
     public function register(): void
@@ -73,6 +76,7 @@ final class ListQuery
      *     max_stock: ?float,
      *     has_variations: ?bool,
      *     sale_scheduled: ?bool,
+     *     variation_stock_status: ?string,
      *     orderby: ?string,
      *     search: array<int, string>
      * }
@@ -92,6 +96,7 @@ final class ListQuery
             'max_stock' => self::number($params['max_stock_quantity'] ?? null),
             'has_variations' => self::bool($params['has_variations'] ?? null),
             'sale_scheduled' => self::bool($params['sale_scheduled'] ?? null),
+            'variation_stock_status' => isset($params['variation_stock_status']) && is_string($params['variation_stock_status']) && in_array($params['variation_stock_status'], self::VARIATION_STOCK_STATUSES, true) ? $params['variation_stock_status'] : null,
             'orderby' => $orderby !== null && in_array($orderby, self::ORDERBY, true) ? $orderby : null,
             'search' => array_values(array_filter(array_map('trim', explode(' ', $search)), static fn (string $token): bool => $token !== '')),
         ];
@@ -163,6 +168,7 @@ final class ListQuery
             'max_stock' => $vars['max_stock'],
             'has_variations' => $vars['has_variations'],
             'sale_scheduled' => $vars['sale_scheduled'],
+            'variation_stock_status' => $vars['variation_stock_status'],
             // menu_order is native to WP_Query (WooCommerce maps it to
             // `menu_order title`); sku and stock_quantity need the lookup table.
             'orderby' => in_array($vars['orderby'], ['sku', 'stock_quantity', 'post_status'], true) ? $vars['orderby'] : null,
@@ -310,6 +316,20 @@ final class ListQuery
             $clauses['where'] .= $vars['has_variations'] ? " AND {$exists}" : " AND NOT {$exists}";
         }
 
+        if (isset($vars['variation_stock_status']) && in_array($vars['variation_stock_status'], self::VARIATION_STOCK_STATUSES, true)) {
+            // A variable product with at least one published variation in
+            // that stock status ("Any variation: Out of stock").
+            $clauses['where'] .= $wpdb->prepare(
+                " AND EXISTS (SELECT 1 FROM {$posts} wc_products_list_stock_child"
+                ." INNER JOIN {$wpdb->wc_product_meta_lookup} wc_products_list_stock_lookup ON wc_products_list_stock_lookup.product_id = wc_products_list_stock_child.ID"
+                ." WHERE wc_products_list_stock_child.post_parent = {$posts}.ID"
+                ." AND wc_products_list_stock_child.post_type = 'product_variation'"
+                ." AND wc_products_list_stock_child.post_status = 'publish'"
+                .' AND wc_products_list_stock_lookup.stock_status = %s)',
+                $vars['variation_stock_status']
+            );
+        }
+
         if (isset($vars['sale_scheduled'])) {
             $scheduled = self::scheduledSaleSql();
 
@@ -440,6 +460,12 @@ final class ListQuery
                 'description' => 'Limit result set to products with a sale that has not started yet, on the product or on one of its variations (true), or to the rest (false).',
                 'type' => 'boolean',
                 'sanitize_callback' => 'rest_sanitize_boolean',
+                'validate_callback' => 'rest_validate_request_arg',
+            ],
+            'variation_stock_status' => [
+                'description' => 'Limit result set to variable products with at least one published variation in this stock status.',
+                'type' => 'string',
+                'enum' => self::VARIATION_STOCK_STATUSES,
                 'validate_callback' => 'rest_validate_request_arg',
             ],
         ];

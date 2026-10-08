@@ -89,6 +89,12 @@ class VariationsBatchTest extends RestTestCase
         $this->assertSame('error', $byObject[$simple->get_id()][0]['status']);
         $this->assertSame('woocommerce_rest_product_variation_invalid_id', json_decode($byObject[$simple->get_id()][0]['context'], true)['code']);
         $this->assertArrayNotHasKey(0, $byObject);
+        // One error row per rejected item: the nested wc/v3 batch logged
+        // the SKU rejection, the outer route must not log it again.
+        $this->assertCount(1, $byObject[$a39]);
+        $this->assertCount(1, $byObject[$simple->get_id()]);
+        $this->assertSame('product_invalid_sku', json_decode($byObject[$a39][0]['context'], true)['code']);
+        $this->assertSame(2, count(array_filter($rows, static fn (array $row): bool => $row['status'] === 'error')));
 
         // And the batch reverts as one (the two error rows are reported as skipped).
         $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
