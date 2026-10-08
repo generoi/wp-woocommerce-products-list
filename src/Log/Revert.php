@@ -17,15 +17,46 @@ use WP_REST_Request;
  * Rows of other actions (trash, restore, delete, duplicate, create) are
  * skipped and reported as such: trash has restore, delete is final.
  *
+ * A field somebody changed again after the batch is not put back: its
+ * current value is compared with the value the batch left (the last
+ * row's new value), and an object with such a field is reported with
+ * code `conflict` instead of being written, unless the caller forces it.
+ *
+ * Large batches are reverted in chunks of `CHUNK` objects: `objects()`
+ * lists what a batch would touch in the order the writes go, the
+ * controller hands the app the chunks, and `apply()` takes the rows of
+ * one chunk under a revert batch id the app keeps for all of them.
+ *
  * @phpstan-type Plan array{
  *     products: array<int, array<string, ?string>>,
  *     variations: array<int, array<int, array<string, ?string>>>,
- *     skipped: array<int, array{id: int, object_type: string, action: string}>
+ *     skipped: array<int, array{id: int, object_type: string, action: string}>,
+ *     final: array<int, array<string, ?string>>
  * }
+ * @phpstan-type Result array{id: int, ok: bool, code?: string, message?: string}
  */
 final class Revert
 {
     public const PRODUCTS_CHUNK = 100;
+
+    /** Objects per revert request; the app chunks a bigger batch. */
+    public const CHUNK = 100;
+
+    public const FILTER_CHUNK = 'wc_products_list/revert_chunk';
+
+    /**
+     * Objects one revert request writes at most.
+     */
+    public static function chunk(): int
+    {
+        /**
+         * Filters how many objects one revert request writes; a larger
+         * batch is reverted in several requests under one batch id.
+         *
+         * @param  int  $chunk
+         */
+        return max(1, (int) apply_filters(self::FILTER_CHUNK, self::CHUNK));
+    }
 
     /**
      * Group a batch's rows into the writes that undo them. Only ok `update`
@@ -39,7 +70,7 @@ final class Revert
     {
         usort($rows, static fn (array $a, array $b): int => ((int) ($a['id'] ?? 0)) <=> ((int) ($b['id'] ?? 0)));
 
-        $plan = ['products' => [], 'variations' => [], 'skipped' => []];
+        $plan = ['products' => [], 'variations' => [], 'skipped' => [], 'final' => []];
         $skipped = [];
 
         foreach ($rows as $row) {
@@ -66,6 +97,8 @@ final class Revert
             }
 
             $old = isset($row['old_value']) ? (string) $row['old_value'] : null;
+            // Rows are in id order: the last one holds what the batch left behind.
+            $plan['final'][$id][$field] = isset($row['new_value']) ? (string) $row['new_value'] : null;
 
             if ($type === 'variation') {
                 $parent = (int) ($row['parent_id'] ?? 0);
@@ -173,17 +206,110 @@ final class Revert
     }
 
     /**
-     * Revert a batch. Returns the action-response shape.
+     * The objects a batch's rows would write, in write order (products,
+     * then variations grouped by parent), each `{id, object_type,
+     * parent_id, fields}`, and the ones that are skipped. Enough for the
+     * app to chunk a revert and to say what it is about to do.
      *
-     * @param  array<int, array<string, mixed>>  $rows  the batch's log rows
-     * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array{
+     *     objects: array<int, array{id: int, object_type: string, parent_id: int, fields: array<int, string>}>,
+     *     skipped: array<int, array{id: int, object_type: string, action: string}>
+     * }
      */
-    public static function apply(array $rows, ?string $fields = null): array
+    public static function objects(array $rows): array
     {
         $plan = self::plan($rows);
-        $batchId = wp_generate_uuid4();
+        $objects = [];
+
+        foreach ($plan['products'] as $id => $fields) {
+            $objects[] = ['id' => (int) $id, 'object_type' => 'product', 'parent_id' => 0, 'fields' => array_keys($fields)];
+        }
+
+        foreach ($plan['variations'] as $parent => $byId) {
+            foreach ($byId as $id => $fields) {
+                $objects[] = ['id' => (int) $id, 'object_type' => 'variation', 'parent_id' => (int) $parent, 'fields' => array_keys($fields)];
+            }
+        }
+
+        return ['objects' => $objects, 'skipped' => $plan['skipped']];
+    }
+
+    /**
+     * The fields of an object whose current value is not what the batch
+     * left: somebody changed them again since. Compared the way the
+     * recorder compares (stored form, null and '' alike).
+     *
+     * @param  array<string, ?string>  $final  field => the batch's new value
+     * @return array<int, string>
+     */
+    public static function conflicts(int $id, array $final): array
+    {
+        $product = wc_get_product($id);
+
+        if (! $product instanceof \WC_Product || $product->get_id() === 0) {
+            // Gone: WooCommerce will say so when the write is attempted.
+            return [];
+        }
+
+        $current = Recorder::snapshot($product, array_keys($final));
+        $conflicts = [];
+
+        foreach ($final as $field => $value) {
+            if (($current[$field] ?? '') !== ($value ?? '')) {
+                $conflicts[] = (string) $field;
+            }
+        }
+
+        return $conflicts;
+    }
+
+    /**
+     * Revert a batch, or one chunk of it. Returns the action-response shape.
+     *
+     * @param  array<int, array<string, mixed>>  $rows  the batch's log rows (of the chunk's objects)
+     * @param  ?string  $batchId  the revert batch id; generated when null (one per chunked revert, kept by the app)
+     * @param  bool  $force  write even where the field was changed again since the batch
+     * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
+     */
+    public static function apply(array $rows, ?string $fields = null, ?string $batchId = null, bool $force = false): array
+    {
+        $plan = self::plan($rows);
+        $batchId = $batchId !== null && $batchId !== '' ? $batchId : wp_generate_uuid4();
         $results = [];
         $items = [];
+
+        if (! $force) {
+            foreach ($plan['final'] as $id => $final) {
+                $conflicts = self::conflicts((int) $id, $final);
+
+                if ($conflicts === []) {
+                    continue;
+                }
+
+                unset($plan['products'][$id]);
+
+                foreach ($plan['variations'] as $parent => $byId) {
+                    unset($plan['variations'][$parent][$id]);
+
+                    if ($plan['variations'][$parent] === []) {
+                        unset($plan['variations'][$parent]);
+                    }
+                }
+
+                $results[] = [
+                    'id' => (int) $id,
+                    'ok' => false,
+                    'code' => 'conflict',
+                    'fields' => $conflicts,
+                    'message' => sprintf(
+                        /* translators: %s: comma-separated field names */
+                        _n('%s was changed again after this batch and was left as it is.', '%s were changed again after this batch and were left as they are.', count($conflicts), 'wp-woocommerce-products-list'),
+                        implode(', ', $conflicts)
+                    ),
+                ];
+            }
+        }
 
         foreach ($plan['skipped'] as $item) {
             $results[] = [

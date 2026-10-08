@@ -264,6 +264,11 @@ final class Registry
             'filter' => $filter,
             'width' => isset($def['width']) ? (int) $def['width'] : null,
             'source' => (string) ($def['source'] ?? 'extension'),
+            // Optional extras the app reads when present (DeclarativeFieldExtras):
+            // what the reference companion is, a price column's currency, its precision.
+            ...(isset($def['referenceLabel']) && is_scalar($def['referenceLabel']) ? ['referenceLabel' => (string) $def['referenceLabel']] : []),
+            ...(isset($def['currency']) && is_scalar($def['currency']) && (string) $def['currency'] !== '' ? ['currency' => strtoupper((string) $def['currency'])] : []),
+            ...(isset($def['precision']) && is_numeric($def['precision']) ? ['precision' => max(0, (int) $def['precision'])] : []),
         ];
     }
 

@@ -5,7 +5,6 @@ namespace GeneroWP\ProductsList;
 use Automattic\WooCommerce\Utilities\FeaturesUtil;
 use GeneroWP\ProductsList\Modules\Actions;
 use GeneroWP\ProductsList\Modules\AdminPage;
-use GeneroWP\ProductsList\Modules\LegacyRedirect;
 use GeneroWP\ProductsList\Modules\Log;
 use GeneroWP\ProductsList\Modules\Rest;
 
@@ -21,7 +20,6 @@ class Plugin
         AdminPage::class,
         Log::class,
         Actions::class,
-        LegacyRedirect::class,
     ];
 
     public const FILTER_MODULES = 'wc_products_list/modules';

@@ -41,6 +41,9 @@ final class Logger
 
     private static bool $hooked = false;
 
+    /** @var array<int, array{0: ?string, 1: ?string}> source and generated batch id of the requests a nested dispatch interrupted */
+    private static array $stack = [];
+
     /**
      * Hook the request lifecycle: the source header is captured per request
      * and the buffer is flushed when the request's callbacks are done.
@@ -66,8 +69,10 @@ final class Logger
     public static function beginRequest($response, $handler, \WP_REST_Request $request)
     {
         // A nested dispatch (the revert posts to wc/v3 from inside its own
-        // request) must not inherit the outer request's rows or defaults.
+        // request) must not inherit the outer request's rows or defaults;
+        // the outer request gets its own back when the nested one ends.
         self::flush();
+        self::$stack[] = [self::$source, self::$generatedBatchId];
         self::$generatedBatchId = null;
         self::$source = self::normaliseSource($request->get_header(self::SOURCE_HEADER));
 
@@ -82,6 +87,10 @@ final class Logger
     public static function endRequest($response, $handler, \WP_REST_Request $request)
     {
         self::flush();
+
+        if (self::$stack !== []) {
+            [self::$source, self::$generatedBatchId] = array_pop(self::$stack);
+        }
 
         return $response;
     }

@@ -10,8 +10,10 @@ use WP_REST_Request;
 use WP_REST_Response;
 
 /**
- * GET /log, GET /log/batches, POST /log/batch/{id}/revert. See
- * docs/contracts.md §3.5 for the row shape.
+ * GET /log, GET /log/users, GET /log/batches, GET /log/batch/{id} (what a
+ * revert would write, in chunks) and POST /log/batch/{id}/revert (all of
+ * a small batch, or one chunk of a large one). See docs/contracts.md §3.5
+ * for the shapes.
  */
 final class LogController
 {
@@ -50,6 +52,15 @@ final class LogController
             'args' => $this->listArgs(),
         ]);
 
+        register_rest_route(Plugin::REST_NAMESPACE, '/log/batch/(?P<batch_id>[A-Za-z0-9_-]{1,64})', [
+            'methods' => 'GET',
+            'callback' => [$this, 'batch'],
+            'permission_callback' => $permission,
+            'args' => [
+                'batch_id' => ['type' => 'string', 'required' => true],
+            ],
+        ]);
+
         register_rest_route(Plugin::REST_NAMESPACE, '/log/batch/(?P<batch_id>[A-Za-z0-9_-]{1,64})/revert', [
             'methods' => 'POST',
             'callback' => [$this, 'revert'],
@@ -60,6 +71,21 @@ final class LogController
                 // `_fields` after the callback, and this response has no
                 // `id`/`status` at the top level, so the app would get `[]`.
                 'fields' => ['type' => 'string', 'description' => 'Comma-separated wc/v3 fields of the refreshed `items` rows.'],
+                'ids' => [
+                    'type' => 'array',
+                    'items' => ['type' => 'integer'],
+                    'description' => 'Revert only these objects of the batch (one chunk of GET /log/batch/{id}).',
+                ],
+                'revert_batch_id' => [
+                    'type' => 'string',
+                    'pattern' => '^[A-Za-z0-9_-]{1,64}$',
+                    'description' => 'The batch id to log the revert under; the same for every chunk of one revert. Generated when absent.',
+                ],
+                'force' => [
+                    'type' => 'boolean',
+                    'default' => false,
+                    'description' => 'Also put back fields that were changed again after the batch (otherwise reported as `conflict`).',
+                ],
             ],
         ]);
     }
@@ -159,7 +185,12 @@ final class LogController
         return $this->paged($items, $total, $perPage);
     }
 
-    public function revert(WP_REST_Request $request): WP_REST_Response|WP_Error
+    /**
+     * What a revert of the batch would write: the objects in write order,
+     * cut into the chunks the app posts one by one, plus the rows that
+     * are skipped. The columns the plan needs, not the values.
+     */
+    public function batch(WP_REST_Request $request): WP_REST_Response|WP_Error
     {
         global $wpdb;
 
@@ -167,15 +198,87 @@ final class LogController
         $table = Table::name();
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
 
         if (! is_array($rows) || $rows === []) {
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
         }
 
-        $fields = $request->get_param('fields');
+        $plan = Revert::objects($rows);
+        $ids = array_column($plan['objects'], 'id');
+        $chunk = Revert::chunk();
 
-        return rest_ensure_response(Revert::apply($rows, is_string($fields) ? $fields : null));
+        return rest_ensure_response([
+            'batch_id' => $batchId,
+            'rows' => count($rows),
+            'objects' => count($ids),
+            'chunk' => $chunk,
+            'chunks' => array_chunk($ids, $chunk),
+            'skipped' => $plan['skipped'],
+            'revertable' => $ids !== [],
+        ]);
+    }
+
+    /**
+     * Revert a batch (up to `Revert::CHUNK` objects) or, with `ids`, one
+     * chunk of it under the `revert_batch_id` the app keeps for all the
+     * chunks. A larger batch without `ids` is refused with the chunks to
+     * post, so no request ever writes more than a chunk.
+     */
+    public function revert(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        global $wpdb;
+
+        $batchId = (string) $request['batch_id'];
+        $table = Table::name();
+        $ids = $request->get_param('ids');
+        $ids = is_array($ids) ? array_values(array_unique(array_filter(array_map('intval', $ids)))) : null;
+
+        $chunk = Revert::chunk();
+
+        if ($ids !== null && ($ids === [] || count($ids) > $chunk)) {
+            return new WP_Error('wc_products_list_invalid_ids', sprintf(
+                /* translators: %d: objects per request */
+                __('ids must name between 1 and %d objects.', 'wp-woocommerce-products-list'),
+                $chunk
+            ), ['status' => 400]);
+        }
+
+        // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        if ($ids === null) {
+            $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        } else {
+            $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+            $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s AND object_id IN ({$placeholders}) ORDER BY id ASC", array_merge([$batchId], $ids)), ARRAY_A);
+        }
+        // phpcs:enable
+
+        if (! is_array($rows) || $rows === []) {
+            return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
+        }
+
+        if ($ids === null) {
+            $objects = array_column(Revert::objects($rows)['objects'], 'id');
+
+            if (count($objects) > $chunk) {
+                return new WP_Error('wc_products_list_revert_too_large', sprintf(
+                    /* translators: 1: number of objects, 2: objects per request */
+                    __('This batch changed %1$d items; a revert is posted in chunks of %2$d (see GET /log/batch/{id}).', 'wp-woocommerce-products-list'),
+                    count($objects),
+                    $chunk
+                ), ['status' => 400, 'objects' => count($objects), 'chunk' => $chunk, 'chunks' => array_chunk($objects, $chunk)]);
+            }
+        }
+
+        $fields = $request->get_param('fields');
+        $revertBatchId = $request->get_param('revert_batch_id');
+
+        return rest_ensure_response(Revert::apply(
+            $rows,
+            is_string($fields) ? $fields : null,
+            is_string($revertBatchId) ? $revertBatchId : null,
+            (bool) $request->get_param('force')
+        ));
     }
 
     /**
@@ -283,6 +386,12 @@ final class LogController
             $userIds[] = (int) $row['user_id'];
         }
 
+        foreach ($rows as $row) {
+            if ((string) $row['action'] === 'duplicate' && (int) ($row['new_value'] ?? 0) > 0) {
+                $postIds[] = (int) $row['new_value'];
+            }
+        }
+
         $postIds = array_values(array_unique(array_filter($postIds)));
 
         if ($postIds !== []) {
@@ -321,10 +430,39 @@ final class LogController
                 'new_value' => $row['new_value'] === null ? null : (string) $row['new_value'],
                 'status' => (string) $row['status'],
                 'message' => (string) $row['message'],
+                'related' => $this->related($row),
             ];
         }
 
         return $items;
+    }
+
+    /**
+     * The other product a row is about: the copy a `duplicate` row
+     * created (its id is the row's new value), so History can name and
+     * link it. Null for every other row, and for a copy that is gone.
+     *
+     * @param  array<string, mixed>  $row
+     * @return array{id: int, name: string, edit_link: ?string}|null
+     */
+    private function related(array $row): ?array
+    {
+        if ((string) $row['action'] !== 'duplicate') {
+            return null;
+        }
+
+        $id = (int) ($row['new_value'] ?? 0);
+        $post = $id > 0 ? get_post($id) : null;
+
+        if ($post === null) {
+            return null;
+        }
+
+        return [
+            'id' => $id,
+            'name' => (string) $post->post_title,
+            'edit_link' => current_user_can('edit_post', $id) ? (get_edit_post_link($id, 'raw') ?: null) : null,
+        ];
     }
 
     /**

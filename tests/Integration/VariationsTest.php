@@ -121,4 +121,107 @@ class VariationsTest extends RestTestCase
         $this->assertStatus(200, $response);
         $this->assertSame(2, $this->data($response)[Rows::KEY]['variation_count']);
     }
+
+    /**
+     * @return array<int, string> the queries run while `$run` executes that match `$pattern`
+     */
+    private function queriesMatching(string $pattern, callable $run): array
+    {
+        $seen = [];
+        $filter = static function (string $query) use (&$seen, $pattern): string {
+            if (preg_match($pattern, $query)) {
+                $seen[] = $query;
+            }
+
+            return $query;
+        };
+
+        add_filter('query', $filter);
+        $run();
+        remove_filter('query', $filter);
+
+        return $seen;
+    }
+
+    /**
+     * A plugin that keeps per-variation terms in a taxonomy registered
+     * for products only (Polylang's `language`) reads them while each
+     * variation loads; WP_Query primes only the variation taxonomies.
+     * In list mode the page's relationships are primed in one query.
+     */
+    public function test_expanding_variations_primes_product_taxonomies_for_every_row(): void
+    {
+        // Registered the way Polylang does: for no post type in particular.
+        register_taxonomy('language', [], ['public' => false]);
+        $term = wp_insert_term('fi', 'language');
+        $this->assertContains('language', Rows::variationTaxonomies());
+        $this->assertIsArray($term);
+
+        $parent = $this->variableProduct(['38', '39', '40']);
+        $ids = $parent->get_children();
+        wp_set_object_terms($ids[0], [(int) $term['term_id']], 'language');
+        wp_cache_flush();
+
+        try {
+            // The queries reading the variations' relationships (the parent's own load is one more).
+            $forRows = '/\'language\'[^;]*object_id IN \\((?:[\\d, ]*\\b(?:'.implode('|', $ids).')\\b)/';
+            $queries = $this->queriesMatching($forRows, function () use ($parent): void {
+                $this->assertStatus(200, $this->request('GET', '/wc/v3/products/'.$parent->get_id().'/variations', ['_fields' => 'id']));
+            });
+
+            $this->assertCount(1, $queries, implode("\n", $queries));
+
+            foreach ($ids as $id) {
+                $cached = get_object_term_cache($id, 'language');
+                $this->assertIsArray($cached, "variation #{$id}");
+            }
+
+            $this->assertSame([(int) $term['term_id']], wp_list_pluck(get_object_term_cache($ids[0], 'language'), 'term_id'));
+            $this->assertSame([], get_object_term_cache($ids[1], 'language'));
+
+            // A lookup the way plugins read terms (through the object cache) is a hit: no query per row.
+            $queries = $this->queriesMatching($forRows, static function () use ($ids): void {
+                foreach ($ids as $id) {
+                    get_the_terms($id, 'language');
+                }
+            });
+            $this->assertSame([], $queries);
+
+            // Not primed outside list mode.
+            wp_cache_flush();
+            $queries = $this->queriesMatching($forRows, function () use ($parent): void {
+                $this->assertStatus(200, $this->request('GET', '/wc/v3/products/'.$parent->get_id().'/variations', ['_fields' => 'id'], [ListMode::HEADER => '']));
+            });
+            $this->assertSame([], $queries);
+        } finally {
+            unregister_taxonomy('language');
+        }
+    }
+
+    /**
+     * The query budget of an expand: WooCommerce reads each variation's
+     * raw meta once (its own query, no cache to prime), everything else
+     * is primed per page. Pinned so a regression to a query per row for
+     * terms, posts or prices shows up here.
+     */
+    public function test_expanding_a_page_of_variations_stays_within_the_query_budget(): void
+    {
+        global $wpdb;
+
+        $parent = $this->variableProduct(array_map('strval', range(20, 49)));
+        $this->assertCount(30, $parent->get_children());
+        wp_cache_flush();
+
+        $before = $wpdb->num_queries;
+        $response = $this->request('GET', '/wc/v3/products/'.$parent->get_id().'/variations', [
+            'per_page' => 100,
+            'image_size' => 'thumbnail',
+            '_fields' => 'id,name,sku,price,regular_price,sale_price,date_on_sale_from,date_on_sale_to,stock_status,stock_quantity,manage_stock,status,parent_id,image,attributes,wc_products_list',
+        ]);
+        $this->assertStatus(200, $response);
+        $this->assertCount(30, $this->data($response));
+
+        $queries = $wpdb->num_queries - $before;
+        $this->assertLessThanOrEqual(30 + 30, $queries, "{$queries} queries for 30 variations");
+    }
 }

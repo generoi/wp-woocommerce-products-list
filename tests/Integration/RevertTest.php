@@ -248,4 +248,149 @@ class RevertTest extends RestTestCase
         $this->assertCount(1, $rows);
         $this->assertSame(['error', 'revert', 'sku'], [$rows[0]['status'], $rows[0]['source'], $rows[0]['field']]);
     }
+
+    public function test_fields_changed_again_after_the_batch_are_not_put_back_unless_forced(): void
+    {
+        $a = $this->simpleProduct(['sku' => 'A']);
+        $b = $this->simpleProduct(['sku' => 'B']);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [
+                ['id' => $a->get_id(), 'regular_price' => '150', 'sale_price' => '100'],
+                ['id' => $b->get_id(), 'regular_price' => '150'],
+            ],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        // A colleague changes one of the fields again, in another batch.
+        $later = wp_generate_uuid4();
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$a->get_id(), ['regular_price' => '160'], [ListMode::BATCH_HEADER => $later]));
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $results = array_column($data['results'], null, 'id');
+
+        $this->assertFalse($results[$a->get_id()]['ok']);
+        $this->assertSame('conflict', $results[$a->get_id()]['code']);
+        $this->assertSame(['regular_price'], $results[$a->get_id()]['fields']);
+        $this->assertStringContainsString('regular_price', $results[$a->get_id()]['message']);
+        $this->assertTrue($results[$b->get_id()]['ok']);
+
+        // Nothing of A was touched, not even the sale price that did not conflict.
+        $this->assertSame('160', wc_get_product($a->get_id())->get_regular_price());
+        $this->assertSame('100', wc_get_product($a->get_id())->get_sale_price());
+        $this->assertSame('189', wc_get_product($b->get_id())->get_regular_price());
+        $this->assertSame([$b->get_id()], array_map('intval', array_column($this->rows($data['batch_id']), 'object_id')));
+
+        // Forced: the batch's old values win over the later change.
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['force' => true]));
+        $results = array_column($data['results'], null, 'id');
+        $this->assertTrue($results[$a->get_id()]['ok']);
+        $this->assertSame('189', wc_get_product($a->get_id())->get_regular_price());
+        $this->assertSame('', wc_get_product($a->get_id())->get_sale_price());
+    }
+
+    public function test_a_large_batch_is_reverted_in_chunks_under_one_batch_id(): void
+    {
+        add_filter('wc_products_list/revert_chunk', static fn (): int => 2);
+
+        $products = [$this->simpleProduct(['sku' => 'A']), $this->simpleProduct(['sku' => 'B']), $this->simpleProduct(['sku' => 'C'])];
+        $parent = $this->variableProduct(['38']);
+        $variation = $parent->get_children()[0];
+        $trashed = $this->simpleProduct(['sku' => 'T']);
+
+        $update = [];
+
+        foreach ($products as $product) {
+            $update[] = ['id' => $product->get_id(), 'regular_price' => '150'];
+        }
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => $update], [Logger::SOURCE_HEADER => 'bulk']));
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', ['update' => [['id' => $variation, 'regular_price' => '150']]], [Logger::SOURCE_HEADER => 'bulk']));
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/actions/trash', ['ids' => [$trashed->get_id()]]));
+
+        // The plan: four objects in write order (products, then variations), two per chunk.
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $ids = array_map(static fn (WC_Product $product): int => $product->get_id(), $products);
+        $this->assertSame(4, $plan['objects']);
+        $this->assertSame(5, $plan['rows']);
+        $this->assertSame(2, $plan['chunk']);
+        $this->assertSame([[$ids[0], $ids[1]], [$ids[2], $variation]], $plan['chunks']);
+        $this->assertSame([['id' => $trashed->get_id(), 'object_type' => 'product', 'action' => 'trash']], $plan['skipped']);
+        $this->assertTrue($plan['revertable']);
+
+        $this->assertStatus(404, $this->request('GET', '/wc-products-list/v1/log/batch/nope'));
+
+        // Too large for one request: refused, with the chunks to post.
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert');
+        $this->assertStatus(400, $response);
+        $error = $this->data($response);
+        $this->assertSame('wc_products_list_revert_too_large', $error['code']);
+        $this->assertSame($plan['chunks'], $error['data']['chunks']);
+        $this->assertSame('150', wc_get_product($ids[0])->get_regular_price());
+
+        // Over the chunk size in one request: refused too.
+        $this->assertStatus(400, $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['ids' => $ids]));
+
+        $revertBatch = wp_generate_uuid4();
+
+        foreach ($plan['chunks'] as $chunk) {
+            $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['ids' => $chunk, 'revert_batch_id' => $revertBatch, 'fields' => 'id,regular_price']));
+            $this->assertSame($revertBatch, $data['batch_id']);
+            $this->assertSame([true, true], array_column($data['results'], 'ok'));
+            $this->assertSame($chunk, array_column($data['results'], 'id'));
+            $this->assertSame(['189', '189'], array_column($data['items'], 'regular_price'));
+        }
+
+        foreach (array_merge($ids, [$variation]) as $id) {
+            $this->assertSame('189', wc_get_product($id)->get_regular_price());
+        }
+
+        $rows = $this->rows($revertBatch);
+        $this->assertCount(4, $rows);
+        $this->assertSame(['revert'], array_unique(array_column($rows, 'source')));
+        $this->assertEqualsCanonicalizing(array_merge($ids, [$variation]), array_map('intval', array_column($rows, 'object_id')));
+
+        // One revert batch in the history, itself revertable as a whole.
+        $batches = $this->data($this->request('GET', '/wc-products-list/v1/log/batches', ['source' => 'revert']));
+        $this->assertSame(1, $batches['total']);
+        $this->assertSame(4, $batches['items'][0]['objects']);
+
+        // Ids that are not in the batch: nothing to do.
+        $this->assertStatus(404, $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['ids' => [$trashed->get_id() + 1000]]));
+    }
+
+    /**
+     * The revert goes through wc/v3's batch routes, so it needs what a
+     * bulk edit needs (`edit_others_products`): a user without it gets
+     * every object reported, nothing written.
+     */
+    public function test_revert_by_a_user_without_batch_rights_changes_nothing(): void
+    {
+        $product = $this->simpleProduct(['sku' => 'A']);
+        $parent = $this->variableProduct(['38']);
+        $variation = $parent->get_children()[0];
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'regular_price' => '150']]]));
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', ['update' => [['id' => $variation, 'regular_price' => '150']]]));
+
+        add_role(CapabilitiesTest::ROLE, 'Catalog editor', ['read' => true, 'edit_products' => true, 'edit_published_products' => true, 'publish_products' => true, 'read_private_products' => true]);
+
+        try {
+            $this->actAs(CapabilitiesTest::ROLE);
+
+            $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert');
+            $this->assertStatus(200, $response);
+            $data = $this->data($response);
+
+            $this->assertCount(2, $data['results']);
+            $this->assertSame([false, false], array_column($data['results'], 'ok'));
+            $this->assertSame(['woocommerce_rest_cannot_batch'], array_unique(array_column($data['results'], 'code')));
+            $this->assertSame([], $data['items']);
+
+            $this->assertSame('150', wc_get_product($product->get_id())->get_regular_price());
+            $this->assertSame('150', wc_get_product($variation)->get_regular_price());
+            $this->assertSame([], $this->rows($data['batch_id']));
+        } finally {
+            remove_role(CapabilitiesTest::ROLE);
+        }
+    }
 }

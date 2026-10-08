@@ -23,8 +23,11 @@ class Log implements Module
 
         // A plugin update that changes the schema lands without a
         // re-activation; the version option is autoloaded so this is a
-        // string compare on most requests.
+        // string compare on most requests. REST requests are only known
+        // to be such after `init` (REST_REQUEST is defined on
+        // `parse_request`), so they get their own hook.
         add_action('init', [$this, 'maybeUpgrade'], 20);
+        add_action('rest_api_init', [$this, 'maybeUpgrade'], 1);
 
         add_action(Prune::HOOK, static function (): void {
             Prune::run();
@@ -34,7 +37,7 @@ class Log implements Module
 
     public function maybeUpgrade(): void
     {
-        if (! is_admin() && ! wp_doing_cron() && ! wp_is_serving_rest_request()) {
+        if (! is_admin() && ! wp_doing_cron() && ! wp_is_serving_rest_request() && ! doing_action('rest_api_init')) {
             return;
         }
 

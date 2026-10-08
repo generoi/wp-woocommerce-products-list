@@ -69,9 +69,11 @@ class AdminPage implements Module
 
         wp_set_script_translations(Plugin::HANDLE, Plugin::TEXT_DOMAIN, Plugin::path('languages'));
 
+        // HEX flags as wp_localize_script() uses them: a `</script>` in a
+        // term name or an extension's label cannot end the script block.
         wp_add_inline_script(
             Plugin::HANDLE,
-            'window.wcProductsListSettings = '.wp_json_encode(Bootstrap::settings()).';',
+            'window.wcProductsListSettings = '.wp_json_encode(Bootstrap::settings(), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT).';',
             'before'
         );
 

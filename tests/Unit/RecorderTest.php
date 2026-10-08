@@ -189,4 +189,33 @@ class RecorderTest extends TestCase
         $this->assertFalse(Revert::decode('false'));
         $this->assertSame([], Revert::decode('[]'));
     }
+
+    public function test_revert_objects_lists_writes_in_order_with_the_values_the_batch_left(): void
+    {
+        $rows = [
+            ['id' => 1, 'object_id' => 10, 'object_type' => 'product', 'action' => 'update', 'field' => 'regular_price', 'old_value' => '189', 'new_value' => '150'],
+            ['id' => 2, 'object_id' => 10, 'object_type' => 'product', 'action' => 'update', 'field' => 'regular_price', 'old_value' => '150', 'new_value' => '160'],
+            ['id' => 3, 'object_id' => 20, 'object_type' => 'variation', 'parent_id' => 11, 'action' => 'update', 'field' => 'sale_price', 'old_value' => null, 'new_value' => '99'],
+            ['id' => 4, 'object_id' => 12, 'object_type' => 'product', 'action' => 'update', 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b'],
+            ['id' => 5, 'object_id' => 13, 'object_type' => 'product', 'action' => 'trash', 'field' => 'status', 'old_value' => 'publish', 'new_value' => 'trash'],
+            ['id' => 6, 'object_id' => 14, 'object_type' => 'product', 'action' => 'duplicate', 'field' => 'duplicate', 'old_value' => null, 'new_value' => '15'],
+        ];
+
+        $plan = Revert::plan($rows);
+        // The earliest old value is written back, the latest new value is what is compared.
+        $this->assertSame(['regular_price' => '189'], $plan['products'][10]);
+        $this->assertSame(['regular_price' => '160'], $plan['final'][10]);
+        $this->assertSame(['sale_price' => '99'], $plan['final'][20]);
+
+        $objects = Revert::objects($rows);
+        $this->assertSame([
+            ['id' => 10, 'object_type' => 'product', 'parent_id' => 0, 'fields' => ['regular_price']],
+            ['id' => 12, 'object_type' => 'product', 'parent_id' => 0, 'fields' => ['name']],
+            ['id' => 20, 'object_type' => 'variation', 'parent_id' => 11, 'fields' => ['sale_price']],
+        ], $objects['objects']);
+        $this->assertSame([
+            ['id' => 13, 'object_type' => 'product', 'action' => 'trash'],
+            ['id' => 14, 'object_type' => 'product', 'action' => 'duplicate'],
+        ], $objects['skipped']);
+    }
 }

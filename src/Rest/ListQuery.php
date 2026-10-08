@@ -15,9 +15,9 @@ use WP_REST_Request;
  * `min_stock_quantity`, `max_stock_quantity`, `has_variations`,
  * `sale_scheduled` (a sale price with a start date in the future, on the
  * product or on one of its variations) and
- * `orderby=sku|stock_quantity|menu_order`. Stock and SKU live in
+ * `orderby=sku|stock_quantity|menu_order|post_status`. Stock and SKU live in
  * `wc_product_meta_lookup`, so those are one LEFT JOIN on the primary key
- * rather than a meta query. The join and the WHERE/ORDER BY pieces are added
+ * rather than a meta query; post_status is a posts column. The join and the WHERE/ORDER BY pieces are added
  * on `posts_clauses`, keyed by a query var that only this class sets.
  *
  * Search: wc/v3's `search_name_or_sku` lists matching variations as rows of
@@ -46,7 +46,7 @@ final class ListQuery
     public const ALL_STATUSES = ['publish', 'future', 'draft', 'pending', 'private'];
 
     /** Orderings the plugin adds to wc/v3's own (`id, title, date, modified, price, ...`). */
-    public const ORDERBY = ['sku', 'stock_quantity', 'menu_order'];
+    public const ORDERBY = ['sku', 'stock_quantity', 'menu_order', 'post_status'];
 
     private const LOOKUP_ALIAS = 'wc_product_meta_lookup';
 
@@ -165,7 +165,7 @@ final class ListQuery
             'sale_scheduled' => $vars['sale_scheduled'],
             // menu_order is native to WP_Query (WooCommerce maps it to
             // `menu_order title`); sku and stock_quantity need the lookup table.
-            'orderby' => in_array($vars['orderby'], ['sku', 'stock_quantity'], true) ? $vars['orderby'] : null,
+            'orderby' => in_array($vars['orderby'], ['sku', 'stock_quantity', 'post_status'], true) ? $vars['orderby'] : null,
             'search' => $vars['search'] !== [] ? $vars['search'] : null,
         ], static fn ($value): bool => $value !== null);
 
@@ -264,7 +264,7 @@ final class ListQuery
         $search = is_array($vars['search'] ?? null) ? $vars['search'] : [];
         $sku = $search !== [] && wc_product_sku_enabled();
 
-        if (isset($vars['min_stock']) || isset($vars['max_stock']) || $orderby !== null || $sku) {
+        if (isset($vars['min_stock']) || isset($vars['max_stock']) || ($orderby !== null && $orderby !== 'post_status') || $sku) {
             // WooCommerce joins the same table under the same alias for a
             // SKU search (posts_join runs before posts_clauses).
             if (! str_contains($clauses['join'], $alias)) {
@@ -318,7 +318,11 @@ final class ListQuery
 
         if ($orderby !== null) {
             $order = strtoupper((string) $query->get('order')) === 'DESC' ? 'DESC' : 'ASC';
-            $column = $orderby === 'sku' ? "{$alias}.sku" : "{$alias}.stock_quantity";
+            $column = match ($orderby) {
+                'sku' => "{$alias}.sku",
+                'post_status' => "{$posts}.post_status",
+                default => "{$alias}.stock_quantity",
+            };
 
             $clauses['orderby'] = "{$column} {$order}, {$posts}.ID {$order}";
         }

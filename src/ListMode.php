@@ -34,6 +34,9 @@ final class ListMode
 
     private static ?WP_REST_Request $request = null;
 
+    /** @var array<int, ?WP_REST_Request> the requests a nested dispatch interrupted, innermost last */
+    private static array $stack = [];
+
     /** @var array{0: ?bool, 1: ?string}|null */
     private static ?array $forced = null;
 
@@ -42,6 +45,9 @@ final class ListMode
     public static function register(): void
     {
         add_filter('rest_request_before_callbacks', [self::class, 'capture'], 1, 3);
+        // Last of all: every other after-callbacks listener still sees the
+        // request that was dispatched.
+        add_filter('rest_request_after_callbacks', [self::class, 'release'], PHP_INT_MAX, 3);
         add_filter('woocommerce_rest_api_cache_key_info', [self::class, 'cacheKey'], 10, 2);
     }
 
@@ -90,8 +96,11 @@ final class ListMode
     }
 
     /**
-     * Remember the request being dispatched. Runs for every REST request,
-     * including the sub-requests of a batch, so the memo is per request.
+     * Remember the request being dispatched. Runs for every dispatched
+     * request, including the ones the plugin dispatches from inside its
+     * own (the actions refresh, the revert's wc/v3 writes), so the memo is
+     * per request and the interrupted one is kept to be restored by
+     * `release()`. Batch sub-requests are not dispatched and never come here.
      *
      * @param  mixed  $response
      * @param  mixed  $handler
@@ -99,7 +108,29 @@ final class ListMode
      */
     public static function capture($response, $handler, WP_REST_Request $request)
     {
+        self::$stack[] = self::$request;
         self::$request = $request;
+        self::$active = null;
+        self::$batchId = null;
+
+        return $response;
+    }
+
+    /**
+     * The dispatched request is done: the one it interrupted (if any) is
+     * the current request again, with its own header memo.
+     *
+     * @param  mixed  $response
+     * @param  mixed  $handler
+     * @return mixed
+     */
+    public static function release($response, $handler, WP_REST_Request $request)
+    {
+        if (self::$request !== $request) {
+            return $response;
+        }
+
+        self::$request = self::$stack === [] ? null : array_pop(self::$stack);
         self::$active = null;
         self::$batchId = null;
 
@@ -191,6 +222,18 @@ final class ListMode
     public static function force(?bool $active, ?string $batchId = null): void
     {
         self::$forced = $active === null && $batchId === null ? null : [$active, $batchId];
+        self::$active = null;
+        self::$batchId = null;
+    }
+
+    /**
+     * Forget the dispatched requests. For tests, where a request may end
+     * in an exception before `release()` ran.
+     */
+    public static function reset(): void
+    {
+        self::$request = null;
+        self::$stack = [];
         self::$active = null;
         self::$batchId = null;
     }

@@ -28,6 +28,16 @@ final class Rows
 
     public const BRANDS_FILTER = 'woocommerce_rest_prepare_product_object';
 
+    public const FILTER_VARIATION_TAXONOMIES = 'wc_products_list/variation_term_taxonomies';
+
+    /**
+     * Taxonomies a plugin keeps per variation without attaching them to
+     * the `product_variation` post type: Polylang's language and
+     * translation group (Polylang for WooCommerce reads both while a
+     * variation loads). Primed per page when they exist.
+     */
+    public const KNOWN_VARIATION_TAXONOMIES = ['language', 'post_translations'];
+
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */
     private static ?WeakMap $fields = null;
 
@@ -42,6 +52,9 @@ final class Rows
         add_filter('woocommerce_rest_prepare_product_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_product_get_gallery_image_ids', [$this, 'dropGallery'], 10, 2);
+        add_filter('the_posts', [$this, 'primeVariationTerms'], 10, 2);
+        add_filter('woocommerce_get_variation_prices_hash', [$this, 'primeChildren'], 10, 2);
+        add_action('woocommerce_before_product_object_save', [$this, 'primeChildrenBeforeSave']);
         add_action('rest_api_init', [$this, 'registerSchema']);
 
         // WC_Brands registers its hooks on plugins_loaded at 11.
@@ -78,7 +91,20 @@ final class Rows
      */
     public function brands($response, $product, $request = null)
     {
-        if (! ListMode::active() || ListMode::method() !== 'GET' || ! $response instanceof WP_REST_Response || ! $request instanceof WP_REST_Request) {
+        if (! ListMode::active() || ! $response instanceof WP_REST_Response || ! $request instanceof WP_REST_Request) {
+            return $this->brandsCallback !== null ? call_user_func($this->brandsCallback, $response, $product) : $response;
+        }
+
+        if (ListMode::method() !== 'GET') {
+            // A batch item the app will trim to `fields` anyway: skip the
+            // two term queries per product when brands are not among them.
+            $outer = ListMode::request();
+            $fields = $outer !== null && $outer !== $request ? $outer->get_param('fields') : null;
+
+            if (is_string($fields) && trim($fields) !== '' && ! rest_is_field_included('brands', wp_parse_list($fields))) {
+                return $response;
+            }
+
             return $this->brandsCallback !== null ? call_user_func($this->brandsCallback, $response, $product) : $response;
         }
 
@@ -160,6 +186,178 @@ final class Rows
         $featured = $product instanceof WC_Product ? (int) $product->get_image_id('edit') : 0;
 
         return $featured > 0 ? [] : array_slice($ids, 0, 1);
+    }
+
+    /**
+     * `the_posts` of a list-mode variations query: prime, in one query,
+     * the term relationships of the taxonomies that are attached to
+     * products but not to variations. WP_Query primes only the latter
+     * (`product_shipping_class`); a plugin that treats variations like
+     * products (Polylang for WooCommerce reads every variation's
+     * `language` and `post_translations` while the object loads) then
+     * queries once per row, 100 queries on an expanded page.
+     *
+     * @param  mixed  $posts
+     * @param  mixed  $query
+     * @return mixed
+     */
+    public function primeVariationTerms($posts, $query = null)
+    {
+        if (! is_array($posts) || $posts === [] || ! $query instanceof \WP_Query || ! ListMode::active() || ListMode::method() !== 'GET') {
+            return $posts;
+        }
+
+        if ($query->get('post_type') !== 'product_variation') {
+            return $posts;
+        }
+
+        $ids = [];
+
+        foreach ($posts as $post) {
+            $id = is_object($post) ? (int) ($post->ID ?? 0) : (int) $post;
+
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        self::primeTermRelationships($ids, self::variationTaxonomies());
+
+        return $posts;
+    }
+
+    /**
+     * `woocommerce_get_variation_prices_hash`: fires right before
+     * WooCommerce reads the price of every variation of a variable
+     * product (a cache miss after any save of the parent, so after every
+     * item of a batch write). Each variation load is three queries (post,
+     * meta, terms) unless the caches are warm; one query each for all of
+     * them here.
+     *
+     * @param  mixed  $hash
+     * @param  mixed  $product
+     * @return mixed
+     */
+    public function primeChildren($hash, $product = null)
+    {
+        if (ListMode::active() && $product instanceof WC_Product) {
+            self::primeChildrenOf($product);
+        }
+
+        return $hash;
+    }
+
+    /**
+     * `woocommerce_before_product_object_save`: WooCommerce loads every
+     * variation of a variable product on each save of the parent (to see
+     * whether any is downloadable), and again when it serialises the
+     * price range afterwards. A status change on a page of variable
+     * products is therefore a page of variation loads; in list mode the
+     * children's caches are warmed first.
+     *
+     * @param  mixed  $product
+     */
+    public function primeChildrenBeforeSave($product): void
+    {
+        if (ListMode::active() && $product instanceof WC_Product) {
+            self::primeChildrenOf($product);
+        }
+    }
+
+    /**
+     * Posts, meta and term relationships of a variable product's
+     * variations, one query each for the whole set.
+     */
+    public static function primeChildrenOf(WC_Product $product): void
+    {
+        if (! $product->is_type('variable')) {
+            return;
+        }
+
+        $ids = array_map('intval', $product->get_children());
+
+        if ($ids === []) {
+            return;
+        }
+
+        _prime_post_caches($ids, true, true);
+        self::primeTermRelationships($ids, self::variationTaxonomies());
+    }
+
+    /**
+     * The taxonomies primed for variation rows on top of the ones
+     * WP_Query primes (those attached to `product_variation`): the
+     * product taxonomies, and the known per-variation ones that exist.
+     *
+     * @return array<int, string>
+     */
+    public static function variationTaxonomies(): array
+    {
+        $taxonomies = array_merge(
+            array_diff(get_object_taxonomies('product'), get_object_taxonomies('product_variation')),
+            array_filter(self::KNOWN_VARIATION_TAXONOMIES, 'taxonomy_exists')
+        );
+
+        /**
+         * Filters the taxonomies whose variation term relationships are
+         * primed per page in list mode.
+         *
+         * @param  array<int, string>  $taxonomies
+         */
+        $taxonomies = apply_filters(self::FILTER_VARIATION_TAXONOMIES, array_values(array_unique($taxonomies)));
+
+        return array_values(array_unique(array_filter((array) $taxonomies, 'is_string')));
+    }
+
+    /**
+     * `update_object_term_cache()` for an explicit taxonomy list: one
+     * query, and an empty relationship list cached for the objects that
+     * have none, so a later lookup is a cache hit either way.
+     *
+     * @param  array<int, int>  $ids
+     * @param  array<int, string>  $taxonomies
+     */
+    public static function primeTermRelationships(array $ids, array $taxonomies): void
+    {
+        $taxonomies = array_values(array_filter($taxonomies, 'taxonomy_exists'));
+
+        if ($ids === [] || $taxonomies === []) {
+            return;
+        }
+
+        $missing = [];
+
+        foreach ($taxonomies as $taxonomy) {
+            foreach (wp_cache_get_multiple($ids, "{$taxonomy}_relationships") as $id => $value) {
+                if ($value === false) {
+                    $missing[(int) $id] = (int) $id;
+                }
+            }
+        }
+
+        if ($missing === []) {
+            return;
+        }
+
+        $terms = wp_get_object_terms(array_values($missing), $taxonomies, [
+            'fields' => 'all_with_object_id',
+            'orderby' => 'name',
+            'update_term_meta_cache' => false,
+        ]);
+
+        $byObject = [];
+
+        foreach (is_array($terms) ? $terms : [] as $term) {
+            // `all_with_object_id` adds `object_id` to each WP_Term.
+            $objectId = (int) ($term->object_id ?? 0);
+            $byObject[$objectId][(string) $term->taxonomy][] = (int) $term->term_id;
+        }
+
+        foreach ($missing as $id) {
+            foreach ($taxonomies as $taxonomy) {
+                wp_cache_add($id, $byObject[$id][$taxonomy] ?? [], "{$taxonomy}_relationships");
+            }
+        }
     }
 
     /**

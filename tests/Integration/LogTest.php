@@ -71,6 +71,29 @@ class LogTest extends RestTestCase
         $this->assertTrue(Table::exists());
     }
 
+    /**
+     * REST requests are known as such only after `init`, so the upgrade
+     * also hangs off `rest_api_init`: a plugin update lands on the first
+     * app request, not on the next admin page load.
+     */
+    public function test_upgrade_runs_on_the_first_rest_request(): void
+    {
+        update_option(Table::OPTION, '0');
+        $this->assertFalse(Table::installed());
+
+        $log = new Log;
+        $log->maybeUpgrade();
+        $this->assertFalse(Table::installed(), 'Not an admin, cron or REST request: nothing happens.');
+
+        $this->assertSame(1, has_action('rest_api_init', [Plugin::getInstance()->module(Log::class), 'maybeUpgrade']));
+
+        $queries = $this->queriesMatching('/DESCRIBE|CREATE TABLE|ALTER TABLE/i', static function (): void {
+            do_action('rest_api_init');
+        });
+        $this->assertNotSame([], $queries);
+        $this->assertTrue(Table::installed());
+    }
+
     public function test_the_logger_recreates_a_missing_table_on_its_first_write(): void
     {
         global $wpdb;

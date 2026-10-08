@@ -77,6 +77,7 @@ class ListQueryTest extends TestCase
     {
         $this->assertSame('stock_quantity', ListQuery::vars(['orderby' => 'stock_quantity'])['orderby']);
         $this->assertSame('menu_order', ListQuery::vars(['orderby' => 'menu_order'])['orderby']);
+        $this->assertSame('post_status', ListQuery::vars(['orderby' => 'post_status'])['orderby']);
         $this->assertNull(ListQuery::vars(['orderby' => 'price'])['orderby']);
         $this->assertNull(ListQuery::vars(['orderby' => ['sku']])['orderby']);
         $this->assertNull(ListQuery::vars(['min_stock_quantity' => 'many'])['min_stock']);
@@ -92,6 +93,6 @@ class ListQueryTest extends TestCase
             array_keys($params)
         );
         $this->assertSame(ListQuery::TABS, $params['tab']['enum']);
-        $this->assertSame(['sku', 'stock_quantity', 'menu_order'], ListQuery::ORDERBY);
+        $this->assertSame(['sku', 'stock_quantity', 'menu_order', 'post_status'], ListQuery::ORDERBY);
     }
 }

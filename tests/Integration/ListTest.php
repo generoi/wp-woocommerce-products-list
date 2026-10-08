@@ -168,6 +168,16 @@ class ListTest extends RestTestCase
         $this->assertSame([$c, $a, $b], $this->ids(['orderby' => 'menu_order', 'order' => 'asc']));
     }
 
+    public function test_orderby_post_status_groups_the_all_tab(): void
+    {
+        $draft = $this->simpleProduct(['status' => 'draft'])->get_id();
+        $published = $this->simpleProduct(['status' => 'publish'])->get_id();
+        $private = $this->simpleProduct(['status' => 'private'])->get_id();
+
+        $this->assertSame([$draft, $private, $published], $this->ids(['tab' => 'all', 'orderby' => 'post_status', 'order' => 'asc']));
+        $this->assertSame([$published, $private, $draft], $this->ids(['tab' => 'all', 'orderby' => 'post_status', 'order' => 'desc']));
+    }
+
     public function test_sku_ordering_combines_with_a_sku_search(): void
     {
         // The SKU search joins the lookup table itself; the ordering must
@@ -383,5 +393,39 @@ class ListTest extends RestTestCase
         $this->assertStatus(200, $response);
         $this->assertTrue($this->data($response)[0][Rows::KEY]['can_edit']);
         $this->assertTrue($this->data($response)[0][Rows::KEY]['can_delete']);
+    }
+
+    /**
+     * The query budget of a list page with the default view's columns.
+     * Pinned so a per-row query (terms, brands, gallery, children) shows
+     * up here before it shows up in the dev audit.
+     */
+    public function test_a_list_page_stays_within_the_query_budget(): void
+    {
+        global $wpdb;
+
+        $boots = wp_insert_term('Boots', 'product_cat');
+        $this->assertIsArray($boots);
+
+        for ($i = 0; $i < 10; $i++) {
+            $this->simpleProduct(['sku' => 'S'.$i, 'category_ids' => [(int) $boots['term_id']]]);
+            $this->variableProduct(['38', '39'], ['sku' => 'V'.$i]);
+        }
+
+        wp_cache_flush();
+
+        $before = $wpdb->num_queries;
+        $response = $this->request('GET', '/wc/v3/products', [
+            'per_page' => 100,
+            'tab' => 'all',
+            'orderby' => 'date',
+            'image_size' => 'thumbnail',
+            '_fields' => 'id,name,type,status,sku,price,regular_price,sale_price,date_on_sale_from,date_on_sale_to,stock_status,stock_quantity,manage_stock,categories,images,date_modified,featured,parent_id,wc_products_list',
+        ]);
+        $this->assertStatus(200, $response);
+        $this->assertCount(20, $this->data($response));
+
+        $queries = $wpdb->num_queries - $before;
+        $this->assertLessThanOrEqual(20 * 2 + 40, $queries, "{$queries} queries for 20 products");
     }
 }

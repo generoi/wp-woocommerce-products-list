@@ -77,4 +77,33 @@ class ScaffoldTest extends RestTestCase
         $this->assertSame([true, $this->batchId()], $seen[2]);
         $this->assertSame('SCAFFOLD-2', wc_get_product($product->get_id())->get_sku());
     }
+
+    /**
+     * The settings are printed inline; a `</script>` in a term name or an
+     * extension's label must not end the script block.
+     */
+    public function test_inline_settings_cannot_close_the_script_tag(): void
+    {
+        add_filter(Bootstrap::FILTER, static function (array $settings): array {
+            $settings['fields'][] = ['id' => 'ext:evil', 'label' => '</script><script>alert(1)</script>&amp;\'"'];
+
+            return $settings;
+        });
+
+        $GLOBALS['wp_scripts'] = null;
+        Plugin::getInstance()->module(AdminPage::class)->enqueue(AdminPage::SCREEN);
+
+        $inline = wp_scripts()->get_inline_script_data(Plugin::HANDLE, 'before');
+        $this->assertStringStartsWith('window.wcProductsListSettings = {', $inline);
+        $this->assertStringNotContainsString('</script', $inline);
+        $this->assertStringNotContainsString('<script', $inline);
+        $this->assertStringContainsString('\\u003C\\/script\\u003E', $inline);
+
+        $json = substr($inline, strlen('window.wcProductsListSettings = '));
+        $decoded = json_decode(substr($json, 0, strrpos($json, '};') + 1), true);
+        $this->assertIsArray($decoded);
+        $this->assertSame('</script><script>alert(1)</script>&amp;\'"', end($decoded['fields'])['label']);
+
+        $GLOBALS['wp_scripts'] = null;
+    }
 }

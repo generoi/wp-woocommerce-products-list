@@ -35,6 +35,21 @@ class RegistryTest extends TestCase
         $this->assertFalse($name['bulk']);
     }
 
+    public function test_optional_extras_pass_through_and_non_scalars_are_dropped(): void
+    {
+        $field = Registry::normaliseField(['id' => 'i18n:se.sale_price', 'type' => 'price', 'referenceLabel' => 'No Svenska price; showing the Suomi price converted', 'currency' => 'sek', 'precision' => '2']);
+
+        $this->assertSame('No Svenska price; showing the Suomi price converted', $field['referenceLabel']);
+        $this->assertSame('SEK', $field['currency']);
+        $this->assertSame(2, $field['precision']);
+
+        $plain = Registry::normaliseField(['id' => 'i18n:se.name', 'referenceLabel' => ['not' => 'scalar'], 'currency' => '', 'precision' => 'two']);
+
+        $this->assertArrayNotHasKey('referenceLabel', $plain);
+        $this->assertArrayNotHasKey('currency', $plain);
+        $this->assertArrayNotHasKey('precision', $plain);
+    }
+
     public function test_invalid_ids_and_types_are_rejected_or_defaulted(): void
     {
         $this->assertNull(Registry::normaliseField([]));

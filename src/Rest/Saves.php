@@ -92,6 +92,7 @@ final class Saves
             return $product;
         }
 
+        self::forwardFields($request);
         Recorder::begin($product, $request, $creating);
 
         if (self::carriesWriteKey($request)) {
@@ -109,6 +110,37 @@ final class Saves
         }
 
         return $product;
+    }
+
+    /**
+     * A batch sub-request gets the batch's `fields` as its own `_fields`.
+     *
+     * WooCommerce serialises every item it wrote in full (the product
+     * controller skips what `_fields` leaves out, but a sub-request has no
+     * `_fields` of its own: the batch request's `fields` is only applied
+     * afterwards by `Rows::trimBatchItem()`), so a status change on a
+     * variable product still computes its price range, which reads every
+     * variation. With `_fields` on the sub-request the controller builds
+     * only what the app asked for, and the response is the same rows the
+     * trim would have left. The variations controller ignores `_fields`
+     * for its own keys; the integrations' row filters still honour it.
+     */
+    private static function forwardFields(WP_REST_Request $request): void
+    {
+        $outer = ListMode::request();
+
+        if ($outer === null || $outer === $request || $outer->get_method() === 'GET') {
+            return;
+        }
+
+        $fields = $outer->get_param('fields');
+        $own = $request->get_param('_fields');
+
+        if (! is_string($fields) || trim($fields) === '' || (is_string($own) && trim($own) !== '')) {
+            return;
+        }
+
+        $request->set_query_params($request->get_query_params() + ['_fields' => $fields.',id']);
     }
 
     /**

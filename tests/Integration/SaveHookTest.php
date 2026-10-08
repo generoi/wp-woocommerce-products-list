@@ -217,7 +217,7 @@ class SaveHookTest extends RestTestCase
         $this->assertCount(2, $data['update']);
 
         $row = $data['update'][0];
-        $this->assertSame(['id', 'price', 'sale_price', 'wc_products_list'], array_values(array_intersect(['id', 'price', 'sale_price', 'wc_products_list'], array_keys($row))));
+        $this->assertEqualsCanonicalizing(['id', 'price', 'sale_price', 'wc_products_list'], array_values(array_diff(array_keys($row), ['_links'])));
         $this->assertSame($a->get_id(), $row['id']);
         $this->assertSame('149', $row['sale_price']);
         $this->assertArrayNotHasKey('name', $row);
@@ -227,7 +227,7 @@ class SaveHookTest extends RestTestCase
         $this->assertTrue($row['wc_products_list']['can_edit']);
         $this->assertArrayNotHasKey('brands', $row);
         // WooCommerce adds `_links` to every collection item after the row filters.
-        $this->assertSame(['id', 'price', 'sale_price', 'wc_products_list'], array_values(array_diff(array_keys($row), ['_links'])));
+        $this->assertArrayNotHasKey('_embedded', $row);
 
         $error = $data['update'][1];
         $this->assertSame($b->get_id(), $error['id']);
@@ -245,7 +245,7 @@ class SaveHookTest extends RestTestCase
             'update' => [['id' => $parent->get_children()[0], 'sale_price' => '99']],
         ], [], ['fields' => 'sale_price,parent_id']);
         $row = $this->data($response)['update'][0];
-        $this->assertSame(['id', 'sale_price', 'parent_id'], array_values(array_diff(array_keys($row), ['_links'])));
+        $this->assertEqualsCanonicalizing(['id', 'sale_price', 'parent_id'], array_values(array_diff(array_keys($row), ['_links'])));
         $this->assertSame($parent->get_id(), $row['parent_id']);
 
         // A single write is core's business (`_fields`), not trimmed by `fields`.
@@ -334,5 +334,163 @@ class SaveHookTest extends RestTestCase
         $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'Renamed']));
 
         $this->assertSame([[1, $this->batchId()]], $seen);
+    }
+
+    /**
+     * @return array<int, string> the queries run while `$run` executes that match `$pattern`
+     */
+    private function queriesMatching(string $pattern, callable $run): array
+    {
+        $seen = [];
+        $filter = static function (string $query) use (&$seen, $pattern): string {
+            if (preg_match($pattern, $query)) {
+                $seen[] = $query;
+            }
+
+            return $query;
+        };
+
+        add_filter('query', $filter);
+        $run();
+        remove_filter('query', $filter);
+
+        return $seen;
+    }
+
+    /**
+     * WooCommerce reuses the per-item request objects of a batch; the
+     * recorder keys its snapshots by that object, so an item that fails
+     * between two that succeed must neither lose its error row nor hand
+     * its snapshot to the next item.
+     */
+    public function test_a_failing_item_between_two_good_ones_is_logged_on_its_own(): void
+    {
+        $this->simpleProduct(['sku' => 'TAKEN']);
+        $a = $this->simpleProduct(['sku' => 'A']);
+        $b = $this->simpleProduct(['sku' => 'B']);
+        $c = $this->simpleProduct(['sku' => 'C']);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [
+                ['id' => $a->get_id(), 'regular_price' => '10'],
+                ['id' => $b->get_id(), 'sku' => 'TAKEN', 'regular_price' => '20'],
+                ['id' => $c->get_id(), 'regular_price' => '30'],
+            ],
+        ]);
+        $this->assertStatus(200, $response);
+        $update = $this->data($response)['update'];
+        $this->assertArrayNotHasKey('error', $update[0]);
+        $this->assertSame('product_invalid_sku', $update[1]['error']['code']);
+        $this->assertArrayNotHasKey('error', $update[2]);
+
+        $rows = $this->rows();
+        $this->assertCount(3, $rows);
+
+        $byObject = array_column($rows, null, 'object_id');
+        $this->assertSame(['ok', 'regular_price', '189', '10'], [$byObject[$a->get_id()]['status'], $byObject[$a->get_id()]['field'], $byObject[$a->get_id()]['old_value'], $byObject[$a->get_id()]['new_value']]);
+        $this->assertSame(['ok', 'regular_price', '189', '30'], [$byObject[$c->get_id()]['status'], $byObject[$c->get_id()]['field'], $byObject[$c->get_id()]['old_value'], $byObject[$c->get_id()]['new_value']]);
+        $this->assertSame('error', $byObject[$b->get_id()]['status']);
+        $this->assertSame('product_invalid_sku', json_decode($byObject[$b->get_id()]['context'], true)['code']);
+        $this->assertEqualsCanonicalizing(['sku', 'regular_price'], json_decode($byObject[$b->get_id()]['context'], true)['fields']);
+
+        $this->assertSame('10', wc_get_product($a->get_id())->get_regular_price());
+        $this->assertSame('189', wc_get_product($b->get_id())->get_regular_price());
+        $this->assertSame('B', wc_get_product($b->get_id())->get_sku());
+        $this->assertSame('30', wc_get_product($c->get_id())->get_regular_price());
+    }
+
+    /**
+     * A batch item is serialised by WooCommerce with the batch's `fields`
+     * as its own `_fields`, so the controller never builds what the app
+     * will not read (a variable product's price range, its variation
+     * list, the gallery), and brands are not queried for it either.
+     */
+    public function test_batch_items_are_serialised_with_the_batch_fields_only(): void
+    {
+        if (! taxonomy_exists('product_brand')) {
+            $this->markTestSkipped('No product_brand taxonomy.');
+        }
+
+        $parent = $this->variableProduct(['38', '39']);
+        $brand = wp_insert_term('Saga', 'product_brand');
+        $this->assertIsArray($brand);
+        wp_set_object_terms($parent->get_id(), [(int) $brand['term_id']], 'product_brand');
+        $seen = [];
+
+        // After the brands callback (10), before the trim (1000): what WooCommerce built.
+        add_filter('woocommerce_rest_prepare_product_object', static function ($response, $product, $request) use (&$seen) {
+            $seen[] = [
+                'fields' => $request->get_param('_fields'),
+                'keys' => array_keys((array) $response->get_data()),
+            ];
+
+            return $response;
+        }, 999, 3);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $parent->get_id(), 'status' => 'draft']],
+        ], [], ['fields' => 'id,status,wc_products_list.can_edit']));
+
+        $this->assertCount(1, $seen);
+        $this->assertSame('id,status,wc_products_list.can_edit,id', $seen[0]['fields']);
+        // Nothing the app did not ask for was built: no price range, no
+        // images, no description, no brands (`variations` is the one key
+        // WooCommerce always adds to a variable product, from the cached
+        // children; `wc_products_list` is the plugin's own).
+        $this->assertEqualsCanonicalizing(['id', 'status', 'variations', 'wc_products_list'], $seen[0]['keys']);
+        $this->assertSame('draft', get_post_status($parent->get_id()));
+
+        // Brands are built when the batch asks for them.
+        $seen = [];
+        $response = $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $parent->get_id(), 'status' => 'publish']],
+        ], [], ['fields' => 'id,status,brands']);
+        $this->assertContains('brands', $seen[0]['keys']);
+        $this->assertSame([(int) $brand['term_id']], array_column($this->data($response)['update'][0]['brands'], 'id'));
+
+        // Without `fields` the sub-request keeps WooCommerce's full row.
+        $seen = [];
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $parent->get_id(), 'status' => 'publish']],
+        ]));
+        $this->assertNull($seen[0]['fields']);
+        $this->assertContains('description', $seen[0]['keys']);
+        $this->assertContains('brands', $seen[0]['keys']);
+    }
+
+    /**
+     * Saving a variable product loads every variation (WooCommerce looks
+     * for downloadable children), and serialising it afterwards reads
+     * every variation's price (the price transient is gone); the children
+     * are primed in bulk rather than loaded one by one.
+     */
+    public function test_a_saved_variable_product_reads_its_variations_in_bulk(): void
+    {
+        global $wpdb;
+
+        $parent = $this->variableProduct(['38', '39', '40']);
+        $children = $parent->get_children();
+        wp_cache_flush();
+
+        $pattern = '/'.preg_quote($wpdb->postmeta, '/').' WHERE post_id IN \\((\\d+)\\) ORDER BY meta_id/';
+        $single = $this->queriesMatching($pattern, function () use ($parent): void {
+            // `on_sale` and `price_html` read every variation's price.
+            $response = $this->request('POST', '/wc/v3/products/batch', [
+                'update' => [['id' => $parent->get_id(), 'status' => 'draft']],
+            ], [], ['fields' => 'id,status,price,on_sale,price_html']);
+            $this->assertStatus(200, $response);
+            $row = $this->data($response)['update'][0];
+            $this->assertFalse($row['on_sale']);
+            $this->assertStringContainsString('189', $row['price_html']);
+        });
+
+        $perChild = [];
+
+        foreach ($single as $query) {
+            preg_match($pattern, $query, $m);
+            $perChild[(int) $m[1]] = true;
+        }
+
+        $this->assertSame([], array_values(array_intersect(array_keys($perChild), $children)), 'A variation was loaded with its own meta query: '.implode("\n", $single));
     }
 }

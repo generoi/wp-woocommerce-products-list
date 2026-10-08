@@ -22,6 +22,7 @@ abstract class TestCase extends WP_UnitTestCase
         parent::set_up();
 
         ListMode::force(null);
+        ListMode::reset();
         $this->actAs('administrator');
     }
 

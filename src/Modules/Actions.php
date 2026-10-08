@@ -12,10 +12,12 @@ use GeneroWP\ProductsList\Actions\Trash;
 use GeneroWP\ProductsList\Module;
 use GeneroWP\ProductsList\Rest\ActionsController;
 use GeneroWP\ProductsList\Rest\Saves;
+use GeneroWP\ProductsList\Rest\VariationsBatchController;
 
 /**
  * Writes: the save hooks (recorder + `wc_products_list/save`), the
- * built-in row actions and the actions REST route. See docs/contracts.md.
+ * built-in row actions, the actions REST route and the cross-parent
+ * variations batch route. See docs/contracts.md.
  */
 class Actions implements Module
 {
@@ -52,5 +54,6 @@ class Actions implements Module
     public function registerRoutes(): void
     {
         (new ActionsController)->register();
+        (new VariationsBatchController)->register();
     }
 }

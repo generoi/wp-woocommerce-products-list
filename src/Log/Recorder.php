@@ -28,6 +28,8 @@ use WP_REST_Request;
  */
 final class Recorder
 {
+    public const FILTER_CONTEXT = 'wc_products_list/log_context';
+
     public const FILTER_VALUE = 'wc_products_list/log_value';
 
     /** Request keys that are addressing, not data. */
@@ -592,12 +594,21 @@ final class Recorder
      */
     private static function context(WP_REST_Request $request, array $keys): array
     {
-        return [
+        $context = [
             'keys' => array_values(array_filter(array_map('strval', $keys), static fn (string $key): bool => ! in_array($key, self::IGNORED_KEYS, true))),
             'route' => $request->get_route(),
             'ip' => isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash((string) $_SERVER['REMOTE_ADDR'])) : '',
             'ua' => isset($_SERVER['HTTP_USER_AGENT']) ? substr(sanitize_text_field(wp_unslash((string) $_SERVER['HTTP_USER_AGENT'])), 0, 255) : '',
         ];
+
+        /**
+         * Filters the context stored with every log row of a save. Unset
+         * `ip` and `ua` to keep no personal data beyond the user id.
+         *
+         * @param  array<string, mixed>  $context
+         * @param  WP_REST_Request  $request
+         */
+        return (array) apply_filters(self::FILTER_CONTEXT, $context, $request);
     }
 
     /**

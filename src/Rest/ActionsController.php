@@ -17,9 +17,10 @@ use WP_REST_Response;
 
 /**
  * POST /wc-products-list/v1/actions/{action} {ids, args}: runs one Action
- * per id, logs one row per id (or per change the handler reports), and
- * returns per-id results plus the refreshed rows of the ids that still
- * exist, so the app can patch its cache without a reload.
+ * per id, logs one row per id (or per change the handler reports, with
+ * any `context` it returns stored next to the args), and returns per-id
+ * results plus the refreshed rows of the ids that still exist, so the app
+ * can patch its cache without a reload.
  */
 final class ActionsController
 {
@@ -218,7 +219,14 @@ final class ActionsController
         }
 
         $changes = is_array($data['changes'] ?? null) ? $data['changes'] : [];
-        unset($data['changes']);
+        $context = is_array($data['context'] ?? null) ? $data['context'] : [];
+        unset($data['changes'], $data['context']);
+
+        if ($context !== []) {
+            // What the handler wants remembered next to the args (the id
+            // and title of a copy, for instance); the args win on a clash.
+            $base['context'] = $base['context'] + $context;
+        }
 
         $rows = [];
 

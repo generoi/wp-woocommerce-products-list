@@ -13,7 +13,9 @@ use WP_REST_Request;
  * Duplicate a product the way the classic list's "Duplicate" link does:
  * a draft copy named "… (Copy)" with its variations, through
  * WC_Admin_Duplicate_Product, which REST requests have to include
- * themselves. The copy's id is returned as `new_id`.
+ * themselves. The copy's id is returned as `new_id`, and logged as the
+ * row's new value (field `duplicate`) with the copy's title in the
+ * context, so History can name and link what a duplicate produced.
  *
  * The copy is created inside a REST request, where WooCommerce's product
  * data store takes a "SKU lock" before it saves a product with a SKU
@@ -80,7 +82,11 @@ final class Duplicate implements Action
             ));
         }
 
-        return ['new_id' => $copy->get_id()];
+        return [
+            'new_id' => $copy->get_id(),
+            'changes' => ['duplicate' => [null, $copy->get_id()]],
+            'context' => ['new_id' => $copy->get_id(), 'new_title' => $copy->get_name()],
+        ];
     }
 
     /**

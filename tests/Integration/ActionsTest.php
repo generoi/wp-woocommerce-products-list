@@ -4,6 +4,7 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 
 use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\Actions\Duplicate;
+use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Table;
 use WC_Product;
 use WP_Error;
@@ -111,9 +112,24 @@ class ActionsTest extends RestTestCase
         $this->assertStringContainsString('Saga wide toe boot', $copy->get_name());
         $this->assertNotSame('DUP', $copy->get_sku());
 
+        // The log names the copy: History can link to it.
         $rows = $this->rows();
         $this->assertCount(1, $rows);
-        $this->assertSame(['duplicate', '', 'ok'], [$rows[0]['action'], $rows[0]['field'], $rows[0]['status']]);
+        $this->assertSame(['duplicate', 'duplicate', null, (string) $newId, 'ok'], [$rows[0]['action'], $rows[0]['field'], $rows[0]['old_value'], $rows[0]['new_value'], $rows[0]['status']]);
+        $context = json_decode($rows[0]['context'], true);
+        $this->assertSame($newId, $context['new_id']);
+        $this->assertSame($copy->get_name(), $context['new_title']);
+        $this->assertSame([], $context['args']);
+
+        $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId()]));
+        $this->assertSame((string) $newId, $log['items'][0]['new_value']);
+        $this->assertSame(['id' => $newId, 'name' => $copy->get_name(), 'edit_link' => get_edit_post_link($newId, 'raw')], $log['items'][0]['related']);
+        $this->assertNull($this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $product->get_id(), 'action' => 'update']))['items'][0]['related'] ?? null);
+
+        // A duplicate row is not an update: a revert of the batch skips it.
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertSame('skipped', $data['results'][0]['code']);
+        $this->assertInstanceOf(WC_Product::class, wc_get_product($newId));
 
         // Variations are not duplicated on their own.
         $parent = $this->variableProduct(['38']);
@@ -392,5 +408,30 @@ class ActionsTest extends RestTestCase
         $this->assertCount(1, $rows);
         $this->assertSame(['i18n_copy', 'i18n.se.name', '', 'Saga wide toe boot', 'action'], [$rows[0]['action'], $rows[0]['field'], $rows[0]['old_value'], $rows[0]['new_value'], $rows[0]['source']]);
         $this->assertSame(['lang' => 'se'], json_decode($rows[0]['context'], true)['args']);
+    }
+
+    /**
+     * The refresh dispatches wc/v3 requests from inside the action
+     * request; once they are done the action request is the current one
+     * again for everything that still runs on it, and nothing is current
+     * after it.
+     */
+    public function test_a_nested_dispatch_restores_the_outer_request(): void
+    {
+        $product = $this->simpleProduct();
+        $seen = [];
+
+        add_filter('rest_request_after_callbacks', static function ($response, $handler, WP_REST_Request $request) use (&$seen) {
+            $current = ListMode::request();
+            $seen[$request->get_route()] = [$current?->get_route(), ListMode::method(), ListMode::batchId()];
+
+            return $response;
+        }, 10, 3);
+
+        $this->act('publish', [$product->get_id()]);
+
+        $this->assertSame(['/wc/v3/products', 'GET', null], $seen['/wc/v3/products']);
+        $this->assertSame(['/wc-products-list/v1/actions/publish', 'POST', $this->batchId()], $seen['/wc-products-list/v1/actions/publish']);
+        $this->assertNull(ListMode::request());
     }
 }
