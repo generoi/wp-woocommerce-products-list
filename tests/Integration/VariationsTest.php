@@ -199,10 +199,10 @@ class VariationsTest extends RestTestCase
     }
 
     /**
-     * The query budget of an expand: WooCommerce reads each variation's
-     * raw meta once (its own query, no cache to prime), everything else
-     * is primed per page. Pinned so a regression to a query per row for
-     * terms, posts or prices shows up here.
+     * The query budget of an expand: posts, meta, terms and WooCommerce's
+     * own raw meta cache are primed per page, so the count does not grow
+     * with the rows. Pinned so a regression to a query per row for
+     * terms, posts, raw meta or prices shows up here.
      */
     public function test_expanding_a_page_of_variations_stays_within_the_query_budget(): void
     {
@@ -222,6 +222,28 @@ class VariationsTest extends RestTestCase
         $this->assertCount(30, $this->data($response));
 
         $queries = $wpdb->num_queries - $before;
-        $this->assertLessThanOrEqual(30 + 30, $queries, "{$queries} queries for 30 variations");
+        $this->assertLessThanOrEqual(30, $queries, "{$queries} queries for 30 variations");
+    }
+
+    /**
+     * WooCommerce's raw meta read (`SELECT meta_id … WHERE post_id = N`)
+     * is answered from the primed cache: no such query per row.
+     */
+    public function test_expanding_variations_reads_raw_meta_once_for_the_page(): void
+    {
+        $parent = $this->variableProduct(['36', '37', '38', '39']);
+        $ids = $parent->get_children();
+        wp_cache_flush();
+
+        $perRow = '/meta_id, meta_key, meta_value\s+FROM \S*postmeta\s+WHERE post_id = \d+/';
+        $queries = $this->queriesMatching($perRow, function () use ($parent): void {
+            $this->assertStatus(200, $this->request('GET', '/wc/v3/products/'.$parent->get_id().'/variations', ['per_page' => 100, '_fields' => 'id,sku,regular_price']));
+        });
+
+        $this->assertSame([], $queries, implode("\n", $queries));
+
+        foreach ($ids as $id) {
+            $this->assertIsArray(wp_cache_get(\WC_Data::generate_meta_cache_key($id, 'products'), 'products'), "variation #{$id}");
+        }
     }
 }

@@ -15,7 +15,7 @@ use GeneroWP\ProductsList\ListMode;
 final class Table
 {
     /** Bump when the schema changes; dbDelta applies the difference. */
-    public const VERSION = '1';
+    public const VERSION = '2';
 
     public const OPTION = 'wc_products_list_log_version';
 
@@ -89,11 +89,13 @@ final class Table
   status varchar(10) NOT NULL DEFAULT 'ok',
   message text NOT NULL,
   context longtext NULL,
+  reverts varchar(64) NOT NULL DEFAULT '',
   PRIMARY KEY  (id),
   KEY batch_id (batch_id),
   KEY object_created (object_id,created_at),
   KEY user_id (user_id),
-  KEY created_at (created_at)
+  KEY created_at (created_at),
+  KEY reverts (reverts)
 ) {$collate};";
 
         dbDelta($sql);

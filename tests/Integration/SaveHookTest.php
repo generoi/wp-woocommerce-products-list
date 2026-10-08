@@ -285,24 +285,50 @@ class SaveHookTest extends RestTestCase
 
     public function test_rejected_saves_are_logged_as_errors(): void
     {
-        $this->simpleProduct(['sku' => 'TAKEN']);
+        $owner = $this->simpleProduct(['sku' => 'TAKEN', 'name' => 'Skinners Nocturna']);
         $product = $this->simpleProduct(['sku' => 'FREE']);
 
         $response = $this->request('POST', '/wc/v3/products/batch', [
             'update' => [['id' => $product->get_id(), 'sku' => 'TAKEN']],
         ]);
         $this->assertStatus(200, $response);
-        $this->assertArrayHasKey('error', $this->data($response)['update'][0]);
+        $error = $this->data($response)['update'][0]['error'];
+        // The message names the product that has the SKU.
+        $expected = sprintf('The SKU "TAKEN" is already used by "Skinners Nocturna" (#%d).', $owner->get_id());
+        $this->assertSame($expected, $error['message']);
 
         $rows = $this->rows();
         $this->assertCount(1, $rows);
         $this->assertSame('error', $rows[0]['status']);
         $this->assertSame('sku', $rows[0]['field']);
         $this->assertSame($product->get_id(), (int) $rows[0]['object_id']);
-        $this->assertNotSame('', $rows[0]['message']);
+        $this->assertSame($expected, $rows[0]['message']);
+        // What was there and what was tried.
+        $this->assertSame(['FREE', 'TAKEN'], [$rows[0]['old_value'], $rows[0]['new_value']]);
         $this->assertSame('product_invalid_sku', json_decode($rows[0]['context'], true)['code']);
 
         $this->assertSame('FREE', wc_get_product($product->get_id())->get_sku());
+    }
+
+    public function test_a_rejected_single_save_names_the_sku_owner_and_keeps_the_values(): void
+    {
+        $owner = $this->simpleProduct(['sku' => 'TAKEN', 'name' => 'Owner']);
+        $product = $this->simpleProduct(['sku' => 'FREE', 'regular_price' => '10']);
+
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['sku' => 'TAKEN', 'regular_price' => '12']);
+        $this->assertSame(400, $response->get_status());
+        $this->assertSame(sprintf('The SKU "TAKEN" is already used by "Owner" (#%d).', $owner->get_id()), $response->as_error()->get_error_message());
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame('', $rows[0]['field']);
+        $context = json_decode($rows[0]['context'], true);
+        $this->assertSame(['sku' => 'TAKEN', 'regular_price' => '12'], $context['attempted']);
+        $this->assertSame('FREE', $context['before']['sku']);
+
+        // A malformed SKU nobody owns keeps WooCommerce's own message.
+        $this->assertNull(Saves::skuOwnerMessage('NOBODY', $product->get_id()));
+        $this->assertNull(Saves::skuOwnerMessage('FREE', $product->get_id()));
     }
 
     public function test_a_generated_batch_id_groups_rows_when_the_header_is_missing(): void
@@ -527,5 +553,48 @@ class SaveHookTest extends RestTestCase
         }
 
         $this->assertSame([], array_values(array_intersect(array_keys($perChild), $children)), 'A variation was loaded with its own meta query: '.implode("\n", $single));
+    }
+
+    /**
+     * A list-mode products batch primes its items' posts, meta and raw meta
+     * up front (no per-item raw meta read) and deletes WooCommerce's
+     * global product transients once for the batch, not five times per item.
+     */
+    public function test_a_products_batch_primes_its_items_and_coalesces_transient_deletes(): void
+    {
+        $ids = [];
+
+        for ($i = 0; $i < 10; $i++) {
+            $ids[] = $this->simpleProduct(['sku' => 'P'.$i])->get_id();
+        }
+
+        wp_cache_flush();
+
+        $rawMeta = 0;
+        $featuredTransient = 0;
+        $filter = static function (string $query) use (&$rawMeta, &$featuredTransient): string {
+            if (preg_match('/meta_id, meta_key, meta_value\s+FROM \S*postmeta\s+WHERE post_id = \d+/', $query)) {
+                $rawMeta++;
+            }
+
+            if (str_contains($query, "option_name = '_transient_wc_featured_products'")) {
+                $featuredTransient++;
+            }
+
+            return $query;
+        };
+
+        add_filter('query', $filter);
+        $response = $this->request('POST', '/wc/v3/products/batch', [
+            'update' => array_map(static fn (int $id): array => ['id' => $id, 'featured' => true], $ids),
+        ], [], ['fields' => 'id,featured']);
+        remove_filter('query', $filter);
+
+        $this->assertStatus(200, $response);
+        $this->assertSame(array_fill(0, 10, true), array_column($this->data($response)['update'], 'featured'));
+        $this->assertSame(0, $rawMeta, 'raw meta reads before the saves');
+        // delete_transient() is a SELECT (and a DELETE when it exists): once for the batch.
+        $this->assertLessThanOrEqual(2, $featuredTransient);
+        $this->assertCount(10, $this->rows());
     }
 }

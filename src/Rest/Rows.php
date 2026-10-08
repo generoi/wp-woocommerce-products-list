@@ -73,6 +73,7 @@ final class Rows
         add_filter('the_posts', [$this, 'primeVariationTerms'], 10, 2);
         add_filter('the_posts', [$this, 'primeChildTransients'], 10, 2);
         add_filter('the_posts', [$this, 'primeSummaries'], 10, 2);
+        add_filter('the_posts', [$this, 'primeRawMeta'], 10, 2);
         add_filter('woocommerce_get_variation_prices_hash', [$this, 'primeChildren'], 10, 2);
         add_action('woocommerce_before_product_object_save', [$this, 'primeChildrenBeforeSave']);
         add_action('rest_api_init', [$this, 'registerSchema']);
@@ -575,6 +576,87 @@ final class Rows
 
         _prime_post_caches($ids, true, true);
         self::primeTermRelationships($ids, self::variationTaxonomies());
+        // Not WooCommerce's raw meta cache: the price and save paths read
+        // the children through get_post_meta(), never their meta objects.
+    }
+
+    /**
+     * `the_posts` of a list-mode product or variation query: WooCommerce's
+     * own raw meta cache of every row, in one query. `WC_Data::read_meta_data()`
+     * keeps a cache of its own (with meta ids, which the core meta cache
+     * lacks) and reads it with one query per object when it misses, which
+     * the wc/v3 controllers trigger for each row even when `_fields` leaves
+     * `meta_data` out: 100 one-row queries on an expanded page.
+     *
+     * @param  mixed  $posts
+     * @param  mixed  $query
+     * @return mixed
+     */
+    public function primeRawMeta($posts, $query = null)
+    {
+        if (! is_array($posts) || $posts === [] || ! $query instanceof \WP_Query || ! ListMode::active() || ListMode::method() !== 'GET') {
+            return $posts;
+        }
+
+        if (! in_array($query->get('post_type'), ['product', 'product_variation'], true)) {
+            return $posts;
+        }
+
+        $ids = [];
+
+        foreach ($posts as $post) {
+            $id = is_object($post) ? (int) ($post->ID ?? 0) : (int) $post;
+
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        self::primeRawMetaOf($ids);
+
+        return $posts;
+    }
+
+    /**
+     * Fill WooCommerce's raw meta cache (`WC_Data::prime_raw_meta_data_cache()`,
+     * group `products`) for the objects that are not in it yet, with one
+     * query. Rows are stored unfiltered, as the data store reads them;
+     * `read_meta_data()` filters cached rows again on every load.
+     *
+     * @param  array<int, int>  $ids
+     */
+    public static function primeRawMetaOf(array $ids): void
+    {
+        global $wpdb;
+
+        if (! class_exists(\WC_Data::class)) {
+            return;
+        }
+
+        $missing = [];
+
+        foreach (array_unique(array_map('intval', $ids)) as $id) {
+            if ($id > 0 && ! is_array(wp_cache_get(\WC_Data::generate_meta_cache_key($id, 'products'), 'products'))) {
+                $missing[] = $id;
+            }
+        }
+
+        if ($missing === []) {
+            return;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($missing), '%d'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT post_id AS object_id, meta_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE post_id IN ({$placeholders}) ORDER BY meta_id", $missing));
+        $byId = array_fill_keys($missing, []);
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            $objectId = (int) $row->object_id;
+            unset($row->object_id);
+            $byId[$objectId][] = $row;
+        }
+
+        \WC_Data::prime_raw_meta_data_cache($byId, 'products');
     }
 
     /**

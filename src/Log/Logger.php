@@ -18,7 +18,7 @@ use GeneroWP\ProductsList\ListMode;
  * @phpstan-type Row array{
  *     batch_id: string, created_at: string, user_id: int, source: string, action: string,
  *     object_type: string, object_id: int, parent_id: int, field: string,
- *     old_value: ?string, new_value: ?string, status: string, message: string, context: ?string
+ *     old_value: ?string, new_value: ?string, status: string, message: string, context: ?string, reverts: string
  * }
  */
 final class Logger
@@ -38,6 +38,9 @@ final class Logger
     private static ?string $generatedBatchId = null;
 
     private static ?string $source = null;
+
+    /** The batch a revert in progress puts back; stored on every row it writes. */
+    private static string $reverts = '';
 
     private static bool $hooked = false;
 
@@ -118,6 +121,16 @@ final class Logger
         self::$source = $source === null ? null : self::normaliseSource($source);
     }
 
+    /**
+     * Mark the rows written from now on as the revert of a batch (`''`
+     * to stop). Not per request: the revert writes through nested wc/v3
+     * requests, whose rows must carry it.
+     */
+    public static function setReverts(string $batchId): void
+    {
+        self::$reverts = substr($batchId, 0, 64);
+    }
+
     public static function normaliseSource(?string $source): string
     {
         $source = strtolower(trim((string) $source));
@@ -160,6 +173,7 @@ final class Logger
                 'status' => $status,
                 'message' => (string) ($row['message'] ?? ''),
                 'context' => is_array($context) ? (string) wp_json_encode($context) : (is_string($context) ? $context : null),
+                'reverts' => substr((string) ($row['reverts'] ?? self::$reverts), 0, 64),
             ];
 
             self::$buffer[] = $full;
@@ -215,7 +229,7 @@ final class Logger
     {
         global $wpdb;
 
-        $columns = ['batch_id', 'created_at', 'user_id', 'source', 'action', 'object_type', 'object_id', 'parent_id', 'field', 'old_value', 'new_value', 'status', 'message', 'context'];
+        $columns = ['batch_id', 'created_at', 'user_id', 'source', 'action', 'object_type', 'object_id', 'parent_id', 'field', 'old_value', 'new_value', 'status', 'message', 'context', 'reverts'];
         $placeholders = [];
         $values = [];
 

@@ -24,7 +24,8 @@ use WP_REST_Request;
  *
  * @phpstan-type Pending array{
  *     paths: array<int, string>, before: array<string, ?string>, creating: bool,
- *     object_id: int, object_type: string, parent_id: int, context: array<string, mixed>
+ *     object_id: int, object_type: string, parent_id: int, context: array<string, mixed>,
+ *     attempted: array<string, ?string>
  * }
  */
 final class Recorder
@@ -274,6 +275,7 @@ final class Recorder
             'object_type' => $product instanceof WC_Product_Variation ? 'variation' : 'product',
             'parent_id' => (int) $product->get_parent_id(),
             'context' => self::context($request, array_keys($body)),
+            'attempted' => self::attempted($body, $paths),
         ];
     }
 
@@ -337,7 +339,7 @@ final class Recorder
             $seen[$item['object_id']] = true;
             self::$loggedErrors[$item['object_id'].'|'.($error['code'] ?? '')] = true;
 
-            $rows[] = self::errorRow($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error);
+            $rows[] = self::errorRow($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error, $item['before'], $item['attempted']);
         }
 
         if ($errors !== []) {
@@ -358,7 +360,10 @@ final class Recorder
                 $body = $bodies[$id] ?? [];
                 $paths = self::paths($body);
 
-                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $parentId, false, $paths, self::context($request, array_keys($body)), $error);
+                $stored = $paths !== [] ? wc_get_product($id) : null;
+                $before = $stored instanceof WC_Product && $stored->get_id() > 0 ? self::snapshot($stored, $paths) : [];
+
+                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $parentId, false, $paths, self::context($request, array_keys($body)), $error, $before, self::attempted($body, $paths));
             }
         }
 
@@ -369,22 +374,93 @@ final class Recorder
      * @param  array<int, string>  $paths
      * @param  array<string, mixed>  $context
      * @param  array{code: string, message: string}|null  $error
+     * @param  array<string, ?string>  $before  stored values of the paths when the save was attempted
+     * @param  array<string, ?string>  $attempted  the values the request asked for
      * @return array<string, mixed>
      */
-    private static function errorRow(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error): array
+    private static function errorRow(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error, array $before = [], array $attempted = []): array
     {
+        $single = count($paths) === 1 ? $paths[0] : null;
+        $context += ['code' => $error['code'] ?? '', 'fields' => $paths];
+
+        // One error row per rejected item: with one field the values are
+        // the row's own columns, with several they ride along in the context.
+        if ($single === null && $attempted !== []) {
+            $context['before'] = $before;
+            $context['attempted'] = $attempted;
+        }
+
         return [
             'action' => $creating ? 'create' : 'update',
             'object_type' => $objectType,
             'object_id' => $objectId,
             'parent_id' => $parentId,
-            'field' => count($paths) === 1 ? $paths[0] : '',
-            'old_value' => null,
-            'new_value' => null,
+            'field' => $single ?? '',
+            'old_value' => $single !== null ? ($before[$single] ?? null) : null,
+            'new_value' => $single !== null ? ($attempted[$single] ?? null) : null,
             'status' => 'error',
             'message' => $error['message'] ?? __('The save was rejected.', 'wp-woocommerce-products-list'),
-            'context' => $context + ['code' => $error['code'] ?? '', 'fields' => $paths],
+            'context' => $context,
         ];
+    }
+
+    /**
+     * The values a request body asks for, per field path, in stored form
+     * (masked fields masked), so an error row shows what was tried.
+     *
+     * @param  array<string, mixed>  $body
+     * @param  array<int, string>  $paths
+     * @return array<string, ?string>
+     */
+    public static function attempted(array $body, array $paths): array
+    {
+        $values = [];
+
+        foreach ($paths as $path) {
+            $value = self::serialize(self::valueAt($body, $path));
+            $values[$path] = self::isMasked($path) ? self::mask($value) : $value;
+        }
+
+        return $values;
+    }
+
+    /**
+     * The value at a field path of a request body: `meta_data.{key}` is
+     * the entry with that key, other paths walk the nested keys.
+     *
+     * @param  array<string, mixed>  $body
+     */
+    private static function valueAt(array $body, string $path): mixed
+    {
+        $segments = explode('.', $path);
+
+        if ($segments[0] === 'meta_data') {
+            $key = implode('.', array_slice($segments, 1));
+
+            foreach (is_array($body['meta_data'] ?? null) ? $body['meta_data'] : [] as $meta) {
+                if (is_array($meta) && isset($meta['key']) && is_scalar($meta['key']) && (string) $meta['key'] === $key) {
+                    return $meta['value'] ?? null;
+                }
+            }
+
+            return null;
+        }
+
+        if (array_key_exists($path, $body)) {
+            return $body[$path];
+        }
+
+        $value = $body;
+
+        foreach ($segments as $segment) {
+            if (! is_array($value) || ! array_key_exists($segment, $value)) {
+                return null;
+            }
+
+            $value = $value[$segment];
+        }
+
+        return $value;
     }
 
     /**

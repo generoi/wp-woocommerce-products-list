@@ -110,7 +110,8 @@ class RecorderTest extends TestCase
         // Product 10 also has a duplicate row but is reverted, so only 30, 31, 41 and 42 are skipped.
         $this->assertSame([
             ['id' => 30, 'object_type' => 'product', 'action' => 'trash'],
-            ['id' => 31, 'object_type' => 'product', 'action' => 'update'],
+            // A failed change is reported as failed, not as its action.
+            ['id' => 31, 'object_type' => 'product', 'action' => 'failed'],
             ['id' => 41, 'object_type' => 'product', 'action' => 'i18n_copy'],
             ['id' => 42, 'object_type' => 'product', 'action' => 'restore'],
         ], $plan['skipped']);
@@ -237,5 +238,28 @@ class RecorderTest extends TestCase
             ['id' => 13, 'object_type' => 'product', 'action' => 'trash'],
             ['id' => 14, 'object_type' => 'product', 'action' => 'duplicate'],
         ], $objects['skipped']);
+    }
+
+    public function test_attempted_values_are_read_from_the_body_in_stored_form(): void
+    {
+        $body = [
+            'sku' => 'TAKEN',
+            'featured' => true,
+            'dimensions' => ['length' => '10'],
+            'meta_data' => [['key' => '_custom', 'value' => 'x']],
+            'i18n' => ['se' => ['name' => 'Ullsockor']],
+            'post_password' => 'secret',
+        ];
+        $paths = Recorder::paths($body);
+
+        $this->assertSame([
+            'sku' => 'TAKEN',
+            'featured' => 'true',
+            'dimensions' => '{"length":"10"}',
+            'meta_data._custom' => 'x',
+            'i18n.se.name' => 'Ullsockor',
+            'post_password' => Recorder::mask('secret'),
+        ], Recorder::attempted($body, $paths));
+        $this->assertSame(['missing' => null], Recorder::attempted($body, ['missing']));
     }
 }

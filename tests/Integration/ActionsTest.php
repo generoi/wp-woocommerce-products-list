@@ -78,6 +78,37 @@ class ActionsTest extends RestTestCase
         $this->assertSame('wc_products_list_not_trashed', $data['results'][0]['code']);
     }
 
+    /**
+     * A product trashed without a slug (a never-published draft, a fresh
+     * copy) must not come back as `__trashed`; one with a slug keeps it.
+     */
+    public function test_restore_does_not_leave_a_trashed_slug(): void
+    {
+        global $wpdb;
+
+        $draft = $this->simpleProduct(['status' => 'draft', 'name' => 'Organic Care (Copy)']);
+        $wpdb->update($wpdb->posts, ['post_name' => ''], ['ID' => $draft->get_id()]);
+        clean_post_cache($draft->get_id());
+        $published = $this->simpleProduct(['name' => 'Nocturna']);
+        $slug = get_post($published->get_id())->post_name;
+        $this->assertNotSame('', $slug);
+
+        $this->act('trash', [$draft->get_id(), $published->get_id()]);
+        $this->assertSame('__trashed', get_post($draft->get_id())->post_name);
+
+        $this->act('restore', [$draft->get_id(), $published->get_id()]);
+        $this->assertSame('draft', get_post_status($draft->get_id()));
+        $this->assertSame('', get_post($draft->get_id())->post_name);
+        $this->assertSame($slug, get_post($published->get_id())->post_name);
+
+        // A published product whose remembered slug is gone gets one from its title.
+        $this->act('trash', [$published->get_id()]);
+        delete_post_meta($published->get_id(), '_wp_desired_post_slug');
+        $this->act('restore', [$published->get_id()]);
+        $this->assertSame('publish', get_post_status($published->get_id()));
+        $this->assertSame($slug, get_post($published->get_id())->post_name);
+    }
+
     public function test_delete_is_permanent_and_takes_variations_along(): void
     {
         $parent = $this->variableProduct(['38', '39']);

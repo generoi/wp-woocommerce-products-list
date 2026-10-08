@@ -35,7 +35,6 @@ final class LogController
                 'action' => ['type' => 'string'],
                 'object_id' => ['type' => 'integer'],
                 'parent_id' => ['type' => 'integer'],
-                'batch' => ['type' => 'string'],
                 'search' => ['type' => 'string'],
             ],
         ]);
@@ -105,6 +104,7 @@ final class LogController
             'source' => ['type' => 'string'],
             'since' => ['type' => 'string'],
             'until' => ['type' => 'string'],
+            'batch' => ['type' => 'string', 'description' => 'A batch id, or the start of one (at least 4 characters, the short id History shows).'],
         ];
     }
 
@@ -162,6 +162,12 @@ final class LogController
             "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, MIN(source) AS source,
                 COUNT(*) AS row_count, COUNT(DISTINCT object_id) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
                 SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
+                SUM(status = 'error') AS errors,
+                COUNT(DISTINCT IF(object_type = 'product', object_id, NULL)) AS product_count,
+                COUNT(DISTINCT IF(object_type = 'variation', object_id, NULL)) AS variation_count,
+                COUNT(DISTINCT IF(object_type = 'variation', parent_id, NULL)) AS parent_count,
+                GROUP_CONCAT(DISTINCT action ORDER BY action SEPARATOR ',') AS actions,
+                MAX(reverts) AS reverts,
                 GROUP_CONCAT(DISTINCT field ORDER BY field SEPARATOR ',') AS fields
              FROM {$table} WHERE {$where}
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
@@ -171,6 +177,7 @@ final class LogController
 
         $rows = is_array($rows) ? $rows : [];
         $users = $this->users(array_column($rows, 'user_id'));
+        $revertedBy = $this->revertedBy(array_column($rows, 'batch_id'));
         $items = [];
 
         foreach ($rows as $row) {
@@ -184,7 +191,14 @@ final class LogController
                 'objects' => (int) $row['object_count'],
                 'users' => (int) $row['user_count'],
                 'fields' => array_values(array_filter(explode(',', (string) $row['fields']), static fn (string $field): bool => $field !== '')),
+                'actions' => array_values(array_filter(explode(',', (string) $row['actions']), static fn (string $action): bool => $action !== '')),
+                'products' => (int) $row['product_count'],
+                'variations' => (int) $row['variation_count'],
+                'parents' => (int) $row['parent_count'],
+                'errors' => (int) $row['errors'],
                 'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
+                'reverts' => (string) $row['reverts'] !== '' ? (string) $row['reverts'] : null,
+                'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
             ];
         }
 
@@ -204,7 +218,7 @@ final class LogController
         $table = Table::name();
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
 
         if (! is_array($rows) || $rows === []) {
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
@@ -223,7 +237,10 @@ final class LogController
             'chunk' => $chunk,
             'chunks' => array_chunk($ids, $chunk),
             'skipped' => $plan['skipped'],
+            // Rows of changes that failed when they were made: nothing to put back.
+            'failed' => count(array_filter($rows, static fn (array $row): bool => $row['status'] === 'error')),
             'revertable' => $ids !== [] && $users <= 1,
+            'reverted_by' => $this->revertedBy([$batchId])[$batchId] ?? null,
         ]);
     }
 
@@ -289,7 +306,8 @@ final class LogController
             $rows,
             is_string($fields) ? $fields : null,
             is_string($revertBatchId) ? $revertBatchId : null,
-            (bool) $request->get_param('force')
+            (bool) $request->get_param('force'),
+            $batchId
         ));
     }
 
@@ -337,6 +355,12 @@ final class LogController
             }
         }
 
+        if (is_string($request['batch']) && trim($request['batch']) !== '') {
+            [$condition, $value] = self::batchCondition(trim($request['batch']));
+            $where[] = $condition;
+            $values[] = $value;
+        }
+
         if (! $rowFilters) {
             return [implode(' AND ', $where), $values];
         }
@@ -346,11 +370,6 @@ final class LogController
                 $where[] = "{$param} = %d";
                 $values[] = (int) $request[$param];
             }
-        }
-
-        if (is_string($request['batch']) && $request['batch'] !== '') {
-            $where[] = 'batch_id = %s';
-            $values[] = $request['batch'];
         }
 
         foreach (['field', 'action'] as $param) {
@@ -376,6 +395,63 @@ final class LogController
         }
 
         return [implode(' AND ', $where), $values];
+    }
+
+    /**
+     * The WHERE condition of a `batch` filter: the whole id, or the start
+     * of one. History shows the first 8 characters of a UUID; a partial id
+     * of 4 to 35 id characters matches the batches it starts.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public static function batchCondition(string $batch): array
+    {
+        global $wpdb;
+
+        if (strlen($batch) >= 4 && strlen($batch) < 36 && preg_match('/^[0-9A-Za-z-]+$/', $batch)) {
+            return ['batch_id LIKE %s', $wpdb->esc_like($batch).'%'];
+        }
+
+        return ['batch_id = %s', $batch];
+    }
+
+    /**
+     * The latest revert of each of these batches: `{batch_id, created_at,
+     * created_at_gmt, user}` by the reverted batch's id. One query on the
+     * indexed `reverts` column.
+     *
+     * @param  array<int, mixed>  $batchIds
+     * @return array<string, array{batch_id: string, created_at: string, created_at_gmt: string, user: array{id: int, name: string}}>
+     */
+    private function revertedBy(array $batchIds): array
+    {
+        global $wpdb;
+
+        $batchIds = array_values(array_unique(array_filter(array_map('strval', $batchIds), static fn (string $id): bool => $id !== '')));
+
+        if ($batchIds === []) {
+            return [];
+        }
+
+        $table = Table::name();
+        $placeholders = implode(',', array_fill(0, count($batchIds), '%s'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT reverts, batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id FROM {$table} WHERE reverts IN ({$placeholders}) GROUP BY reverts, batch_id ORDER BY created_at DESC", $batchIds), ARRAY_A);
+        $rows = is_array($rows) ? $rows : [];
+        $users = $this->users(array_column($rows, 'user_id'));
+        $byBatch = [];
+
+        foreach ($rows as $row) {
+            // Newest first: the first revert seen of a batch is its latest.
+            $byBatch[(string) $row['reverts']] ??= [
+                'batch_id' => (string) $row['batch_id'],
+                'created_at' => $this->localIso((string) $row['created_at']),
+                'created_at_gmt' => $this->gmtIso((string) $row['created_at']),
+                'user' => $users[(int) $row['user_id']] ?? ['id' => (int) $row['user_id'], 'name' => ''],
+            ];
+        }
+
+        return $byBatch;
     }
 
     /**
@@ -428,6 +504,7 @@ final class LogController
         }
 
         $users = $this->users($userIds);
+        $revertedBy = $this->revertedBy(array_column($rows, 'batch_id'));
         $items = [];
 
         foreach ($rows as $row) {
@@ -460,6 +537,8 @@ final class LogController
                 'status' => (string) $row['status'],
                 'message' => (string) $row['message'],
                 'related' => $this->related($row),
+                'reverts' => ($row['reverts'] ?? '') !== '' ? (string) $row['reverts'] : null,
+                'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
             ];
         }
 

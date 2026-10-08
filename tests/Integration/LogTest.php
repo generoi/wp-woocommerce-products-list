@@ -8,6 +8,7 @@ use GeneroWP\ProductsList\Log\Prune;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Modules\Log;
 use GeneroWP\ProductsList\Plugin;
+use GeneroWP\ProductsList\Rest\LogController;
 
 /**
  * The log table, the logger and GET /log, GET /log/batches.
@@ -22,7 +23,7 @@ class LogTest extends RestTestCase
         $this->assertTrue(Table::installed());
 
         $indexes = array_unique(array_column($wpdb->get_results('SHOW INDEX FROM '.Table::name(), ARRAY_A), 'Key_name')); // phpcs:ignore
-        $this->assertEqualsCanonicalizing(['PRIMARY', 'batch_id', 'object_created', 'user_id', 'created_at'], array_values($indexes));
+        $this->assertEqualsCanonicalizing(['PRIMARY', 'batch_id', 'object_created', 'user_id', 'created_at', 'reverts'], array_values($indexes));
 
         // Idempotent.
         Table::install();
@@ -307,6 +308,58 @@ class LogTest extends RestTestCase
 
         $data = $this->data($this->request('GET', '/wc-products-list/v1/log/batches', ['source' => 'action']));
         $this->assertSame(['b2'], array_column($data['items'], 'batch_id'));
+    }
+
+    /**
+     * History shows the first 8 characters of a batch id; typing them
+     * finds the batch, in the log and in the batch list.
+     */
+    public function test_the_batch_filter_takes_the_start_of_an_id(): void
+    {
+        $product = $this->simpleProduct();
+        $a = '04f3e251-a30b-40a8-a97f-cee4cc45d63f';
+        $b = '04f3ffff-a30b-40a8-a97f-cee4cc45d63f';
+
+        $this->seed([
+            ['batch_id' => $a, 'object_id' => $product->get_id(), 'field' => 'regular_price', 'old_value' => '1', 'new_value' => '2'],
+            ['batch_id' => $a, 'object_id' => $product->get_id(), 'field' => 'sale_price', 'old_value' => '', 'new_value' => '1'],
+            ['batch_id' => $b, 'object_id' => $product->get_id(), 'field' => 'name', 'old_value' => 'a', 'new_value' => 'b'],
+        ]);
+
+        $log = fn (string $batch): array => $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $batch]));
+        $batches = fn (string $batch): array => $this->data($this->request('GET', '/wc-products-list/v1/log/batches', ['batch' => $batch]));
+
+        $this->assertSame(2, $log('04f3e251')['total']);
+        $this->assertSame(2, $log($a)['total']);
+        $this->assertSame(3, $log('04f3')['total']);
+        $this->assertSame([$a], array_column($batches('04F3E251')['items'], 'batch_id'));
+        // Too short to be meant as an id, and LIKE wildcards are literal.
+        $this->assertSame(0, $log('04f')['total']);
+        $this->assertSame(0, $log('04f3%')['total']);
+        $this->assertSame(['batch_id = %s', 'b1'], LogController::batchCondition('b1'));
+    }
+
+    /**
+     * A failed change is counted apart from the trash/restore rows a
+     * revert skips, and its row says what was tried.
+     */
+    public function test_the_revert_plan_counts_failed_changes_apart(): void
+    {
+        $product = $this->simpleProduct();
+        $batch = wp_generate_uuid4();
+
+        $this->seed([
+            ['batch_id' => $batch, 'object_id' => $product->get_id(), 'field' => 'menu_order', 'old_value' => '0', 'new_value' => '5'],
+            ['batch_id' => $batch, 'object_id' => 99999999, 'field' => 'menu_order', 'old_value' => null, 'new_value' => '5', 'status' => 'error', 'message' => 'Invalid ID.'],
+        ]);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$batch));
+        $this->assertSame(1, $plan['failed']);
+        $this->assertSame([['id' => 99999999, 'object_type' => 'product', 'action' => 'failed']], $plan['skipped']);
+        $this->assertNull($plan['reverted_by']);
+
+        $summary = $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0];
+        $this->assertSame(1, $summary['errors']);
     }
 
     public function test_log_requires_the_capability(): void

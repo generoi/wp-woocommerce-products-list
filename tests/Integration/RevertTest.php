@@ -137,6 +137,29 @@ class RevertTest extends RestTestCase
         $this->assertSame(3, $batches['total']);
         $this->assertSame('revert', $batches['items'][0]['source']);
         $this->assertTrue($batches['items'][0]['revertable']);
+
+        // Each revert names the batch it put back, and that batch says who reverted it (the latest revert).
+        $byId = array_column($batches['items'], null, 'batch_id');
+        $this->assertSame($data['batch_id'], $byId[$batches['items'][0]['batch_id']]['reverts']);
+        $this->assertSame($batches['items'][0]['batch_id'], $byId[$data['batch_id']]['reverted_by']['batch_id']);
+        $this->assertSame(get_current_user_id(), $byId[$data['batch_id']]['reverted_by']['user']['id']);
+        $original = $byId[$this->batchId()];
+        $this->assertSame($data['batch_id'], $original['reverted_by']['batch_id']);
+        $this->assertNull($original['reverts']);
+        // What it was: 2 variations of 1 product and 1 product.
+        $this->assertSame([1, 2, 1, 0], [$original['products'], $original['variations'], $original['parents'], $original['errors']]);
+        $this->assertSame(['update'], $original['actions']);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $this->assertSame($data['batch_id'], $plan['reverted_by']['batch_id']);
+
+        // Log rows carry both as well.
+        $rows = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId()]))['items'];
+        $this->assertSame($data['batch_id'], $rows[0]['reverted_by']['batch_id']);
+        $rows = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $data['batch_id']]))['items'];
+        $this->assertSame($this->batchId(), $rows[0]['reverts']);
+        // That revert was itself reverted above.
+        $this->assertSame($batches['items'][0]['batch_id'], $rows[0]['reverted_by']['batch_id']);
     }
 
     public function test_only_update_rows_revert_and_array_fields_round_trip(): void
@@ -145,7 +168,8 @@ class RevertTest extends RestTestCase
         $trashed = $this->simpleProduct();
         $term = wp_insert_term('Boots', 'product_cat');
         $this->assertIsArray($term);
-        $original = $product->get_category_ids();
+        // Read back: WooCommerce files a product without categories under the default one on save.
+        $original = wc_get_product($product->get_id())->get_category_ids();
 
         $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), [
             'categories' => [['id' => $term['term_id']]],

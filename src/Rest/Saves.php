@@ -67,7 +67,106 @@ final class Saves
             Recorder::forgetLoggedErrors();
         }
 
+        if (ListMode::active() && $request->get_method() !== 'GET') {
+            self::primeBatch($request);
+            self::deferTransients($request);
+        }
+
         return $response;
+    }
+
+    /** @var array<int, true> requests (spl_object_id) whose transient deletions are deferred */
+    private static array $deferring = [];
+
+    /**
+     * WooCommerce deletes nine product transients on every save of a
+     * product, five times per save (two queries each, most of them for
+     * transients that do not exist): about fifty queries per item of a
+     * products batch. Its variations batch coalesces them into one
+     * deletion at the end of the request (`ProductTransientsDeferrer`);
+     * a list-mode products batch gets the same.
+     */
+    private static function deferTransients(WP_REST_Request $request): void
+    {
+        $deferrer = self::transientsDeferrer();
+
+        if ($deferrer === null || ! preg_match('#^/wc/v3/products/batch$#', $request->get_route())) {
+            return;
+        }
+
+        $deferrer->start_deferring();
+        self::$deferring[spl_object_id($request)] = true;
+    }
+
+    private static function stopDeferringTransients(WP_REST_Request $request): void
+    {
+        $key = spl_object_id($request);
+
+        if (! isset(self::$deferring[$key])) {
+            return;
+        }
+
+        unset(self::$deferring[$key]);
+        self::transientsDeferrer()?->stop_deferring();
+    }
+
+    /**
+     * WooCommerce's deferrer (internal API, WooCommerce 10.x+); null when
+     * the installed version has none, and the saves delete as they go.
+     */
+    private static function transientsDeferrer(): ?object
+    {
+        $deferrer = self::fromContainer('Automattic\\WooCommerce\\Internal\\Caches\\ProductTransientsDeferrer');
+
+        return $deferrer !== null && method_exists($deferrer, 'start_deferring') && method_exists($deferrer, 'stop_deferring') ? $deferrer : null;
+    }
+
+    /**
+     * A service of WooCommerce's container by class name, null when the
+     * class or the container is missing. By name: the internal classes
+     * looked up here are not in the WooCommerce stubs.
+     */
+    private static function fromContainer(string $class): ?object
+    {
+        if (! class_exists($class) || ! function_exists('wc_get_container')) {
+            return null;
+        }
+
+        try {
+            return wc_get_container()->get($class);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * A list-mode batch write loads every item twice before saving it (the
+     * recorder's snapshot and WooCommerce's own object), each load a post,
+     * a meta and a raw meta query of its own. Warm all three caches for
+     * the batch's items in three queries; WooCommerce invalidates each
+     * object's caches when it saves it, so nothing stale is read.
+     */
+    public static function primeBatch(WP_REST_Request $request): void
+    {
+        if (! str_ends_with($request->get_route(), '/batch')) {
+            return;
+        }
+
+        $body = array_merge($request->get_body_params(), $request->get_json_params() ?: []);
+        $ids = [];
+
+        foreach (is_array($body['update'] ?? null) ? $body['update'] : [] as $item) {
+            if (is_array($item) && isset($item['id']) && (int) $item['id'] > 0) {
+                $ids[] = (int) $item['id'];
+            }
+        }
+
+        if ($ids === []) {
+            return;
+        }
+
+        _prime_post_caches($ids, true, true);
+        Rows::primeRawMetaOf($ids);
     }
 
     /**
@@ -77,11 +176,117 @@ final class Saves
      */
     public static function afterRequest($response, $handler, WP_REST_Request $request)
     {
+        self::stopDeferringTransients($request);
+
+        if ($request->get_method() !== 'GET' && ListMode::active()) {
+            $response = self::nameSkuOwners($response, $request);
+        }
+
         if ($request->get_method() !== 'GET' && (Recorder::hasPending() || ListMode::active())) {
             Recorder::abandon($response, $request);
         }
 
         return $response;
+    }
+
+    /** WooCommerce's code for a SKU that is malformed or already taken. */
+    public const SKU_ERROR = 'product_invalid_sku';
+
+    /**
+     * WooCommerce rejects a taken SKU with "Invalid or duplicated SKU."
+     * and no word on who has it. In list mode the message names the
+     * product that owns the SKU, in the response and so in the log row.
+     *
+     * @param  mixed  $response  a WP_Error, a WP_REST_Response or a batch handler's plain array
+     * @return mixed
+     */
+    public static function nameSkuOwners($response, WP_REST_Request $request)
+    {
+        $body = array_merge($request->get_body_params(), $request->get_json_params() ?: []);
+
+        if (is_wp_error($response)) {
+            if ($response->get_error_code() === self::SKU_ERROR) {
+                $message = self::skuOwnerMessage($body['sku'] ?? null, (int) ($request['id'] ?? 0));
+
+                if ($message !== null) {
+                    return new \WP_Error(self::SKU_ERROR, $message, $response->get_error_data());
+                }
+            }
+
+            return $response;
+        }
+
+        $isResponse = $response instanceof \WP_REST_Response;
+        $data = $isResponse ? $response->get_data() : $response;
+
+        if (! is_array($data) || ! is_array($data['update'] ?? null) || ! is_array($body['update'] ?? null)) {
+            return $response;
+        }
+
+        $skus = [];
+
+        foreach ($body['update'] as $item) {
+            if (is_array($item) && isset($item['id'])) {
+                $skus[(int) $item['id']] = $item['sku'] ?? null;
+            }
+        }
+
+        $changed = false;
+
+        foreach ($data['update'] as $index => $item) {
+            if (! is_array($item) || ($item['error']['code'] ?? null) !== self::SKU_ERROR) {
+                continue;
+            }
+
+            $id = (int) ($item['id'] ?? 0);
+            $message = self::skuOwnerMessage($skus[$id] ?? null, $id);
+
+            if ($message !== null) {
+                $data['update'][$index]['error']['message'] = $message;
+                $changed = true;
+            }
+        }
+
+        if (! $changed) {
+            return $response;
+        }
+
+        if ($isResponse) {
+            $response->set_data($data);
+
+            return $response;
+        }
+
+        return $data;
+    }
+
+    /**
+     * "SKU "X" is already used by "Name" (#123)." or null when no other
+     * product has the SKU (it was rejected for its form, not as a duplicate).
+     */
+    public static function skuOwnerMessage(mixed $sku, int $id): ?string
+    {
+        if (! is_scalar($sku) || trim((string) $sku) === '') {
+            return null;
+        }
+
+        $sku = trim((string) $sku);
+        $owner = (int) wc_get_product_id_by_sku($sku);
+
+        if ($owner <= 0 || $owner === $id) {
+            return null;
+        }
+
+        $product = wc_get_product($owner);
+        $name = $product instanceof WC_Product ? $product->get_name() : '';
+
+        return sprintf(
+            /* translators: 1: SKU, 2: product name, 3: product id */
+            __('The SKU "%1$s" is already used by "%2$s" (#%3$d).', 'wp-woocommerce-products-list'),
+            $sku,
+            $name,
+            $owner
+        );
     }
 
     /**

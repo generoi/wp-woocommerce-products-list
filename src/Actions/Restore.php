@@ -54,8 +54,42 @@ final class Restore implements Action
             $status = $previous;
         }
 
+        self::restoreSlug($product->get_id(), $status);
+
         wc_delete_product_transients($product->get_id());
 
         return ['changes' => ['status' => ['trash', $status]]];
+    }
+
+    /**
+     * Undo the `__trashed` suffix core leaves behind. `wp_trash_post()`
+     * appends it to the slug and remembers the old one, but a product that
+     * never had a slug (a draft, a fresh copy) is remembered as '', which
+     * `wp_untrash_post()` does not restore: the product comes back as
+     * `__trashed` and would be published at /product/__trashed/. A draft
+     * gets its slug back empty (WordPress derives one when it is
+     * published); a published product a unique one from its title.
+     */
+    public static function restoreSlug(int $id, string $status): void
+    {
+        $post = get_post($id);
+
+        if ($post === null || ! preg_match('/__trashed(-\d+)?$/', (string) $post->post_name)) {
+            return;
+        }
+
+        $slug = '';
+
+        if (! in_array($status, ['draft', 'pending', 'auto-draft'], true)) {
+            $base = preg_replace('/__trashed(-\d+)?$/', '', (string) $post->post_name);
+            $base = $base !== '' && $base !== null ? $base : sanitize_title((string) $post->post_title);
+            $slug = wp_unique_post_slug($base !== '' ? $base : (string) $id, $id, $status, (string) $post->post_type, (int) $post->post_parent);
+        }
+
+        global $wpdb;
+
+        // Directly: wp_update_post() would run every save hook of the product again for one column.
+        $wpdb->update($wpdb->posts, ['post_name' => $slug], ['ID' => $id]);
+        clean_post_cache($id);
     }
 }

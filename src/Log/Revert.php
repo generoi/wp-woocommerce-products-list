@@ -106,7 +106,8 @@ final class Revert
             }
 
             if (! self::revertable($action) || ($row['status'] ?? 'ok') !== 'ok' || $field === '') {
-                $skipped[$type.':'.$id] ??= ['id' => $id, 'object_type' => $type, 'action' => $action];
+                // A failed change wrote nothing: it is reported as such, not as its action.
+                $skipped[$type.':'.$id] ??= ['id' => $id, 'object_type' => $type, 'action' => ($row['status'] ?? 'ok') === 'error' && self::revertable($action) ? 'failed' : $action];
 
                 continue;
             }
@@ -292,14 +293,41 @@ final class Revert
      * @param  array<int, array<string, mixed>>  $rows  the batch's log rows (of the chunk's objects)
      * @param  ?string  $batchId  the revert batch id; generated when null (one per chunked revert, kept by the app)
      * @param  bool  $force  write even where the field was changed again since the batch
+     * @param  string  $reverts  the batch being reverted, stored on the rows the revert writes (`reverts` column)
      * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
      */
-    public static function apply(array $rows, ?string $fields = null, ?string $batchId = null, bool $force = false): array
+    public static function apply(array $rows, ?string $fields = null, ?string $batchId = null, bool $force = false, string $reverts = ''): array
+    {
+        if ($reverts === '') {
+            $reverts = (string) ($rows[0]['batch_id'] ?? '');
+        }
+
+        Logger::setReverts($reverts);
+
+        try {
+            return self::write($rows, $fields, $batchId, $force);
+        } finally {
+            Logger::setReverts('');
+        }
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
+     */
+    private static function write(array $rows, ?string $fields, ?string $batchId, bool $force): array
     {
         $plan = self::plan($rows);
         $batchId = $batchId !== null && $batchId !== '' ? $batchId : wp_generate_uuid4();
         $results = [];
         $items = [];
+
+        if (! $force && $plan['final'] !== []) {
+            // One load per object for the conflict check: warm the caches for all of them.
+            $ids = array_map('intval', array_keys($plan['final']));
+            _prime_post_caches($ids, true, true);
+            Rows::primeRawMetaOf($ids);
+        }
 
         if (! $force) {
             foreach ($plan['final'] as $id => $final) {
@@ -341,6 +369,7 @@ final class Revert
                 'message' => match ($item['action']) {
                     'delete' => __('Permanently deleted products cannot be restored.', 'wp-woocommerce-products-list'),
                     'masked' => __('Passwords are not stored in the log and cannot be reverted.', 'wp-woocommerce-products-list'),
+                    'failed' => __('This change failed when it was made; there is nothing to revert.', 'wp-woocommerce-products-list'),
                     default => sprintf(
                         /* translators: %s: action name */
                         __('"%s" rows are not reverted.', 'wp-woocommerce-products-list'),
