@@ -156,7 +156,8 @@ describe( 'visibleEditFields', () => {
 			{
 				items: [ simple( 1 ), simple( 4 ) ],
 				options: bulk,
-				expect: { has: [ 'name', 'regular_price', 'sale_price', 'featured', 'i18n:se.name' ], not: [ 'sku' ] },
+				// A translated name identifies one product: never offered in bulk (it would be copied onto every row).
+				expect: { has: [ 'name', 'regular_price', 'sale_price', 'featured' ], not: [ 'sku', 'i18n:se.name' ] },
 			},
 		];
 

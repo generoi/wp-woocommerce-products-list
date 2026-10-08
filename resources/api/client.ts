@@ -296,14 +296,60 @@ function mergeBatch< Item >( into: BatchResponse< Item >, part: BatchResponse< I
 	};
 }
 
+export interface BatchOptions extends RequestOptions {
+	/**
+	 * The wc/v3 fields each returned row is trimmed to (`?fields=`, read by
+	 * Rows::trimBatchItem on list-mode batch writes). Not `_fields`: core
+	 * would trim `{update: [...]}` itself and the app would get `{}`.
+	 */
+	fields?: string[];
+}
+
+function batchPath( path: string, options?: BatchOptions ): string {
+	return addQueryArgs( path, options?.fields?.length ? { fields: options.fields.join( ',' ) } : {} );
+}
+
+/**
+ * wc/v3's batch routes need `edit_others_products` (woocommerce_rest_cannot_batch)
+ * even for one row. A user who may only edit their own products saves a
+ * single row through `POST products/{id}` instead; the result is shaped as a
+ * batch response so callers never notice.
+ */
+async function singleWrite< Raw extends { id: number } >( path: string, body: { id: number } & Record< string, unknown >, options?: BatchOptions ): Promise< BatchResponse< Raw > > {
+	const { id, ...data } = body;
+
+	try {
+		const row = await request< Raw >( {
+			path: addQueryArgs( path, options?.fields?.length ? { _fields: options.fields.join( ',' ) } : {} ),
+			method: 'POST',
+			data,
+			...listMode( options ),
+		} );
+
+		return { update: [ { ...row, id: row.id ?? id } ] };
+	} catch ( error ) {
+		const apiError = error instanceof ApiError ? error : null;
+
+		return { update: [ { id, error: { code: apiError?.code ?? 'request_failed', message: error instanceof Error ? error.message : String( error ), data: {} } } ] };
+	}
+}
+
+function singleWritesOnly(): boolean {
+	return getSettings().caps.editOthers === false;
+}
+
 /** `products/batch` in sequential chunks of `limits.batchSize`, one batch id. */
-export async function batchProducts( update: ProductUpdate[], options?: RequestOptions ): Promise< BatchResponse< RawProduct > > {
+export async function batchProducts( update: ProductUpdate[], options?: BatchOptions ): Promise< BatchResponse< RawProduct > > {
 	const batchId = options?.batchId ?? newBatchId();
 	let result: BatchResponse< RawProduct > = { update: [] };
 
+	if ( update.length === 1 && update[ 0 ] && singleWritesOnly() ) {
+		return singleWrite< RawProduct >( `${ PRODUCTS }/${ update[ 0 ].id }`, update[ 0 ], { ...options, batchId } );
+	}
+
 	for ( const part of chunk( update, getSettings().limits.batchSize ) ) {
 		const response = await request< BatchResponse< RawProduct > >( {
-			path: `${ PRODUCTS }/batch`,
+			path: batchPath( `${ PRODUCTS }/batch`, options ),
 			method: 'POST',
 			data: { update: part },
 			...listMode( { ...options, batchId } ),
@@ -317,14 +363,18 @@ export async function batchProducts( update: ProductUpdate[], options?: RequestO
 export async function batchVariations(
 	parentId: number,
 	update: VariationUpdate[],
-	options?: RequestOptions
+	options?: BatchOptions
 ): Promise< BatchResponse< RawVariation > > {
 	const batchId = options?.batchId ?? newBatchId();
 	let result: BatchResponse< RawVariation > = { update: [] };
 
+	if ( update.length === 1 && update[ 0 ] && singleWritesOnly() ) {
+		return singleWrite< RawVariation >( `${ PRODUCTS }/${ parentId }/variations/${ update[ 0 ].id }`, update[ 0 ], { ...options, batchId } );
+	}
+
 	for ( const part of chunk( update, getSettings().limits.batchSize ) ) {
 		const response = await request< BatchResponse< RawVariation > >( {
-			path: `${ PRODUCTS }/${ parentId }/variations/batch`,
+			path: batchPath( `${ PRODUCTS }/${ parentId }/variations/batch`, options ),
 			method: 'POST',
 			data: { update: part },
 			...listMode( { ...options, batchId } ),
@@ -392,6 +442,13 @@ export async function getLog( params: LogQuery, options?: RequestOptions ): Prom
 	} );
 
 	return { items: response.items ?? [], total: response.total ?? 0, totalPages: response.totalPages ?? 1 };
+}
+
+/** `GET /log/users`: who has log rows, for the History screen's User filter. */
+export async function getLogUsers( options?: RequestOptions ): Promise< Array< { id: number; name: string } > > {
+	const users = await request< Array< { id: number; name: string } > >( { path: `${ OWN }/log/users`, ...listMode( options ) } );
+
+	return Array.isArray( users ) ? users : [];
 }
 
 export async function getLogBatches( params: { page?: number; perPage?: number } = {} ): Promise< ListResult< LogBatch > > {

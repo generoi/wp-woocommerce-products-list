@@ -5,7 +5,7 @@
  * request is made; `invalidateProducts` is the slow, certain path.
  */
 import { useCallback, useEffect, useMemo } from '@wordpress/element';
-import { doAction } from '@wordpress/hooks';
+import { addAction, doAction } from '@wordpress/hooks';
 import { getCounts, listProducts } from '../api/client';
 import type { ListResult } from '../api/client';
 import { buildProductListQuery } from '../api/query';
@@ -13,7 +13,7 @@ import type { View } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
 import { invalidateVariations, patchVariationRows, removeVariationRows } from '../hierarchy/use-hierarchy';
 import { getSettings } from '../settings';
-import type { ProductField, ProductListItem, QueryParams } from '../types';
+import type { BatchResult, ProductField, ProductListItem, QueryParams } from '../types';
 import { cache, useQuery } from './query-cache';
 
 export const PRODUCTS_PREFIX = 'products:';
@@ -156,3 +156,89 @@ export function invalidateProducts( options: { counts?: boolean; variations?: bo
 export function invalidateCounts(): void {
 	cache.invalidate( COUNTS_KEY );
 }
+
+/** Ids of the products in any cached product page. */
+export function cachedProductIds(): Set< number > {
+	const ids = new Set< number >();
+
+	for ( const key of cache.keys( PRODUCTS_PREFIX ) ) {
+		for ( const item of cache.get< ListResult< ProductListItem > >( key )?.data?.items ?? [] ) {
+			if ( item._kind === 'product' ) {
+				ids.add( item.id );
+			}
+		}
+	}
+
+	return ids;
+}
+
+/**
+ * What WooCommerce derives on a variable parent from its variations: the
+ * price range, the on-sale flag, the stock summary. Refetched for the
+ * parents of saved variations so the parent row does not show a stale
+ * "From X" until a reload.
+ */
+export const PARENT_DERIVED_FIELDS = [
+	'id',
+	'type',
+	'price',
+	'regular_price',
+	'sale_price',
+	'on_sale',
+	'date_on_sale_from',
+	'date_on_sale_from_gmt',
+	'date_on_sale_to',
+	'date_on_sale_to_gmt',
+	'stock_status',
+	'stock_quantity',
+	'manage_stock',
+	'date_modified',
+	'date_modified_gmt',
+	'wc_products_list',
+] as const;
+
+function parentIdOf( row: ProductListItem ): number | undefined {
+	if ( row._kind === 'variation' && row._parentId ) {
+		return row._parentId;
+	}
+
+	const parent = ( row as { parent_id?: number } ).parent_id;
+
+	return row._kind !== 'product' && parent ? parent : undefined;
+}
+
+/** Refetch the derived fields of the parents of `rows` that are in a cached page, and patch them in. */
+export async function refreshParentsOf( rows: ProductListItem[], fetchList: typeof listProducts = listProducts ): Promise< number[] > {
+	const cached = cachedProductIds();
+	const parents = Array.from( new Set( rows.map( parentIdOf ).filter( ( id ): id is number => typeof id === 'number' && cached.has( id ) ) ) );
+
+	if ( ! parents.length ) {
+		return [];
+	}
+
+	const perPage = getSettings().limits.perPageMax;
+	const refreshed: number[] = [];
+
+	for ( let start = 0; start < parents.length; start += perPage ) {
+		const chunk = parents.slice( start, start + perPage );
+		const result = await fetchList( {
+			include: chunk.join( ',' ),
+			per_page: chunk.length,
+			status: 'any',
+			_fields: PARENT_DERIVED_FIELDS.join( ',' ),
+		} );
+
+		if ( result.items.length ) {
+			patchItems( result.items );
+			refreshed.push( ...result.items.map( ( item ) => item.id ) );
+		}
+	}
+
+	return refreshed;
+}
+
+addAction( ACTIONS.saved, 'wcProductsList/products/parents', ( result: BatchResult ) => {
+	if ( Array.isArray( result?.updated ) && result.updated.length ) {
+		void refreshParentsOf( result.updated ).catch( () => {} );
+	}
+} );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeItems, mergeReference, mergeValues, MIXED_LABEL } from '../../resources/edit/merge';
+import { mergeItems, mergeReference, mergeValues, MIXED_LABEL, MIXED_VALUE } from '../../resources/edit/merge';
 import { coreFields, field, placeholder, simple, variation } from './edit-fixtures';
 
 describe( 'mergeValues', () => {
@@ -56,6 +56,17 @@ describe( 'mergeItems', () => {
 		expect( mixed.featured?.isMixed ).toBe( true );
 		expect( data.status ).toBe( 'publish' );
 		expect( mixed.status?.isMixed ).toBe( false );
+	} );
+
+	it( 'gives a mixed select the Mixed sentinel instead of an empty string (which a select renders as its first option)', () => {
+		const stock = field( 'stock_status', { elements: [ { value: 'instock', label: 'In stock' }, { value: 'outofstock', label: 'Out of stock' } ] } );
+		const { data, mixed } = mergeItems( [ simple( 1, { stock_status: 'instock' } ), simple( 2, { stock_status: 'outofstock' } ) ], [ stock ] );
+
+		expect( data.stock_status ).toBe( MIXED_VALUE );
+		expect( mixed.stock_status?.isMixed ).toBe( true );
+		expect( mergeItems( [ simple( 1, { stock_status: 'instock' } ), simple( 2, { stock_status: 'instock' } ) ], [ stock ] ).data.stock_status ).toBe( 'instock' );
+		// Text and array fields keep the neutral fallback.
+		expect( mergeItems( [ simple( 1, { name: 'a' } ), simple( 2, { name: 'b' } ) ], fields ).data.name ).toBe( '' );
 	} );
 
 	it( 'reads extension values through rest.read, flat under the field id', () => {

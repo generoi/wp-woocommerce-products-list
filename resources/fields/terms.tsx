@@ -12,28 +12,86 @@ import { field, valueOf } from './helpers';
 
 const termCache = new Map< string, Promise< Option[] > >();
 
-/** All terms of a taxonomy as `{value: id, label}` (paged to the end, cached). */
+export const TERMS_STORAGE_PREFIX = 'wcProductsList.terms.';
+
+/** How long a stored term list serves filter chips before it is fetched again (ms). */
+export const TERMS_STORAGE_TTL = 60 * 1000;
+
+interface StoredTerms {
+	at: number;
+	terms: Option[];
+}
+
+function storage(): Pick< Storage, 'getItem' | 'setItem' | 'removeItem' > | null {
+	try {
+		return typeof window !== 'undefined' ? window.sessionStorage : null;
+	} catch {
+		return null;
+	}
+}
+
+export function readStoredTerms( taxonomy: string, now: number = Date.now() ): Option[] | null {
+	try {
+		const raw = storage()?.getItem( TERMS_STORAGE_PREFIX + taxonomy );
+		const parsed = raw ? ( JSON.parse( raw ) as StoredTerms ) : null;
+
+		if ( ! parsed || ! Array.isArray( parsed.terms ) || typeof parsed.at !== 'number' || now - parsed.at > TERMS_STORAGE_TTL ) {
+			return null;
+		}
+
+		return parsed.terms;
+	} catch {
+		return null;
+	}
+}
+
+function storeTerms( taxonomy: string, terms: Option[] ): void {
+	try {
+		storage()?.setItem( TERMS_STORAGE_PREFIX + taxonomy, JSON.stringify( { at: Date.now(), terms } satisfies StoredTerms ) );
+	} catch {
+		// Full or unavailable store: the next load fetches again.
+	}
+}
+
+async function fetchTermElements( taxonomy: string ): Promise< Option[] > {
+	const out: Option[] = [];
+	let page = 1;
+	let totalPages = 1;
+
+	do {
+		const result = await getTerms( taxonomy, { page, perPage: 100 } );
+		out.push( ...result.items.map( ( term ) => ( { value: term.id, label: term.name } ) ) );
+		totalPages = result.totalPages;
+		page += 1;
+	} while ( page <= totalPages && page <= 20 );
+
+	return out;
+}
+
+/**
+ * All terms of a taxonomy as `{value: id, label}` (paged to the end, cached
+ * per page load). A copy younger than TERMS_STORAGE_TTL in sessionStorage
+ * answers at once, so a filter chip restored from the URL shows the term's
+ * name instead of its id while the list loads.
+ */
 export function termElements( taxonomy: string ): Promise< Option[] > {
 	let promise = termCache.get( taxonomy );
 
 	if ( ! promise ) {
-		promise = ( async () => {
-			const out: Option[] = [];
-			let page = 1;
-			let totalPages = 1;
+		const stored = readStoredTerms( taxonomy );
 
-			do {
-				const result = await getTerms( taxonomy, { page, perPage: 100 } );
-				out.push( ...result.items.map( ( term ) => ( { value: term.id, label: term.name } ) ) );
-				totalPages = result.totalPages;
-				page += 1;
-			} while ( page <= totalPages && page <= 20 );
+		promise = stored
+			? Promise.resolve( stored )
+			: fetchTermElements( taxonomy )
+					.then( ( terms ) => {
+						storeTerms( taxonomy, terms );
 
-			return out;
-		} )().catch( ( error ) => {
-			termCache.delete( taxonomy );
-			throw error;
-		} );
+						return terms;
+					} )
+					.catch( ( error ) => {
+						termCache.delete( taxonomy );
+						throw error;
+					} );
 		termCache.set( taxonomy, promise );
 	}
 
@@ -41,9 +99,16 @@ export function termElements( taxonomy: string ): Promise< Option[] > {
 }
 
 export function clearTermElements( taxonomy?: string ): void {
+	const store = storage();
+
 	if ( taxonomy ) {
 		termCache.delete( taxonomy );
+		store?.removeItem( TERMS_STORAGE_PREFIX + taxonomy );
 	} else {
+		for ( const key of Array.from( termCache.keys() ) ) {
+			store?.removeItem( TERMS_STORAGE_PREFIX + key );
+		}
+
 		termCache.clear();
 	}
 }

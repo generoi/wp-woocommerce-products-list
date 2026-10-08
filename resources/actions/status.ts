@@ -5,13 +5,14 @@
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { drafts, published } from '@wordpress/icons';
-import { batchProducts, batchVariations, newBatchId } from '../api/client';
+import { batchProducts, batchVariations, newBatchId, toRow } from '../api/client';
 import { invalidateProducts, patchItems } from '../store/products';
 import { isVariation, parentIdOf } from '../edit/field-value';
+import { withoutUntouchedImages } from '../edit/save-runner';
 import { isBatchItemError } from '../types';
 import type { BatchResponse, ProductAction, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
-import { canEdit, errorMessage, isRealRow, realRows } from './context';
+import { canEdit, dropFromSelection, errorMessage, isRealRow, realRows } from './context';
 import { notify } from './notices';
 
 type Patch = Partial< ProductListItem > & { id: number };
@@ -24,13 +25,17 @@ interface OptimisticOptions {
 	success: ( count: number ) => string;
 }
 
-/** Patch now, send the batch, roll back the rows that failed. */
-export async function optimisticBatch( items: ProductListItem[], options: OptimisticOptions ): Promise< void > {
+/** Patch now, send the batch, roll back the rows that failed. Resolves with the ids that were updated. */
+export async function optimisticBatch( items: ProductListItem[], options: OptimisticOptions ): Promise< number[] > {
 	const rows = realRows( items );
 
 	if ( ! rows.length ) {
-		return;
+		return [];
 	}
+
+	// One row is a quick change, several are a bulk one: the log's source column says which.
+	const source = rows.length > 1 ? 'bulk' : 'quick';
+	const okIds: number[] = [];
 
 	const snapshots = new Map< number, Patch >();
 	const patches: Patch[] = [];
@@ -69,7 +74,7 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	const failed: Array< { id: number; message: string } > = [];
 	let ok = 0;
 
-	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: Patch[] ) => {
+	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: Patch[], parentId?: number ) => {
 		const seen = new Set< number >();
 
 		for ( const row of response.update ?? [] ) {
@@ -79,7 +84,9 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 				failed.push( { id: row.id, message: row.error.message } );
 			} else {
 				ok += 1;
-				patchItems( [ row as Patch ] );
+				okIds.push( row.id );
+				// The same normalisation as a list read (hierarchy keys, the `wcProductsList.item` filter), thumbnails kept.
+				patchItems( [ withoutUntouchedImages( toRow( row, parentId ) as unknown as Record< string, unknown >, sent.find( ( patch ) => patch.id === row.id ) ?? {} ) as unknown as Patch ] );
 			}
 		}
 
@@ -98,7 +105,7 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 
 	for ( const [ parentId, sent ] of byParent ) {
 		try {
-			absorb( await batchVariations( parentId, sent, { batchId, source: 'quick' } ), sent );
+			absorb( await batchVariations( parentId, sent, { batchId, source } ), sent, parentId );
 		} catch ( error ) {
 			fail( sent, error );
 		}
@@ -106,7 +113,7 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 
 	if ( products.length ) {
 		try {
-			absorb( await batchProducts( products, { batchId, source: 'quick' } ), products );
+			absorb( await batchProducts( products, { batchId, source } ), products );
 		} catch ( error ) {
 			fail( products, error );
 		}
@@ -131,6 +138,8 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	if ( options.refetch && ok ) {
 		invalidateProducts( { counts: true } );
 	}
+
+	return okIds;
 }
 
 function statusAction( context: ProductActionsContext, id: string, label: string, status: ProductStatus, eligible: ( item: ProductListItem ) => boolean, icon: unknown, success: ( count: number ) => string ): ProductAction {
@@ -146,7 +155,10 @@ function statusAction( context: ProductActionsContext, id: string, label: string
 				// On a status tab the rows leave the page; on "all" only the counts move.
 				refetch: true,
 				success,
-			} ).then( () => onActionPerformed?.( items ) );
+			} ).then( ( okIds ) => {
+				dropFromSelection( context, okIds );
+				onActionPerformed?.( items );
+			} );
 		},
 	};
 }
@@ -215,7 +227,10 @@ export const createEnableVariationAction: ActionFactory = ( context ) => {
 				refetch: false,
 				/* translators: %d: number of variations */
 				success: ( count ) => sprintf( _n( '%d variation enabled.', '%d variations enabled.', count, 'wp-woocommerce-products-list' ), count ),
-			} ).then( () => onActionPerformed?.( items ) );
+			} ).then( ( okIds ) => {
+				dropFromSelection( context, okIds );
+				onActionPerformed?.( items );
+			} );
 		},
 	};
 };
@@ -242,7 +257,10 @@ export const createDisableVariationAction: ActionFactory = ( context ) => {
 				refetch: false,
 				/* translators: %d: number of variations */
 				success: ( count ) => sprintf( _n( '%d variation disabled.', '%d variations disabled.', count, 'wp-woocommerce-products-list' ), count ),
-			} ).then( () => onActionPerformed?.( items ) );
+			} ).then( ( okIds ) => {
+				dropFromSelection( context, okIds );
+				onActionPerformed?.( items );
+			} );
 		},
 	};
 };

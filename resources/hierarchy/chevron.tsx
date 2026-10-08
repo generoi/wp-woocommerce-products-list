@@ -13,6 +13,7 @@ import { getItemId, isPlaceholderRow } from '../types/product';
 import type { ProductListItem } from '../types/product';
 import { useHierarchyView } from './context';
 import type { HierarchyViewValue } from './context';
+import type { ChildrenState } from './flatten';
 
 export const ROW_ID_PREFIX = 'wc-pl-row-';
 
@@ -69,7 +70,7 @@ export function Chevron( { item }: { item: ProductListItem } ) {
 			type="button"
 			className={ 'wc-pl-chevron' + ( expanded ? ' is-expanded' : '' ) + ( loading ? ' is-loading' : '' ) }
 			aria-expanded={ expanded }
-			aria-controls={ expanded ? controlledIds( item, state?.items ) : undefined }
+			aria-controls={ expanded ? controlledIds( item, state ) : undefined }
 			aria-label={ label }
 			title={ label }
 			onClick={ toggle }
@@ -92,13 +93,17 @@ function set( view: HierarchyViewValue, id: number, expanded: boolean ): void {
 	view.onChangeExpandedItemIds( expanded ? ( current.includes( id ) ? current : [ ...current, id ] ) : current.filter( ( other ) => other !== id ) );
 }
 
-function controlledIds( parent: ProductListItem, items?: ProductListItem[] ): string | undefined {
-	if ( items?.length ) {
-		return items.map( rowDomId ).join( ' ' );
+/** An IDREF list of what the button controls: the loaded rows, else the one placeholder row of the current state. */
+function controlledIds( parent: ProductListItem, state: ChildrenState | undefined ): string | undefined {
+	if ( state?.status === 'loaded' && state.items.length ) {
+		return state.items.map( rowDomId ).join( ' ' );
 	}
 
-	// While loading / on error the placeholder row is what the button controls.
-	return `${ ROW_ID_PREFIX }${ parent.id }-loading ${ ROW_ID_PREFIX }${ parent.id }-error`;
+	if ( state?.status === 'error' ) {
+		return `${ ROW_ID_PREFIX }${ parent.id }-error`;
+	}
+
+	return `${ ROW_ID_PREFIX }${ parent.id }-loading`;
 }
 
 export interface NameCellProps {
@@ -144,6 +149,15 @@ export function NameCell( { item, children }: NameCellProps ) {
 		<div id={ rowDomId( item ) } className={ `wc-pl-name wc-pl-name--level-${ level }` } style={ { '--wc-pl-level': level } as CSSProperties }>
 			{ level === 0 ? <Chevron item={ item } /> : <span className="wc-pl-chevron wc-pl-chevron--spacer" aria-hidden="true" /> }
 			<span className="wc-pl-name__content">{ children ?? item.name ?? '' }</span>
+			{ level > 0 && item._parentName && (
+				<span className="screen-reader-text">
+					{ sprintf(
+						/* translators: %s: the parent product's name */
+						__( '(variation of %s)', 'wp-woocommerce-products-list' ),
+						item._parentName
+					) }
+				</span>
+			) }
 		</div>
 	);
 }

@@ -66,7 +66,7 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 					  )
 					: sprintf(
 							/* translators: %d: number of products */
-							_n( 'Delete %d product permanently? This cannot be undone.', 'Delete %d products permanently? This cannot be undone.', rows.length, 'wp-woocommerce-products-list' ),
+							_n( 'Delete %d product permanently, with its variations? This cannot be undone.', 'Delete %d products permanently, with their variations? This cannot be undone.', rows.length, 'wp-woocommerce-products-list' ),
 							rows.length
 					  ) }
 			</p>
@@ -97,7 +97,8 @@ export const createDeleteAction: ActionFactory = ( { settings } ) => {
 		label: __( 'Delete permanently', 'wp-woocommerce-products-list' ),
 		supportsBulk: true,
 		scope: 'product',
-		isEligible: ( item ) => isRealRow( item ) && canDelete( item ),
+		// As in the classic list: only what is already in the Trash, unless the site opts in (`wc_products_list/allow_hard_delete`).
+		isEligible: ( item ) => isRealRow( item ) && canDelete( item ) && ( item.status === 'trash' || settings.features.hardDelete === true ),
 		RenderModal: DeleteModal,
 		modalHeader: __( 'Delete permanently', 'wp-woocommerce-products-list' ),
 		modalSize: 'small',

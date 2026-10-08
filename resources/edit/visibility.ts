@@ -77,10 +77,19 @@ export function isParentOwnedField( fieldOrId: ProductField | string ): boolean 
 	return PARENT_OWNED_FIELD_IDS.has( id ) || PARENT_OWNED_FIELD_IDS.has( leafOf( id ) );
 }
 
+/** Extension leaves that identify one product (a translated name or slug): never set on many rows at once. */
+export const BULK_UNSUPPORTED_EXTENSION_LEAVES: ReadonlySet< string > = new Set( [ 'name', 'slug' ] );
+
 export function isBulkUnsupportedField( fieldOrId: ProductField | string ): boolean {
 	const id = typeof fieldOrId === 'string' ? fieldOrId : fieldOrId.id;
+	const leaf = leafOf( id );
 
-	return BULK_UNSUPPORTED_FIELD_IDS.has( id ) || BULK_UNSUPPORTED_FIELD_IDS.has( leafOf( id ) );
+	if ( BULK_UNSUPPORTED_FIELD_IDS.has( id ) || BULK_UNSUPPORTED_FIELD_IDS.has( leaf ) ) {
+		return true;
+	}
+
+	// `i18n:de.name` is one product's German name; typing it into a bulk form would copy it onto every row.
+	return leaf !== id && BULK_UNSUPPORTED_EXTENSION_LEAVES.has( leaf );
 }
 
 export function isEditableField( field: ProductField ): boolean {

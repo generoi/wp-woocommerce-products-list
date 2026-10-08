@@ -33,7 +33,6 @@ interface Internal< T > {
 export interface FetchOptions {
 	/** When true (default) a fetch in flight for the key is reused; false aborts it and starts over. */
 	dedupe?: boolean;
-	keepPreviousData?: boolean;
 }
 
 export interface QueryCache {
@@ -87,12 +86,13 @@ export function createQueryCache(): QueryCache {
 			.forEach( ( item ) => store.delete( item.entry.key ) );
 	}
 
-	function run< T >( item: Internal< T >, fetcher: Fetcher< T >, keepPreviousData: boolean ): Promise< T > {
+	/** The entry keeps its data while the request runs; `useQuery` decides what to show meanwhile. */
+	function run< T >( item: Internal< T >, fetcher: Fetcher< T > ): Promise< T > {
 		item.controller?.abort();
 		const controller = new AbortController();
 		item.controller = controller;
 		item.fetcher = fetcher;
-		update( item, { isFetching: true, error: undefined, ...( keepPreviousData ? {} : {} ) } );
+		update( item, { isFetching: true, error: undefined } );
 
 		const promise = fetcher( controller.signal ).then(
 			( data ) => {
@@ -143,7 +143,7 @@ export function createQueryCache(): QueryCache {
 				return item.promise;
 			}
 
-			return run( item, fetcher, options.keepPreviousData ?? true );
+			return run( item, fetcher );
 		},
 
 		patch< T >( key: string, updater: ( data: T ) => T ) {
@@ -168,7 +168,7 @@ export function createQueryCache(): QueryCache {
 
 				if ( item.listeners.size > 0 && item.fetcher ) {
 					update( item, { isStale: true } );
-					void run( item, item.fetcher, true ).catch( () => {} );
+					void run( item, item.fetcher ).catch( () => {} );
 				} else {
 					item.controller?.abort();
 					store.delete( key );
@@ -273,17 +273,17 @@ export function useQuery< T >( key: string | null, fetcher: Fetcher< T >, option
 		const fresh = current?.data !== undefined && ( staleTime === undefined || Date.now() - current.updatedAt < staleTime );
 
 		if ( ! fresh && ! current?.isFetching ) {
-			cache.fetch( key, ( signal ) => fetcherRef.current( signal ), { keepPreviousData } ).catch( () => {} );
+			cache.fetch( key, ( signal ) => fetcherRef.current( signal ) ).catch( () => {} );
 		}
-	}, [ key, enabled, keepPreviousData, staleTime ] );
+	}, [ key, enabled, staleTime ] );
 
 	const refetch = useCallback( () => {
 		if ( ! key ) {
 			return Promise.reject( new Error( 'No key' ) );
 		}
 
-		return cache.fetch( key, ( signal ) => fetcherRef.current( signal ), { dedupe: false, keepPreviousData } );
-	}, [ key, keepPreviousData ] );
+		return cache.fetch( key, ( signal ) => fetcherRef.current( signal ), { dedupe: false } );
+	}, [ key ] );
 
 	const data = entry.data ?? ( keepPreviousData ? previous?.data : undefined );
 	const isFetching = Boolean( key && enabled ) && ( entry.isFetching || ( entry.data === undefined && ! entry.error ) );

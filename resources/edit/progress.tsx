@@ -46,9 +46,12 @@ export interface EditErrorsProps {
 	items: ProductListItem[];
 	fieldLabels: Record< string, string >;
 	title?: string;
+	/** `error` (default) or `warning` for a list the user may accept. */
+	status?: 'error' | 'warning';
+	className?: string;
 }
 
-export function EditErrors( { errors, items, fieldLabels, title }: EditErrorsProps ) {
+export function EditErrors( { errors, items, fieldLabels, title, status = 'error', className = 'wc-pl-edit__errors' }: EditErrorsProps ) {
 	if ( errors.length === 0 ) {
 		return null;
 	}
@@ -57,7 +60,7 @@ export function EditErrors( { errors, items, fieldLabels, title }: EditErrorsPro
 	const shown = errors.slice( 0, 50 );
 
 	return (
-		<Notice status="error" isDismissible={ false } className="wc-pl-edit__errors">
+		<Notice status={ status } isDismissible={ false } className={ className }>
 			<strong>
 				{ title ??
 					sprintf(

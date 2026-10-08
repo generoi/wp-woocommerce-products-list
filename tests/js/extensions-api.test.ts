@@ -43,7 +43,7 @@ function makeSettings( overrides: Partial< Settings > = {} ): Settings {
 		taxClasses: [],
 		shippingClasses: [],
 		taxonomies: [],
-		features: { cogs: false, brands: false, reviews: true },
+		features: { cogs: false, brands: false, reviews: true, hardDelete: false },
 		limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 50, actionBatchSize: 100 },
 		links: { admin: '', rest: '', page: '', history: '', legacyList: '', newProduct: '', editProduct: '', assets: '' },
 		fields: [],
@@ -104,6 +104,18 @@ describe( 'registries', () => {
 		} );
 		expect( normalizeRegisteredField( { id: 'meta.note' } ).rest.fields ).toEqual( [ 'meta' ] );
 		expect( () => registerField( { id: '' } ) ).toThrow( /id/ );
+	} );
+
+	it( 'offer a registered field as a filter only when the list query can map it', () => {
+		const base = { label: 'X', getValue: () => 1 };
+
+		expect( normalizeRegisteredField( { id: 'no_mapping', ...base } ).filterBy ).toBe( false );
+		expect( normalizeRegisteredField( { id: 'by_param', ...base, rest: { param: 'total_sales' } } ).filterBy ).toBeUndefined();
+		expect( normalizeRegisteredField( { id: 'by_to_params', ...base, rest: { toParams: () => ( {} ) } as never } ).filterBy ).toBeUndefined();
+		expect( normalizeRegisteredField( { id: 'by_elements', ...base, elements: [ { value: 'a', label: 'A', params: { max_price: 50 } } ] as never } ).filterBy ).toBeUndefined();
+		// An explicit choice is kept either way.
+		expect( normalizeRegisteredField( { id: 'explicit', ...base, filterBy: { operators: [ 'is' ] } } ).filterBy ).toEqual( { operators: [ 'is' ] } );
+		expect( normalizeRegisteredField( { id: 'off', ...base, rest: { param: 'x' }, filterBy: false } ).filterBy ).toBe( false );
 	} );
 
 	it( 'register actions and reject ones without a handler', () => {

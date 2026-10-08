@@ -25,7 +25,7 @@ import { createHistoryAction } from './history';
 import { notify } from './notices';
 import { createQuickEditAction } from './quick-edit';
 import { createRestoreAction } from './restore';
-import { createSelectVariationsAction } from './select-variations';
+import { createSelectOutOfStockVariationsAction, createSelectVariationsAction } from './select-variations';
 import { createDisableVariationAction, createDraftAction, createEnableVariationAction, createPublishAction } from './status';
 import { createTrashAction } from './trash';
 import { createViewAction } from './view';
@@ -38,6 +38,7 @@ const CORE: ActionFactory[] = [
 	createViewAction,
 	createExpandAction,
 	createSelectVariationsAction,
+	createSelectOutOfStockVariationsAction,
 	createPublishAction,
 	createDraftAction,
 	createEnableVariationAction,
@@ -132,7 +133,7 @@ function useStableHierarchy( hierarchy: Hierarchy ): Hierarchy {
 			getItemLevel: ( item ) => ref.current.getItemLevel( item ),
 			childrenOf: ( parentId ) => ref.current.childrenOf( parentId ),
 			variationIdsOf: ( ids ) => ref.current.variationIdsOf( ids ),
-			selectVariations: ( parentId, current ) => ref.current.selectVariations( parentId, current ),
+			selectVariations: ( parentId, current, where ) => ref.current.selectVariations( parentId, current, where ),
 		} ),
 		[]
 	);

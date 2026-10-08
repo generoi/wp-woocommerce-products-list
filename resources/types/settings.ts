@@ -92,7 +92,13 @@ export interface Settings {
 	taxClasses: Option[];
 	shippingClasses: Array< Option & { id: number } >;
 	taxonomies: TaxonomySettings[];
-	features: { cogs: boolean; brands: boolean; reviews: boolean };
+	features: {
+		cogs: boolean;
+		brands: boolean;
+		reviews: boolean;
+		/** "Delete permanently" offered on rows outside the Trash (`wc_products_list/allow_hard_delete`). */
+		hardDelete: boolean;
+	};
 	limits: Limits;
 	links: Links;
 	fields: DeclarativeField[];

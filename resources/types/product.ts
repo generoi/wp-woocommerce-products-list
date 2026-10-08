@@ -175,6 +175,8 @@ export interface ListItemMeta {
 	_level: 0 | 1;
 	/** null for a parent, the parent's id for a variation or placeholder. */
 	_parentId: number | null;
+	/** The parent's decoded name on a variation row (screen readers hear which product "Blue, 42" belongs to). */
+	_parentName?: string;
 	/** True for variable products with at least one variation. */
 	_hasChildren: boolean;
 	/** `wc_products_list.variation_count`, 0 when unknown. */

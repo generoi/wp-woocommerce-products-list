@@ -11,7 +11,7 @@ function dateField( id: 'date_created' | 'date_modified', label: string, sortPar
 		enableSorting: true,
 		filterBy: { operators: [ 'after', 'before' ] },
 		readOnly: true,
-		render: ( { item } ) => <DateCell value={ item[ id ] } />,
+		render: ( { item } ) => <DateCell value={ item[ id ] } gmt={ ( item as Record< string, unknown > )[ `${ id }_gmt` ] } />,
 		getValue: ( { item } ) => item[ id ] ?? '',
 		rest: { fields: [ id, `${ id }_gmt` ], param: id, sortParam, applies: { product: true, variation: true } },
 		edit: false,

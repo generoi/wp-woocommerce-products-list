@@ -10,7 +10,7 @@ function scheduleField( id: 'date_on_sale_from' | 'date_on_sale_to', label: stri
 		label,
 		enableSorting: false,
 		filterBy: false,
-		render: ( { item } ) => <DateCell value={ item[ id ] } withTime />,
+		render: ( { item } ) => <DateCell value={ item[ id ] } gmt={ ( item as Record< string, unknown > )[ `${ id }_gmt` ] } withTime />,
 		getValue: ( { item } ) => item[ id ] ?? '',
 		rest: { fields: [ id, `${ id }_gmt` ], applies: { product: true, variation: true } },
 		productTypes: [ ...SELLABLE_TYPES ],

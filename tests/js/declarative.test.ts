@@ -5,6 +5,7 @@ import {
 	actionFromDeclarative,
 	actionsFromSettings,
 	currencyForField,
+	defaultArgs,
 	fieldFromDeclarative,
 	fieldsFromSettings,
 	filterFromDeclarative,
@@ -36,7 +37,7 @@ function makeSettings( overrides: Partial< Settings > = {} ): Settings {
 		taxClasses: [],
 		shippingClasses: [],
 		taxonomies: [],
-		features: { cogs: false, brands: false, reviews: true },
+		features: { cogs: false, brands: false, reviews: true, hardDelete: false },
 		limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 50, actionBatchSize: 100 },
 		links: { admin: '', rest: '', page: '', history: '', legacyList: '', newProduct: '', editProduct: '', assets: '' },
 		fields: [],
@@ -460,6 +461,69 @@ describe( 'actionFromDeclarative', () => {
 		expect( run ).toHaveBeenCalledWith( [ 10 ], { lang: 'se', overwrite: false, note: 'hi' } );
 		expect( await screen.findByRole( 'alert' ) ).toHaveTextContent( 'Nope' );
 		expect( button ).toBeEnabled();
+	} );
+} );
+
+describe( 'action args', () => {
+	it( 'starts a required select on its first option, so what the user sees is what is sent', async () => {
+		const run = vi.fn().mockResolvedValue( { batch_id: 'b', results: [], items: [] } );
+		const action = actionFromDeclarative(
+			makeAction( {
+				label: 'Copy translations',
+				args: [
+					{ id: 'lang', label: 'To language', type: 'select', required: true, default: null, options: [ { value: 'se', label: 'Svenska' }, { value: 'en', label: 'English' } ] },
+					{ id: 'source', label: 'From language', type: 'select', required: false, default: 'fi', options: [ { value: 'fi', label: 'Suomi' }, { value: 'se', label: 'Svenska' } ] },
+				],
+			} ),
+			run
+		);
+		const { RenderModal } = action as { RenderModal: ( props: { items: ProductListItem[] } ) => JSX.Element };
+
+		render( createElement( RenderModal, { items: [ product() ] } ) );
+
+		const button = screen.getByRole( 'button', { name: 'Copy translations (1)' } );
+		expect( button ).toBeEnabled();
+		fireEvent.click( button );
+		expect( run ).toHaveBeenCalledWith( [ 10 ], { lang: 'se', source: 'fi' } );
+	} );
+
+	it( 'renders an array arg as a checkbox group and sends the chosen values as a list', async () => {
+		const run = vi.fn().mockResolvedValue( { batch_id: 'b', results: [], items: [] } );
+		const action = actionFromDeclarative(
+			makeAction( {
+				label: 'Copy translations',
+				args: [
+					{ id: 'fields', label: 'Fields', type: 'array', required: true, default: [ 'name' ], options: [ { value: 'name', label: 'Name' }, { value: 'slug', label: 'Slug' }, { value: 'description', label: 'Description' } ] },
+				],
+			} ),
+			run
+		);
+		const { RenderModal } = action as { RenderModal: ( props: { items: ProductListItem[] } ) => JSX.Element };
+
+		render( createElement( RenderModal, { items: [ product() ] } ) );
+
+		const button = screen.getByRole( 'button', { name: 'Copy translations (1)' } );
+		expect( screen.getByRole( 'checkbox', { name: 'Name' } ) ).toBeChecked();
+		expect( screen.getByRole( 'checkbox', { name: 'Slug' } ) ).not.toBeChecked();
+		expect( button ).toBeEnabled();
+
+		// Unticking everything blocks a required list.
+		fireEvent.click( screen.getByRole( 'checkbox', { name: 'Name' } ) );
+		expect( button ).toBeDisabled();
+
+		fireEvent.click( screen.getByRole( 'checkbox', { name: 'Name' } ) );
+		fireEvent.click( screen.getByRole( 'checkbox', { name: 'Slug' } ) );
+		fireEvent.click( button );
+		expect( run ).toHaveBeenCalledWith( [ 10 ], { fields: [ 'name', 'slug' ] } );
+	} );
+
+	it( 'defaultArgs parses list defaults and drops unknown options', () => {
+		const options = [ { value: 'name', label: 'Name' }, { value: 'slug', label: 'Slug' } ];
+
+		expect( defaultArgs( [ { id: 'f', label: 'F', type: 'array', required: false, default: 'name, slug, nope', options } ] ) ).toEqual( { f: [ 'name', 'slug' ] } );
+		expect( defaultArgs( [ { id: 'f', label: 'F', type: 'array', required: false, default: null, options } ] ) ).toEqual( { f: [] } );
+		expect( defaultArgs( [ { id: 'l', label: 'L', type: 'select', required: false, default: null, options } ] ) ).toEqual( { l: '' } );
+		expect( defaultArgs( [ { id: 'b', label: 'B', type: 'boolean', required: false, default: null, options: [] } ] ) ).toEqual( { b: false } );
 	} );
 } );
 

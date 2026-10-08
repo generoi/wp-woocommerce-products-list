@@ -3,6 +3,7 @@
  * differs: `rest.fields` is the id, the key exists on products only, every
  * product type, quick-editable in the "general" group.
  */
+import { memo } from '@wordpress/element';
 import type { Option, ProductField, ProductListItem } from '../types';
 
 type RestOverrides = Partial< ProductField[ 'rest' ] > & { applies?: Partial< ProductField[ 'rest' ][ 'applies' ] > };
@@ -13,11 +14,26 @@ export type FieldSpec = Omit< ProductField, 'rest' | 'productTypes' | 'edit' | '
 	edit?: ProductField[ 'edit' ];
 };
 
+/**
+ * DataViews re-renders every row whenever `data`, the selection or the
+ * view changes; a cell's output depends on its row and field alone, so a
+ * memoised render skips the rows that did not change (a 1000-row page
+ * with one expanded parent re-renders a few cells, not thousands).
+ */
+export function memoRender< Item >( render: ProductField< Item >[ 'render' ] ): ProductField< Item >[ 'render' ] {
+	if ( typeof render !== 'function' ) {
+		return render;
+	}
+
+	return memo( render as React.FunctionComponent< { item: Item; field: unknown } > ) as unknown as ProductField< Item >[ 'render' ];
+}
+
 export function field( spec: FieldSpec ): ProductField {
-	const { rest, productTypes, edit, ...rest_ } = spec;
+	const { rest, productTypes, edit, render, ...rest_ } = spec;
 
 	return {
 		...rest_,
+		...( render ? { render: memoRender( render ) } : {} ),
 		rest: {
 			fields: rest?.fields ?? [ spec.id ],
 			read: rest?.read,

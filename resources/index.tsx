@@ -9,6 +9,7 @@ import { ACTIONS } from './extensions/hooks';
 import { getSettings } from './settings';
 import { cache } from './store/query-cache';
 import { COUNTS_KEY, invalidateProducts, patchItems, PRODUCTS_PREFIX, VARIATIONS_PREFIX } from './store/products';
+import { getCurrentRows } from './store/rows';
 import type { BatchItemError, BatchResult, BatchUpdate, ProductListItem } from './types';
 import { isBatchItemError } from './types';
 import { createNoticesApi } from './ui/use-notices';
@@ -98,6 +99,7 @@ createExtensionApi( {
 	patchItems,
 	batchUpdate,
 	notices: createNoticesApi( dispatch ),
+	getItems: getCurrentRows,
 } );
 
 domReady( () => {

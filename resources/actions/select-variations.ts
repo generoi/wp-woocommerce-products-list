@@ -4,29 +4,32 @@
  * Needs the screen's `onChangeSelection`; without it the action is hidden.
  */
 import { __ } from '@wordpress/i18n';
-import type { ProductAction } from '../types';
-import type { ActionFactory } from './context';
+import type { ProductAction, VariationRow } from '../types';
+import type { ActionFactory, ProductActionsContext } from './context';
 import { idsOf, isRealRow } from './context';
 import { notify } from './notices';
 
-export const createSelectVariationsAction: ActionFactory = ( { hierarchy, onChangeSelection, selection } ) => {
+function selectVariationsAction( context: ProductActionsContext, id: string, label: string, where?: ( variation: VariationRow ) => boolean ): ProductAction | null {
+	const { hierarchy, onChangeSelection } = context;
+
 	if ( ! onChangeSelection ) {
 		return null;
 	}
 
-	const action: ProductAction = {
-		id: 'select-variations',
-		label: __( 'Select all variations', 'wp-woocommerce-products-list' ),
+	return {
+		id,
+		label,
 		supportsBulk: true,
 		scope: 'product',
 		isEligible: ( item ) => isRealRow( item ) && item._hasChildren,
 		callback: ( items ) => {
 			void ( async () => {
-				let current = selection ?? [];
+				// Read at call time: the action list is built once per field set.
+				let current = context.selection ?? [];
 
 				try {
-					for ( const id of idsOf( items ) ) {
-						current = await hierarchy.selectVariations( id, current );
+					for ( const parentId of idsOf( items ) ) {
+						current = await hierarchy.selectVariations( parentId, current, where );
 					}
 
 					onChangeSelection( current );
@@ -36,6 +39,10 @@ export const createSelectVariationsAction: ActionFactory = ( { hierarchy, onChan
 			} )();
 		},
 	};
+}
 
-	return action;
-};
+export const createSelectVariationsAction: ActionFactory = ( context ) => selectVariationsAction( context, 'select-variations', __( 'Select all variations', 'wp-woocommerce-products-list' ) );
+
+/** The restock case: only the sizes that are out of stock, so a bulk quantity applies to them alone. */
+export const createSelectOutOfStockVariationsAction: ActionFactory = ( context ) =>
+	selectVariationsAction( context, 'select-variations-outofstock', __( 'Select out-of-stock variations', 'wp-woocommerce-products-list' ), ( variation ) => variation.stock_status === 'outofstock' );

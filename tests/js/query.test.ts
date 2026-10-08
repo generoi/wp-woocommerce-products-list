@@ -7,7 +7,7 @@ import { setSettings } from '../../resources/settings';
 import type { ProductField } from '../../resources/types';
 import { sampleSettings } from './settings.test';
 
-const settings = sampleSettings( { features: { cogs: false, brands: true, reviews: true } } );
+const settings = sampleSettings( { features: { cogs: false, brands: true, reviews: true, hardDelete: false } } );
 
 function view( overrides: Partial< View > = {} ): View {
 	return { type: 'table', page: 1, perPage: 20, titleField: 'name', mediaField: 'images', fields: [ 'sku', 'price' ], ...overrides } as View;
@@ -26,7 +26,7 @@ describe( 'buildProductListQuery', () => {
 	it( 'requests the fixed core keys plus what the visible columns read', () => {
 		const query = buildProductListQuery( view(), 'all', fields, settings );
 
-		expect( query._fields ).toBe( 'id,images,name,on_sale,parent_id,permalink,price,regular_price,sale_price,sku,status,type,wc_products_list' );
+		expect( query._fields ).toBe( 'date_on_sale_from,date_on_sale_from_gmt,date_on_sale_to,id,images,name,on_sale,parent_id,permalink,price,regular_price,sale_price,sku,status,type,wc_products_list' );
 		expect( query.image_size ).toBe( 'thumbnail' );
 		expect( query.per_page ).toBe( 20 );
 		expect( query.page ).toBe( 1 );

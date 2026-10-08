@@ -89,13 +89,15 @@ export interface DeclarativeFilter {
 	source: string;
 }
 
-export type DeclarativeActionArgType = 'text' | 'select' | 'boolean' | 'integer' | 'number';
+export type DeclarativeActionArgType = 'text' | 'select' | 'boolean' | 'integer' | 'number' | 'array';
 
 export interface DeclarativeActionArg {
 	id: string;
 	label: string;
+	/** `array` is a multi-select over `options`, sent as a list of values. */
 	type: DeclarativeActionArgType;
 	required: boolean;
+	/** A required `select` without one defaults to its first option. */
 	default: unknown;
 	options: DeclarativeOption[];
 }

@@ -56,7 +56,7 @@ describe( 'createProductFields', () => {
 		expect( CORE_FIELD_IDS ).toEqual( expect.arrayContaining( ids ) );
 
 		const price = getField( fields, 'price' );
-		expect( price?.rest ).toMatchObject( { fields: [ 'price', 'regular_price', 'sale_price', 'on_sale' ], param: 'price', sortParam: 'price', applies: { product: true, variation: true } } );
+		expect( price?.rest ).toMatchObject( { fields: [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_from_gmt', 'date_on_sale_to' ], param: 'price', sortParam: 'price', applies: { product: true, variation: true } } );
 		expect( price?.edit ).toBe( false );
 
 		const categories = getField( fields, 'categories' );
@@ -71,7 +71,7 @@ describe( 'createProductFields', () => {
 	} );
 
 	it( 'adds brands and cost of goods when the features are on', () => {
-		const settings = sampleSettings( { features: { cogs: true, brands: true, reviews: true } } );
+		const settings = sampleSettings( { features: { cogs: true, brands: true, reviews: true, hardDelete: false } } );
 		setSettings( settings );
 		const fields = createProductFields( settings );
 

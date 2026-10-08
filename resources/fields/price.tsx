@@ -14,7 +14,12 @@ export function createPriceField( _settings: Settings ): ProductField {
 		readOnly: true,
 		render: PriceCell,
 		getValue: ( { item } ) => ( item.price === '' || item.price === undefined ? undefined : Number( item.price ) ),
-		rest: { fields: [ 'price', 'regular_price', 'sale_price', 'on_sale' ], param: 'price', sortParam: 'price', applies: { product: true, variation: true } },
+		rest: {
+			fields: [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_from_gmt', 'date_on_sale_to' ],
+			param: 'price',
+			sortParam: 'price',
+			applies: { product: true, variation: true },
+		},
 		edit: false,
 	} );
 }

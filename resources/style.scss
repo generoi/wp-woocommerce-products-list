@@ -107,6 +107,19 @@ $link: #2271b1;
 	gap: 4px;
 }
 
+// The toolbar count replaces DataViews' footer count, which counts every
+// row in `data` (expanded variations and placeholders included).
+.wc-products-list__count {
+	color: var(--wpds-color-foreground-content-neutral-muted, #757575);
+	font-size: 12px;
+	margin-inline-end: 8px;
+	white-space: nowrap;
+}
+
+.wc-products-list .dataviews-bulk-actions-footer__item-count {
+	display: none;
+}
+
 // The name column: the hierarchy's NameCell (indent, chevron, count) around the link.
 .wc-products-list__name-link {
 	text-decoration: none;
@@ -167,6 +180,16 @@ $link: #2271b1;
 .wc-products-list__stock {
 	white-space: nowrap;
 
+	&-qty {
+		margin-inline-start: 6px;
+		padding: 0 5px;
+		border-radius: 8px;
+		background: #f0f0f1;
+		color: $muted;
+		font-size: 11px;
+		font-variant-numeric: tabular-nums;
+	}
+
 	&--instock .wc-products-list__option {
 		color: #007017;
 	}
@@ -178,6 +201,28 @@ $link: #2271b1;
 	&--onbackorder .wc-products-list__option {
 		color: #996800;
 	}
+}
+
+// Taxonomy columns truncate to their column (the full list is the title),
+// so a long category list cannot push the money columns off screen.
+.wc-products-list__terms {
+	display: inline-block;
+	max-width: 240px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	vertical-align: bottom;
+}
+
+.wc-products-list__price-scheduled {
+	display: block;
+	font-size: 11px;
+	color: #996800;
+	white-space: nowrap;
+}
+
+.wc-products-list__stale-notice {
+	margin: 8px 12px 0;
 }
 
 .wc-products-list__option--empty,
@@ -244,6 +289,26 @@ $link: #2271b1;
 .wc-products-list__price-edit-suffix {
 	padding-inline-end: 8px;
 	color: $muted;
+}
+
+.wc-products-list-action-modal__group {
+	margin: 12px 0 0;
+	padding: 0;
+	border: 0;
+
+	&-label {
+		display: block;
+		margin-bottom: 6px;
+		font-size: 11px;
+		font-weight: 500;
+		text-transform: uppercase;
+		color: #1e1e1e;
+	}
+}
+
+.wc-products-list-action-modal__option {
+	display: block;
+	margin: 4px 0;
 }
 
 .wc-products-list__placeholder {

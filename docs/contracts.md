@@ -23,7 +23,8 @@ JS: `api/client.ts` installs an `apiFetch` middleware that adds both headers; th
 | Hook | Signature | Where |
 | --- | --- | --- |
 | `wc_products_list/modules` | `(class-string<Module>[] $modules): class-string<Module>[]` | `Plugin::boot` |
-| `wc_products_list/capability` | `(string $cap = 'edit_products'): string` | `Plugin::capability()`, menu + REST permission of own routes |
+| `wc_products_list/capability` | `(string $cap = 'edit_products'): string` | `Plugin::capability()`, menu + REST permission of own routes. The wc/v3 batch routes additionally need `edit_others_products` (see §3.1 Writes) |
+| `wc_products_list/allow_hard_delete` | `(bool $allow = false): bool` | `Bootstrap` → `features.hardDelete`: offer "Delete permanently" on rows outside the Trash |
 | `wc_products_list/active` | `(bool $active): bool` | `ListMode::active()` |
 | `wc_products_list/bootstrap` | `(array $settings): array` | `Bootstrap::settings()`, see §5 |
 | `wc_products_list/fields` | `(array $defs): array` | `Registry::fields()`, see §6 |
@@ -78,6 +79,7 @@ All own routes: namespace `wc-products-list/v1`, permission `current_user_can(Pl
 | `exclude_category`, `exclude_tag` | `tax_query` NOT IN |
 | `min_stock_quantity`, `max_stock_quantity` | `wc_product_meta_lookup.stock_quantity` |
 | `has_variations` | `1` → variable products with ≥1 variation; `0` → the rest |
+| `sale_scheduled` | `1` → a sale price with a start date in the future, on the product or on one of its variations (two EXISTS on postmeta); `0` → the rest. On the variations route: the variation's own sale (meta_query). The `on_sale` filter's "Sale scheduled" option. |
 | `orderby=sku|stock_quantity|menu_order` | lookup-table join; core already does `id,title,date,modified,price,popularity,rating,include,slug` |
 
 | `search_name_or_sku` | in list mode the plugin's own search, not WooCommerce's: tokens split on whitespace, each must match the product's name or SKU **or the SKU of one of its variations**. Rows are always products (WooCommerce's search lists matching variations as rows of their own). |
@@ -101,6 +103,10 @@ plus extension keys from `wc_products_list/row` (gds-woo-i18n: `"i18n": {"se": {
 `GET /wc/v3/products/{id}/variations?per_page=100&page=N&_fields=…` likewise enriched (`Rest\Rows` on `woocommerce_rest_prepare_product_variation_object`), ordered `menu_order, id` by default; `wc_products_list/variation_query_args` applies.
 
 Writes: `POST /wc/v3/products/{id}`, `POST /wc/v3/products/batch {update:[{id,…}]}` (≤100), `POST /wc/v3/products/{parent}/variations/batch {update:[…]}`. Extension keys in the body (`"i18n": {"se": {"name": "Saga"}}`) are handled by `wc_products_list/save`. Each changed field is logged (§4).
+
+On list-mode batch writes, `?fields=` (comma-separated wc/v3 fields; nested paths keep their top-level key; `id` always kept) trims each returned item row (`Rows::trimBatchItem`, priority 1000, so extension keys are included in the trim); error entries are untouched. Single writes use core `_fields`. `_fields` must not be used on the batch routes: core would trim `{update: [...]}` itself and the app would get `{}`. The app sends the registered fields' keys (`rowFields()`), so a 100-row save returns tens of KB instead of a megabyte.
+
+Capabilities: the screen and the plugin's own routes need `edit_products` (`wc_products_list/capability`); `POST products/{id}` needs `edit_post` on that product; `products/batch` and `variations/batch` need `edit_others_products` (WooCommerce answers `woocommerce_rest_cannot_batch` otherwise). `caps.editOthers` in the payload reflects it: without it the app saves one row through `POST products/{id}` / `variations/{id}` (api/client.ts) and disables bulk saves with a notice.
 
 ### 3.2 Counts
 
@@ -164,6 +170,8 @@ interface LogRow {
 }
 ```
 
+`GET /wc-products-list/v1/log/users` → `[{id, name}]`: every user with log rows, sorted by name (the History screen's User filter).
+
 `GET /wc-products-list/v1/log/batches?page=&per_page=` → `{"items": [{batch_id, created_at, user, source, rows: n, objects: n, fields: string[], revertable: bool}], total, totalPages}`.
 
 `POST /wc-products-list/v1/log/batch/{batch_id}/revert?fields=` → same shape as an action response (`results` per object, `items` trimmed to `fields`), written as a new batch with `source=revert`. Only `update` rows revert; trash/delete/duplicate rows are reported as skipped.
@@ -191,7 +199,7 @@ Returned by `Registry::fields()/filters()/actions()`; input via the filters in �
 | `type` | `text` | `text, html, price, integer, number, boolean, select, date, datetime, media, array` |
 | `description` | `''` | |
 | `path` | id | dot path into the row for the value (`i18n.se.name.value`) |
-| `reference` | null | dot path to a read-only companion value shown beside the control (`i18n.se.name.source`) |
+| `reference` | null | dot path to a read-only companion value shown beside the control (`i18n.se.name.source`); for a sale-price field it is also the regular price the sale < regular check falls back to when the field's own regular price is empty |
 | `writeKey` | first segment of `writePath` | top-level request key; its presence fires `wc_products_list/save` |
 | `writePath` | null (= `path`) | dot path in the request body the value is written to (`i18n.se.name`) |
 | `editable` | true | quick/bulk editable |
@@ -212,7 +220,7 @@ Returned by `Registry::fields()/filters()/actions()`; input via the filters in �
 
 **Filter** (`DeclarativeFilter`): `id, label, type (select|text|boolean|number|date), param (string|null), options [{value, label, params {…}}], operators ['is'], isPrimary, multiple, variations (also sent on variation requests), order, source`. An option's `params` are merged into the query verbatim (`{"gds_i18n[lang]": "se", "gds_i18n[status]": "missing"}`); without `params`, `{[param]: value}`.
 
-**Action** (`DeclarativeAction`): `id, label, description, icon (dashicon/wp icon name|null), scope (product|variation|both), supportsBulk true, isPrimary, destructive, confirm (string|null), capability (Caps key|null), group, order, args [{id, label, type (text|select|boolean|integer|number), required, default, options}], source`. The UI collects `args` in a modal when any exist, then `POST /actions/{id}`.
+**Action** (`DeclarativeAction`): `id, label, description, icon (dashicon/wp icon name|null), scope (product|variation|both), supportsBulk true, isPrimary, destructive, confirm (string|null), capability (Caps key|null), group, order, args [{id, label, type (text|select|boolean|integer|number|array), required, default, options}], source`. The UI collects `args` in a modal when any exist, then `POST /actions/{id}`. The form starts from each arg's `default`; a required `select` without one starts on its first option (what is shown is what is sent). `array` is a checkbox group over `options`, sent as a list of option values (`default` may be a list or a comma-separated string); `required` means at least one.
 
 ## 7. JS module boundaries
 
@@ -269,7 +277,11 @@ export function useCounts(): { counts: Record<string, number>; refetch(): Promis
 export function patchItems(items: Array<Partial<ProductListItem> & { id: number }>): void   // into every cached list + variations page, and the hierarchy's children store (patchVariationRows)
 export function removeItems(ids: number[]): void                                           // likewise (removeVariationRows)
 export function invalidateProducts(options?: { counts?: boolean; variations?: boolean }): void  // variations: also invalidateVariations() of the hierarchy
+export function refreshParentsOf(rows: ProductListItem[]): Promise<number[]>                 // GET products?include=…&_fields=PARENT_DERIVED_FIELDS for the cached parents of saved variations, then patchItems; runs on wcProductsList.saved
+export function cachedProductIds(): Set<number>
 ```
+
+`resources/store/rows.ts`: `setCurrentRows(rows)` (the Catalog screen, on every render of its rows) / `getCurrentRows()` (placeholders excluded) back `window.wcProductsList.getItems()`.
 
 ### `resources/fields/registry.ts`
 
@@ -311,12 +323,20 @@ export function useHierarchyContext(): ReturnType<typeof useHierarchy>
 ```ts
 export function mergeItems(items: ProductListItem[], fields: ProductField[]): { data: Record<string, unknown>; mixed: Record<string, { isMixed: boolean; isEmpty: boolean; placeholder: string }> }          // merge.ts
 export function visibleEditFields(fields: ProductField[], items: ProductListItem[], options: { mode: 'quick' | 'bulk'; applyToVariations: boolean }): ProductField[]   // visibility.ts
-export type NumericOp = { operation: 'dont_change' | 'set' | 'increase' | 'decrease'; value: string; percent?: boolean }
-export function applyNumericOp(current: string | number | null, op: NumericOp, kind: 'money' | 'integer', settings: Settings): string | null   // bulk-numeric.ts
-export function validateBulkNumericEdits(items: ProductListItem[], edits: Record<string, unknown>, fields: ProductField[], settings: Settings): Array<{ id: number; field: string; message: string }>
+export type NumericOp = { operation: 'dont_change' | 'set' | 'increase' | 'decrease' | 'regular_minus'; value: string; percent?: boolean }   // regular_minus: only for sale-price-leaf fields; percent = percent of the regular price
+export function applyNumericOp(current: string | number | null, op: NumericOp, kind: 'money' | 'integer', settings: Settings, context?: { regular?: number | null }): string | null   // bulk-numeric.ts; integer minor units, half-up rounding
+export function computeNumericOp(current, op, kind, settings, context?): number | null
+export function validateBulkNumericEdits(items: ProductListItem[], edits: Record<string, unknown>, fields: ProductField[], settings: Settings): Array<{ id: number; field: string; message: string }>   // via editsForItem(): sellable edits are never checked against a variable parent
+export function projectWarnings(items, edits, fields, settings): Array<{ id: number; field: string; message: string }>   // rows a decrease would clamp at 0
+export function editsForItem(item, edits, fields): Record<string, unknown>
+export function effectiveRegularPrice(item, regularId, valueOf, byId, settings): number | undefined   // the projected/current regular price, else the field's `reference`
+export function isSalePriceField(fieldOrId: ProductField | string): boolean
+export function toUnits(value: number, decimals: number): number; export function fromUnits(units: number, decimals: number): string
+export const MIXED_VALUE: unique symbol; export function hasOptionList(field: ProductField): boolean   // merge.ts: mixed option-list fields carry the sentinel; effectiveEdits drops it
 export function buildPayload(item: ProductListItem, edits: Record<string, unknown>, fields: ProductField[], settings: Settings): Record<string, unknown>   // payload.ts; applies wcProductsList.savePayload
-export function saveEdits(items: ProductListItem[], edits: Record<string, unknown>, fields: ProductField[], options: { applyToVariations: boolean; source: 'quick' | 'bulk'; onProgress?(done: number, total: number): void }): Promise<BatchResult>   // save.ts; variations first (per parent), then parents, one batchId
-export function useEditState(items: ProductListItem[], fields: ProductField[]): { data; edits; setField(id, value); reset(); isDirty }   // use-edit-state.ts
+export function saveEdits(items: ProductListItem[], edits: Record<string, unknown>, fields: ProductField[], options: { applyToVariations: boolean; source: 'quick' | 'bulk'; fields?: string[]; onProgress?(done: number, total: number): void; prefetchedVariations?: ReadonlyMap<number, ProductListItem[]> }): Promise<BatchResult>   // save.ts; variations first (per parent), then parents, one batchId; `fields` defaults to rowFields(fields) and trims the returned rows (?fields=)
+export interface SaveDeps { batchProducts(update, { batchId, source, fields? }); batchVariations(parentId, update, { batchId, source, fields? }); fetchVariations; patchItems; newBatchId(); batchSize; normalizeRow?(raw, parentId?) }   // save-runner.ts
+export function useEditState(items: ProductListItem[], fields: ProductField[], resetKey: string): { data; edits; setField(id, value); reset(); isDirty; hasInput }   // use-edit-state.ts; edits are dropped when resetKey (the selection) changes
 ```
 
 ### `resources/extensions/`
@@ -372,7 +392,9 @@ Names in `resources/extensions/hooks.ts`. All filters are applied with `applyFil
 
 ## 9. Speed budgets (completion criteria)
 
-List page (100 rows, `_fields` trimmed) < 1 s server time; expanding 100 variations < 1 s; 100-row bulk save < 5 s with progress; every mutation optimistic (`patchItems` before the request, rolled back on error); no page reloads; `build/index.js` ≤ 2 MB minified (currently 1.92 MB, 380 KB gzipped; lazy-load `edit/` before raising).
+List page (100 rows, `_fields` trimmed) < 1 s server time; expanding 100 variations < 1 s; 100-row bulk save < 5 s with progress; every mutation optimistic (`patchItems` before the request, rolled back on error); no page reloads; `build/index.js` ≤ 2 MB minified (currently 1.92 MB, 380 KB gzipped; lazy-load `edit/` before raising). Measured with `SCRIPT_DEBUG` off and Query Monitor inactive (README, "Measuring").
+
+Rendering rules that keep the budgets: cell renders are memoised (`field()` in `fields/helpers.ts` wraps `render` in `memo`; `fieldFromDeclarative` too), so a store change re-renders the rows that changed, not every cell; the children store publishes load progress through one coalesced emit per `EMIT_WINDOW` (40 ms), and per `EMIT_WINDOW_BULK` (1 s, plus one flush when the last load finishes) while `expandAll` runs, since a 100-parent page is one ~1,800-row table whose render costs more than any request; user gestures emit at once; variation loads are abortable (see §11) and run `MAX_CONCURRENT_REQUESTS` (6) at a time.
 
 ## 10. Testing contracts
 
@@ -410,11 +432,13 @@ const hierarchy = useHierarchy( parents, visibleFields );   // parents: level-0 
 
 `NameCell` (from `resources/hierarchy`) draws the indentation (`--wc-pl-level`), the chevron with the variation count for level-0 parents (a spacer otherwise), the `id="wc-pl-row-<id>"` the parent's `aria-controls` points at, and the loading / error (+ Retry) / "N more" placeholder content. Do not add a second count badge or padding around it. The chevron reads the `HierarchyViewContext` that `HierarchicalDataViews` provides; outside it (tests, previews) `NameCell` renders without a chevron.
 
-**Hook API** (`Hierarchy`, returned by `useHierarchy(parents, fields, options?)`): `rows`, `expandedItemIds`, `onChangeExpandedItemIds`, `isExpanded(id)`, `toggle(id)`, `expand(id)` (resolves when loaded), `collapse(id)`, `retry(id)`, `expandAll({ force? })` → `Promise<boolean>` (false when the user declined the > 2000 rows confirm), `collapseAll()`, `getItemParentId`, `getItemHasChildren`, `getItemLevel`, `childrenOf(id)`, `childrenState`, `variationIdsOf(parentIds)` (loaded children or `_fields=id` fetch, 4 requests in flight, cached per parent), `selectVariations(parentId, currentSelection)` → new selection ids (expands first: DataViews drops selected ids that are not in `data`). Options: `fetchVariations` (defaults to `api/client` `getVariations`), `maxChildren` (`limits.maxChildrenPerParent`), `confirmExpandAll`, `storage`.
+**Hook API** (`Hierarchy`, returned by `useHierarchy(parents, fields, options?)`): `rows`, `expandedItemIds`, `onChangeExpandedItemIds`, `isExpanded(id)`, `toggle(id)`, `expand(id)` (resolves when loaded), `collapse(id)`, `retry(id)`, `expandAll({ force? })` → `Promise<boolean>` (false when the user declined the > `EXPAND_ALL_WARN_ROWS` (600) rows confirm), `collapseAll()`, `getItemParentId`, `getItemHasChildren`, `getItemLevel`, `childrenOf(id)`, `childrenState`, `variationIdsOf(parentIds)` (loaded children or `_fields=id` fetch, `MAX_CONCURRENT_REQUESTS` in flight, cached per parent), `selectVariations(parentId, currentSelection, where?)` → new selection ids (expands first: DataViews drops selected ids that are not in `data`; `where(variation)` keeps only the matching ones, e.g. the out-of-stock). Options: `fetchVariations` (defaults to `api/client` `getVariations`), `maxChildren` (`limits.maxChildrenPerParent`), `confirmExpandAll`, `storage`. Module helpers: `abortLoad(parentId)`, `abortLoads()`, `loadingParentIds()`.
 
 `useHierarchyContext()` returns that object (throws outside `HierarchyProvider`); `useOptionalHierarchyContext()` returns null instead.
 
-**Variation loading.** `getVariations(parentId, page, { perPage: 100, fields })` where `fields` = `VARIATION_BASE_FIELDS` (`id,name,status,parent_id,attributes,image,sku,wc_products_list`) ∪ the visible fields' `rest.fields`. Page 1 first (gives the total), the rest in parallel through one limiter (4 in flight for the whole hierarchy), up to `ceil(min(total, maxChildren) / 100)` pages. Rows are normalised again with the parent row (`normalizeVariation(raw, parentRow)` copies `categories/tags/brands` read-only).
+**Variation loading.** `getVariations(parentId, page, { perPage: 100, fields })` where `fields` = `VARIATION_BASE_FIELDS` (`id,name,status,parent_id,attributes,image,sku,wc_products_list`) ∪ the visible fields' `rest.fields`. Page 1 first (gives the total) and published as soon as it arrives (status `loading`, the loading row below it), the rest in parallel through one limiter (4 in flight for the whole hierarchy), up to `ceil(min(total, maxChildren) / 100)` pages. Rows are normalised again with the parent row (`normalizeVariation(raw, parentRow)` copies `categories/tags/brands` read-only and sets `_parentName` for assistive tech).
+
+**Cancellation.** Every load has an `AbortController` whose signal reaches `fetchVariations`. Collapsing the parent (`collapse`, `collapseAll`, `onChangeExpandedItemIds` without it), the parent leaving `parents` (next page, tab, filter) and unmounting abort it; a queued page whose signal is aborted is dropped by the limiter without taking a slot (`createLimiter(n)(task, { isCancelled })`). An aborted parent goes back to `idle` (unless a newer load owns it), so the next expand refetches; it never shows the error row. Loaded children of parents that are neither expanded nor on the page are evicted beyond `MAX_CACHED_PARENTS` (60).
 
 **Children store.** Loaded variations live in a module-level store, not in the query cache, so `store/products.ts` must call, in addition to its cache patches:
 

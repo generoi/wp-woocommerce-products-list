@@ -1,8 +1,8 @@
-import { dateI18n } from '@wordpress/date';
 import { getSettings } from '../../settings';
+import { formatSiteDate } from '../site-date';
 
-/** A wc/v3 site-local ISO date in the site's date (and time) format. */
-export function DateCell( { value, withTime = false }: { value: unknown; withTime?: boolean } ) {
+/** A wc/v3 site-local ISO date (with its `_gmt` twin when the row has it) in the site's date (and time) format. */
+export function DateCell( { value, gmt, withTime = false }: { value: unknown; gmt?: unknown; withTime?: boolean } ) {
 	if ( typeof value !== 'string' || value === '' ) {
 		return <span className="wc-products-list__date wc-products-list__date--empty">—</span>;
 	}
@@ -12,7 +12,7 @@ export function DateCell( { value, withTime = false }: { value: unknown; withTim
 
 	return (
 		<time className="wc-products-list__date" dateTime={ value }>
-			{ dateI18n( format, value, settings.timezone ) }
+			{ formatSiteDate( format, value, typeof gmt === 'string' ? gmt : undefined, settings ) }
 		</time>
 	);
 }

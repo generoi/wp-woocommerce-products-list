@@ -13,7 +13,8 @@ export const PER_PAGE_SIZES = [ 20, 50, 100 ];
 
 export const DEFAULT_PER_PAGE = 20;
 
-export const DEFAULT_TABLE_FIELDS = [ 'status', 'type', 'sku', 'stock_status', 'categories', 'price', 'date_created' ];
+/** Money and stock before the wide taxonomy column, so they stay on screen at laptop widths. */
+export const DEFAULT_TABLE_FIELDS = [ 'sku', 'price', 'stock_status', 'status', 'type', 'categories', 'date_created' ];
 
 export const DEFAULT_LAYOUTS: SupportedLayouts = {
 	table: {
@@ -30,6 +31,9 @@ export const DEFAULT_LAYOUTS: SupportedLayouts = {
 				sku: { width: 140 },
 				stock_status: { width: 120 },
 				price: { width: 130, align: 'end' },
+				categories: { maxWidth: 260 },
+				tags: { maxWidth: 220 },
+				brands: { maxWidth: 200 },
 				date_created: { width: 130 },
 			},
 		},

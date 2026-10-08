@@ -67,6 +67,21 @@ export function rowFields( fields: ProductField[] ): string[] {
 	return Array.from( keys );
 }
 
+/** Rows an action has processed leave the selection, so the next action cannot silently target them again. */
+export function dropFromSelection( context: Pick< ProductActionsContext, 'selection' | 'onChangeSelection' >, ids: number[] ): void {
+	if ( ! context.onChangeSelection || ! ids.length ) {
+		return;
+	}
+
+	const done = new Set( ids.map( String ) );
+	const current = context.selection ?? [];
+	const kept = current.filter( ( id ) => ! done.has( id ) );
+
+	if ( kept.length !== current.length ) {
+		context.onChangeSelection( kept );
+	}
+}
+
 export interface ResultSummary {
 	ok: number[];
 	failed: Array< { id: number; message: string } >;

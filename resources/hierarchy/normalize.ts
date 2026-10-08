@@ -12,7 +12,7 @@
 import { decodeEntities } from '@wordpress/html-entities';
 import type { ListItemMeta, ProductListItem, ProductRow, RawAttribute, RawProduct, RawVariation, VariationRow } from '../types/product';
 
-const META_KEYS: ReadonlyArray< keyof ListItemMeta > = [ '_kind', '_level', '_parentId', '_hasChildren', '_childCount', '_placeholder', '_placeholderMessage' ];
+const META_KEYS: ReadonlyArray< keyof ListItemMeta > = [ '_kind', '_level', '_parentId', '_parentName', '_hasChildren', '_childCount', '_placeholder', '_placeholderMessage' ];
 
 /** The parent taxonomies a variation shows read-only. */
 const INHERITED_KEYS = [ 'categories', 'tags', 'brands' ] as const;
@@ -39,7 +39,7 @@ export function normalizeProduct( raw: RawProduct ): ProductRow {
  * @param raw    The wc/v3 variation (or an already normalised row).
  * @param parent The parent's id, or the parent row to copy taxonomies from.
  */
-export function normalizeVariation( raw: RawVariation, parent: number | ProductRow ): VariationRow {
+export function normalizeVariation( raw: RawVariation & { _parentName?: string }, parent: number | ProductRow ): VariationRow {
 	const parentRow = typeof parent === 'number' ? undefined : parent;
 	const parentId = typeof parent === 'number' ? parent : parent.id;
 	const inherited: Partial< Pick< RawProduct, ( typeof INHERITED_KEYS )[ number ] > > = {};
@@ -70,6 +70,8 @@ export function normalizeVariation( raw: RawVariation, parent: number | ProductR
 		_kind: 'variation',
 		_level: 1,
 		_parentId: parentId,
+		// For assistive tech: the row's name is just "Blue, 42".
+		_parentName: parentRow?.name ? decodeEntities( parentRow.name ) : raw._parentName,
 		_hasChildren: false,
 		_childCount: 0,
 	} as VariationRow;

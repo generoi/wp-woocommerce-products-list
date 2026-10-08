@@ -4,11 +4,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HierarchicalDataViews, HierarchyProvider, HierarchyViewProvider, NameCell, useHierarchyContext, withoutPlaceholderIds } from '../../resources/hierarchy';
 import {
 	EXPANDED_STORAGE_KEY,
+	MAX_CACHED_PARENTS,
+	MAX_CONCURRENT_REQUESTS,
 	createLimiter,
+	getChildrenState,
 	invalidateVariations,
+	loadingParentIds,
 	patchVariationRows,
 	removeVariationRows,
 	resetHierarchyStore,
+	subscribeChildren,
 	useHierarchy,
 } from '../../resources/hierarchy/use-hierarchy';
 import type { FetchVariations, VariationsResult } from '../../resources/hierarchy/use-hierarchy';
@@ -34,19 +39,25 @@ function rawVariation( parentId: number, n: number ): RawVariation {
 	return { id: parentId * 1000 + n, sku: `S${ n }`, status: 'publish', attributes: [ { id: 1, name: 'Size', option: String( n ) } ] };
 }
 
-/** A fake server: `counts[parentId]` variations, paginated like wc/v3. */
+/** A fake server: `counts[parentId]` variations, paginated like wc/v3; honours the abort signal like fetch does. */
 function fakeFetch( counts: Record< number, number >, options: { delay?: number; fail?: Set< number > } = {} ) {
-	const calls: Array< { parentId: number; page: number; perPage: number; fields: string[] } > = [];
+	const calls: Array< { parentId: number; page: number; perPage: number; fields: string[]; signal?: AbortSignal } > = [];
 	let active = 0;
 	let maxActive = 0;
 
-	const fetch: FetchVariations = async ( parentId, page, { perPage, fields } ) => {
-		calls.push( { parentId, page, perPage, fields } );
+	const fetch: FetchVariations = async ( parentId, page, { perPage, fields, signal } ) => {
+		calls.push( { parentId, page, perPage, fields, signal } );
 		active += 1;
 		maxActive = Math.max( maxActive, active );
 
 		try {
-			await new Promise( ( resolve ) => setTimeout( resolve, options.delay ?? 0 ) );
+			await new Promise< void >( ( resolve, reject ) => {
+				const timer = setTimeout( resolve, options.delay ?? 0 );
+				signal?.addEventListener( 'abort', () => {
+					clearTimeout( timer );
+					reject( Object.assign( new Error( 'aborted' ), { name: 'AbortError' } ) );
+				} );
+			} );
 
 			if ( options.fail?.has( parentId ) ) {
 				throw new Error( `Boom ${ parentId }` );
@@ -241,11 +252,12 @@ describe( 'useHierarchy', () => {
 		await waitFor( () => expect( result.current.rows.map( getItemId ) ).toEqual( [ '7', '7001' ] ) );
 	} );
 
-	it( 'expands all variable products on the page with at most 4 requests in flight', async () => {
+	it( 'expands all variable products on the page with at most MAX_CONCURRENT_REQUESTS requests in flight', async () => {
 		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, i === 4 ? 0 : 120 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls, maxActive } = fakeFetch( counts, { delay: 2 } );
-		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ) );
+		// 9 x 120 rows is above EXPAND_ALL_WARN_ROWS; the warning is answered here.
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: () => true } ) );
 
 		let ok: boolean | undefined;
 		await act( async () => {
@@ -255,7 +267,7 @@ describe( 'useHierarchy', () => {
 		expect( ok ).toBe( true );
 		expect( result.current.expandedItemIds ).toEqual( [ 1, 2, 3, 4, 6, 7, 8, 9, 10 ] );
 		expect( calls ).toHaveLength( 9 * 2 );
-		expect( maxActive() ).toBeLessThanOrEqual( 4 );
+		expect( maxActive() ).toBeLessThanOrEqual( MAX_CONCURRENT_REQUESTS );
 		expect( result.current.rows ).toHaveLength( 10 + 9 * 120 );
 
 		act( () => result.current.collapseAll() );
@@ -263,7 +275,7 @@ describe( 'useHierarchy', () => {
 		expect( result.current.rows ).toHaveLength( 10 );
 	} );
 
-	it( 'asks before expanding more than 2000 rows and respects the answer', async () => {
+	it( 'asks before expanding more than EXPAND_ALL_WARN_ROWS rows and respects the answer', async () => {
 		const parents = Array.from( { length: 30 }, ( _, i ) => parent( i + 1, 100 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls } = fakeFetch( counts );
@@ -374,6 +386,174 @@ describe( 'useHierarchy', () => {
 		expect( result.current.rows.map( getItemId ) ).toEqual( [ '1', '1001' ] );
 	} );
 
+	it( 'publishes page 1 before the remaining pages arrive', async () => {
+		// Each page takes longer than the emit window, as on a real server.
+		const { fetch } = fakeFetch( { 1: 250 }, { delay: 70 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 250 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		let done: Promise< void > | undefined;
+		act( () => {
+			done = result.current.expand( 1 );
+		} );
+
+		// Page 1 (100 rows) is on screen with the loading row below it while pages 2-3 load.
+		await waitFor( () => expect( result.current.rows ).toHaveLength( 102 ) );
+		expect( result.current.childrenOf( 1 ) ).toMatchObject( { status: 'loading', total: 250 } );
+		expect( getItemId( result.current.rows.at( -1 )! ) ).toBe( '1:loading' );
+
+		await act( async () => {
+			await done;
+		} );
+		expect( result.current.rows ).toHaveLength( 251 );
+	} );
+
+	it( 'expandAll publishes a handful of renders, not one per parent', async () => {
+		const counts: Record< number, number > = {};
+		const parents: ProductRow[] = [];
+
+		for ( let id = 1; id <= 12; id++ ) {
+			counts[ id ] = 3;
+			parents.push( parent( id, 3 ) );
+		}
+
+		const { fetch, calls } = fakeFetch( counts, { delay: 15 } );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ) );
+		const emits: number[] = [];
+		const unsubscribe = subscribeChildren( () => emits.push( Date.now() ) );
+
+		await act( async () => {
+			await result.current.expandAll();
+		} );
+		unsubscribe();
+
+		expect( calls ).toHaveLength( 12 );
+		expect( result.current.rows ).toHaveLength( 12 + 36 );
+		// Without the bulk window: 12 immediate "loading" emits plus one per response window.
+		expect( emits.length ).toBeLessThanOrEqual( 2 );
+
+		// A single expand still shows its loading marker at once.
+		const single = fakeFetch( { 99: 2 }, { delay: 30 } );
+		const other = renderHook( () => useHierarchy( [ parent( 99, 2 ) ], fields, { fetchVariations: single.fetch, storage: null } ) );
+		act( () => {
+			void other.result.current.expand( 99 );
+		} );
+		expect( other.result.current.childrenOf( 99 )?.status ).toBe( 'loading' );
+		await waitFor( () => expect( other.result.current.childrenOf( 99 )?.status ).toBe( 'loaded' ) );
+	} );
+
+	it( 'aborts the request when the parent is collapsed while loading, and reloads on the next expand', async () => {
+		const { fetch, calls } = fakeFetch( { 1: 150 }, { delay: 30 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 150 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		let first: Promise< void > | undefined;
+		act( () => {
+			first = result.current.expand( 1 );
+		} );
+		expect( loadingParentIds() ).toEqual( [ 1 ] );
+
+		act( () => result.current.collapse( 1 ) );
+		expect( calls[ 0 ]?.signal?.aborted ).toBe( true );
+		expect( loadingParentIds() ).toEqual( [] );
+
+		await act( async () => {
+			await first;
+		} );
+		// Back to idle, no error row, nothing fetched for the parent after the abort.
+		expect( result.current.childrenOf( 1 )?.status ).toBe( 'idle' );
+		expect( result.current.rows.map( getItemId ) ).toEqual( [ '1' ] );
+		expect( calls ).toHaveLength( 1 );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( result.current.rows ).toHaveLength( 151 );
+		expect( calls.map( ( c ) => c.page ) ).toEqual( [ 1, 1, 2 ] );
+	} );
+
+	it( 'aborts loads of parents that left the page and of everything on unmount', async () => {
+		const { fetch, calls } = fakeFetch( { 1: 5, 2: 5 }, { delay: 30 } );
+		const { result, rerender, unmount } = renderHook( ( { parents } ) => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ), {
+			initialProps: { parents: [ parent( 1, 5 ), parent( 2, 5 ) ] },
+		} );
+
+		act( () => {
+			void result.current.expand( 1 );
+			void result.current.expand( 2 );
+		} );
+		expect( loadingParentIds() ).toEqual( [ 1, 2 ] );
+
+		// Next page: parent 1 is gone, parent 2 stays.
+		rerender( { parents: [ parent( 2, 5 ), parent( 3, 5 ) ] } );
+		expect( calls.find( ( c ) => c.parentId === 1 )?.signal?.aborted ).toBe( true );
+		expect( calls.find( ( c ) => c.parentId === 2 )?.signal?.aborted ).toBe( false );
+		expect( loadingParentIds() ).toEqual( [ 2 ] );
+
+		unmount();
+		expect( calls.find( ( c ) => c.parentId === 2 )?.signal?.aborted ).toBe( true );
+		expect( loadingParentIds() ).toEqual( [] );
+	} );
+
+	it( 'drops queued pages of a collapsed parent before they take a request slot', async () => {
+		// 7 one-page loads through MAX_CONCURRENT_REQUESTS slots (below the EXPAND_ALL_WARN_ROWS
+		// confirm, so the loads start synchronously): one is queued; collapsing all while the first batch is in flight.
+		const parents = Array.from( { length: 7 }, ( _, i ) => parent( i + 1, 80 ) );
+		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
+		const { fetch, calls } = fakeFetch( counts, { delay: 20 } );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ) );
+
+		let done: Promise< boolean > | undefined;
+		act( () => {
+			done = result.current.expandAll();
+		} );
+		expect( calls ).toHaveLength( MAX_CONCURRENT_REQUESTS );
+
+		act( () => result.current.collapseAll() );
+		await act( async () => {
+			await done;
+		} );
+
+		expect( calls ).toHaveLength( MAX_CONCURRENT_REQUESTS );
+		expect( calls.every( ( c ) => c.signal?.aborted ) ).toBe( true );
+		expect( result.current.rows ).toHaveLength( 7 );
+		expect( loadingParentIds() ).toEqual( [] );
+	} );
+
+	it( 'evicts loaded children of parents that are neither expanded nor on the page', async () => {
+		const many = Array.from( { length: MAX_CACHED_PARENTS + 5 }, ( _, i ) => parent( i + 1, 1 ) );
+		const counts = Object.fromEntries( many.map( ( p ) => [ p.id, 1 ] ) );
+		const { fetch } = fakeFetch( counts );
+		const { result, rerender } = renderHook( ( { parents } ) => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ), {
+			initialProps: { parents: many },
+		} );
+
+		await act( async () => {
+			await result.current.expandAll( { force: true } );
+		} );
+		expect( getChildrenState().size ).toBe( many.length );
+
+		// Collapse everything and page to a parent not among them: the next load evicts the surplus.
+		act( () => result.current.collapseAll() );
+		rerender( { parents: [ parent( 999, 1 ) ] } );
+		await act( async () => {
+			await result.current.expand( 999 );
+		} );
+
+		expect( getChildrenState().size ).toBeLessThanOrEqual( MAX_CACHED_PARENTS );
+		expect( getChildrenState().has( 999 ) ).toBe( true );
+	} );
+
+	it( 'selectVariations can take only the variations a predicate accepts', async () => {
+		const { fetch } = fakeFetch( { 1: 3 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 3 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		let selection: string[] = [];
+		await act( async () => {
+			selection = await result.current.selectVariations( 1, [ '1' ], ( item ) => item.sku !== 'S2' );
+		} );
+
+		expect( selection ).toEqual( [ '1', '1001', '1003' ] );
+	} );
+
 	it( 'onChangeExpandedItemIds dedupes and drops invalid ids', () => {
 		const { fetch } = fakeFetch( {} );
 		const { result } = renderHook( () => useHierarchy( [ parent( 1 ) ], fields, { fetchVariations: fetch, storage: null } ) );
@@ -403,6 +583,28 @@ describe( 'createLimiter', () => {
 
 		expect( max ).toBe( 2 );
 		expect( results.map( ( r ) => r.status ) ).toEqual( [ 'fulfilled', 'rejected', 'fulfilled', 'fulfilled', 'fulfilled' ] );
+	} );
+
+	it( 'rejects a queued task that was cancelled before its turn without running it', async () => {
+		const run = createLimiter( 1 );
+		let cancelled = false;
+		const ran: string[] = [];
+		const task = ( name: string ) => async () => {
+			ran.push( name );
+			await new Promise( ( resolve ) => setTimeout( resolve, 2 ) );
+
+			return name;
+		};
+
+		const first = run( task( 'a' ) );
+		const second = run( task( 'b' ), { isCancelled: () => cancelled } );
+		const third = run( task( 'c' ) );
+		cancelled = true;
+
+		expect( await first ).toBe( 'a' );
+		await expect( second ).rejects.toMatchObject( { name: 'AbortError' } );
+		expect( await third ).toBe( 'c' );
+		expect( ran ).toEqual( [ 'a', 'c' ] );
 	} );
 } );
 
@@ -491,6 +693,7 @@ describe( 'NameCell + Chevron', () => {
 		const child = screen.getAllByTestId( 'row' )[ 1 ]!.querySelector( '.wc-pl-name' )!;
 		expect( child ).toHaveAttribute( 'id', 'wc-pl-row-1001' );
 		expect( child ).toHaveClass( 'wc-pl-name--level-1' );
+		expect( child.querySelector( '.screen-reader-text' ) ).toHaveTextContent( '(variation of P1)' );
 		expect( ( child as HTMLElement ).style.getPropertyValue( '--wc-pl-level' ) ).toBe( '1' );
 		expect( child.querySelector( 'a' ) ).toHaveTextContent( '1' );
 

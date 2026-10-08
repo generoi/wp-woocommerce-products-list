@@ -24,7 +24,7 @@ export function editSettings( overrides: Partial< Settings > = {} ): Settings {
 		taxClasses: [ { value: '', label: 'Standard' } ],
 		shippingClasses: [],
 		taxonomies: [],
-		features: { cogs: false, brands: false, reviews: true },
+		features: { cogs: false, brands: false, reviews: true, hardDelete: false },
 		limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 50, actionBatchSize: 100 },
 		links: { admin: '/wp/wp-admin/', rest: '/wp-json/', page: '', history: '', legacyList: '', newProduct: '', editProduct: '/wp/wp-admin/post.php?post=%d&action=edit', assets: '' },
 		fields: [],
@@ -114,6 +114,7 @@ export function coreFields(): ProductField[] {
 				write: ( value ) => ( { i18n: { se: { sale_price: value } } } ),
 				applies: { product: true, variation: true },
 			},
+			reference: ( item ) => ( item as Record< string, { se?: { sale_price?: { source?: string } } } > ).i18n?.se?.sale_price?.source ?? '',
 			edit: { group: 'i18n:se', bulk: 'money' },
 		} ),
 		field( 'i18n:se.regular_price', {
@@ -125,6 +126,7 @@ export function coreFields(): ProductField[] {
 				write: ( value ) => ( { i18n: { se: { regular_price: value } } } ),
 				applies: { product: true, variation: true },
 			},
+			reference: ( item ) => ( item as Record< string, { se?: { regular_price?: { source?: string } } } > ).i18n?.se?.regular_price?.source ?? '',
 			edit: { group: 'i18n:se', bulk: 'money' },
 		} ),
 	];

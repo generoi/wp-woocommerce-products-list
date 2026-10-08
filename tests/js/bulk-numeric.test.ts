@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
 	applyNumericOp,
+	computeNumericOp,
 	formatNumeric,
+	projectWarnings,
 	isNumericOp,
 	numericKindOf,
 	parseNumeric,
@@ -12,7 +14,7 @@ import {
 	validateNumericOps,
 } from '../../resources/edit/bulk-numeric';
 import type { NumericOp } from '../../resources/edit/bulk-numeric';
-import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
+import { coreFields, editSettings, field, simple, variable, variation } from './edit-fixtures';
 
 const settings = editSettings();
 const settings0 = editSettings( { currency: { ...settings.currency, decimals: 0 } } );
@@ -90,6 +92,49 @@ describe( 'applyNumericOp', () => {
 		expect( applyNumericOp( '200', op( 'decrease', '150', true ), 'money', settings ) ).toBe( '0.00' );
 	} );
 
+	it( 'rounds exact half-cent ties up like PHP round(), in integer cents', () => {
+		// Binary floating point puts 4.35 × 1.1 at 4.784999…; WooCommerce's classic bulk edit writes 4.79.
+		expect( applyNumericOp( '4.35', op( 'increase', '10', true ), 'money', settings ) ).toBe( '4.79' );
+		expect( applyNumericOp( '3.65', op( 'increase', '10', true ), 'money', settings ) ).toBe( '4.02' );
+		expect( applyNumericOp( '4.77', op( 'increase', '50', true ), 'money', settings ) ).toBe( '7.16' );
+		expect( applyNumericOp( '4.35', op( 'decrease', '50', true ), 'money', settings ) ).toBe( '2.18' );
+		expect( applyNumericOp( '1.005', op( 'increase', '0' , true ), 'money', settings ) ).toBe( '1.01' );
+		expect( applyNumericOp( '10', op( 'set', '4.785' ), 'money', settings ) ).toBe( '4.79' );
+		expect( applyNumericOp( '100', op( 'increase', '12.5', true ), 'money', settings ) ).toBe( '112.50' );
+		expect( applyNumericOp( '7', op( 'decrease', '2.5', true ), 'money', settings0 ) ).toBe( '7' );
+	} );
+
+	it( 'matches integer-cent half-up arithmetic across a sweep of prices and percents', () => {
+		const percents = [ 5, 10, 12.5, 15, 20, 25, 30, 33, 50 ];
+		let checked = 0;
+
+		for ( let cents = 1; cents <= 100000; cents += 7 ) {
+			const base = `${ Math.floor( cents / 100 ) }.${ String( cents % 100 ).padStart( 2, '0' ) }`;
+
+			for ( const percent of percents ) {
+				for ( const direction of [ 'increase', 'decrease' ] as const ) {
+					// Exact: cents × (100 ± percent) / 100 with the percent in tenths to keep 12.5 integral.
+					const numerator = cents * ( 1000 + ( direction === 'increase' ? percent * 10 : -percent * 10 ) );
+					const expected = Math.floor( numerator / 1000 ) + ( ( numerator % 1000 ) * 2 >= 1000 ? 1 : 0 );
+					const actual = applyNumericOp( base, op( direction, String( percent ), true ), 'money', settings );
+
+					expect( actual, `${ base } ${ direction } ${ percent }%` ).toBe( `${ Math.floor( expected / 100 ) }.${ String( expected % 100 ).padStart( 2, '0' ) }` );
+					checked += 1;
+				}
+			}
+		}
+
+		expect( checked ).toBeGreaterThan( 100000 );
+	} );
+
+	it( 'projects a sale price from the regular price with regular_minus', () => {
+		expect( applyNumericOp( '', op( 'regular_minus', '20', true ), 'money', settings, { regular: '189' } ) ).toBe( '151.20' );
+		expect( applyNumericOp( '99', op( 'regular_minus', '10' ), 'money', settings, { regular: '180' } ) ).toBe( '170.00' );
+		expect( applyNumericOp( '', op( 'regular_minus', '20', true ), 'money', settings, {} ) ).toBeNull();
+		expect( applyNumericOp( '', op( 'regular_minus', '20', true ), 'money', settings, { regular: '' } ) ).toBeNull();
+		expect( computeNumericOp( '5', op( 'decrease', '8' ), 'integer', settings ) ).toBe( -3 );
+	} );
+
 	it( 'skips relative ops on an empty current value', () => {
 		expect( applyNumericOp( '', op( 'increase', '10' ), 'money', settings ) ).toBeNull();
 		expect( applyNumericOp( null, op( 'decrease', '10', true ), 'money', settings ) ).toBeNull();
@@ -124,7 +169,41 @@ describe( 'numericKindOf', () => {
 	} );
 } );
 
+describe( 'projectWarnings', () => {
+	it( 'lists rows a decrease pushes below zero, naming the clamp', () => {
+		const items = [ simple( 1, { stock_quantity: 9 } ), simple( 2, { stock_quantity: 124 } ), simple( 3, { stock_quantity: 2 } ), variable( 4, { stock_quantity: 1 } ) ];
+		const warnings = projectWarnings( items, { stock_quantity: op( 'decrease', '10' ) }, fields, settings );
+
+		expect( warnings.map( ( warning ) => [ warning.id, warning.value ] ) ).toEqual( [ [ 1, -1 ], [ 3, -8 ], [ 4, -9 ] ] );
+		expect( warnings[ 0 ]?.message ).toMatch( /9 to -1.*Out of stock/ );
+		expect( projectWarnings( items, { stock_quantity: op( 'decrease', '1' ) }, fields, settings ) ).toEqual( [] );
+		expect( projectWarnings( items, { stock_quantity: op( 'set', '0' ), status: 'draft' }, fields, settings ) ).toEqual( [] );
+	} );
+
+	it( 'covers money too, formatted', () => {
+		const warnings = projectWarnings( [ simple( 1, { regular_price: '10' } ) ], { regular_price: op( 'decrease', '15' ) }, fields, settings );
+
+		expect( warnings ).toHaveLength( 1 );
+		expect( warnings[ 0 ]?.message ).toMatch( /10 to -5\.00/ );
+	} );
+} );
+
 describe( 'projectEdits', () => {
+	it( 'resolves regular_minus against each row’s regular price, the edited one when it changes too', () => {
+		const item = simple( 1, { regular_price: '100', sale_price: '' } );
+
+		expect( projectEdits( item, { sale_price: op( 'regular_minus', '20', true ) }, fields, settings ) ).toEqual( { sale_price: '80.00' } );
+		expect( projectEdits( item, { regular_price: '200', sale_price: op( 'regular_minus', '25', true ) }, fields, settings ) ).toEqual( { regular_price: '200', sale_price: '150.00' } );
+		expect( projectEdits( item, { regular_price: op( 'increase', '10', true ), sale_price: op( 'regular_minus', '10' ) }, fields, settings ) ).toEqual( { regular_price: '110.00', sale_price: '100.00' } );
+		expect( projectEdits( simple( 2, { regular_price: '' } ), { sale_price: op( 'regular_minus', '20', true ) }, fields, settings ) ).toEqual( {} );
+	} );
+
+	it( 'projects a language sale price from the reference regular price when none is stored', () => {
+		const item = variation( 11, 1, { i18n: { se: { regular_price: { value: '', source: '2000' }, sale_price: { value: '', source: '' } } } } );
+
+		expect( projectEdits( item, { 'i18n:se.sale_price': op( 'regular_minus', '25', true ) }, fields, settings ) ).toEqual( { 'i18n:se.sale_price': '1500.00' } );
+	} );
+
 	it( 'resolves ops per item and passes plain values through', () => {
 		const item = simple( 1, { regular_price: '100', sale_price: '', stock_quantity: 4 } );
 		const projected = projectEdits( item, { regular_price: op( 'decrease', '10', true ), sale_price: op( 'increase', '5' ), stock_quantity: op( 'set', '9' ), status: 'draft' }, fields, settings );
@@ -145,6 +224,43 @@ describe( 'projectEdits', () => {
 } );
 
 describe( 'validateBulkNumericEdits', () => {
+	it( 'never validates sellable edits against a variable parent (they go to its variations)', () => {
+		const items = [ variable( 1, { regular_price: '' } ), simple( 2, { regular_price: '100' } ), variation( 11, 1, { regular_price: '50' } ), variation( 12, 1, { regular_price: '40' } ) ];
+
+		expect( validateBulkNumericEdits( items, { sale_price: op( 'set', '30' ) }, fields, settings ) ).toEqual( [] );
+
+		const tooHigh = validateBulkNumericEdits( items, { sale_price: op( 'set', '45' ) }, fields, settings );
+
+		expect( tooHigh.map( ( error ) => error.id ) ).toEqual( [ 12 ] );
+		// A parent-owned edit is still checked on the parent.
+		expect( validateBulkNumericEdits( [ variable( 1, { stock_quantity: 3 } ) ], { stock_quantity: '1.5' }, fields, settings ) ).toHaveLength( 1 );
+	} );
+
+	it( 'refuses a schedule that would run without a sale price', () => {
+		const noSale = [ variation( 11, 1, { regular_price: '100', sale_price: '' } ), variation( 12, 1, { regular_price: '100', sale_price: '20' } ) ];
+		const dates = { date_on_sale_from: '2026-10-12T00:00:00', date_on_sale_to: '2026-10-18T23:59:00' };
+
+		// "Decrease by 20 %" of an empty sale price leaves it empty: dates and no sale.
+		const errors = validateBulkNumericEdits( noSale, { ...dates, sale_price: op( 'decrease', '20', true ) }, fields, settings );
+
+		expect( errors ).toHaveLength( 1 );
+		expect( errors[ 0 ] ).toMatchObject( { id: 11, field: 'sale_price' } );
+		expect( errors[ 0 ]?.message ).toMatch( /no sale price/ );
+
+		// Dates alone, the toggle alone, or one date: same rule.
+		expect( validateBulkNumericEdits( noSale, dates, fields, settings ) ).toHaveLength( 1 );
+		expect( validateBulkNumericEdits( noSale, { date_on_sale_to: '2026-10-18T23:59:00' }, fields, settings ) ).toHaveLength( 1 );
+		expect( validateBulkNumericEdits( [ simple( 1, { regular_price: '100', sale_price: '', date_on_sale_from: '2026-10-12T00:00:00' } ) ], { schedule_sale: true }, fields, settings ) ).toHaveLength( 1 );
+
+		// Regular price minus 20 % gives every row a sale price.
+		expect( validateBulkNumericEdits( noSale, { ...dates, sale_price: op( 'regular_minus', '20', true ) }, fields, settings ) ).toEqual( [] );
+		expect( validateBulkNumericEdits( noSale, { ...dates, sale_price: '50' }, fields, settings ) ).toEqual( [] );
+		// Turning the schedule off clears the dates: nothing to run.
+		expect( validateBulkNumericEdits( noSale, { schedule_sale: false, date_on_sale_from: '' }, fields, settings ) ).toEqual( [] );
+		// A sale price edit without touching the dates is not a schedule change.
+		expect( validateBulkNumericEdits( noSale, { sale_price: op( 'decrease', '20', true ) }, fields, settings ) ).toEqual( [] );
+	} );
+
 	it( 'is empty when projected prices are consistent', () => {
 		const items = [ simple( 1, { regular_price: '100', sale_price: '' } ), simple( 2, { regular_price: '50', sale_price: '40' } ) ];
 
@@ -188,6 +304,32 @@ describe( 'validateBulkNumericEdits', () => {
 
 		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '120' ) }, fields, settings ) ).toMatchObject( [ { id: 11, field: 'i18n:se.sale_price' } ] );
 		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '80' ) }, fields, settings ) ).toEqual( [] );
+	} );
+
+	it( 'checks a language sale price against the reference regular price when none is stored', () => {
+		// gds-woo-i18n sells an untranslated regular price at its converted default (`source`); the row shows it as "Default: 2045".
+		const item = variation( 11, 1, { i18n: { se: { regular_price: { value: '', source: '2045' }, sale_price: { value: '', source: '' } } } } );
+
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '1590' ) }, fields, settings ) ).toEqual( [] );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': '1590' }, fields, settings ) ).toEqual( [] );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '2045' ) }, fields, settings ) ).toMatchObject( [ { id: 11, field: 'i18n:se.sale_price' } ] );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '2100' ) }, fields, settings ) ).toMatchObject( [ { id: 11, field: 'i18n:se.sale_price' } ] );
+	} );
+
+	it( 'a stored or edited language regular price wins over the reference', () => {
+		const item = variation( 11, 1, { i18n: { se: { regular_price: { value: '1500', source: '1500' }, sale_price: { value: '', source: '' } } } } );
+
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '1590' ) }, fields, settings ) ).toHaveLength( 1 );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.regular_price': '1800', 'i18n:se.sale_price': '1590' }, fields, settings ) ).toEqual( [] );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.regular_price': op( 'decrease', '10', true ), 'i18n:se.sale_price': '1300' }, fields, settings ) ).toEqual( [] );
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.regular_price': op( 'decrease', '10', true ), 'i18n:se.sale_price': '1400' }, fields, settings ) ).toHaveLength( 1 );
+	} );
+
+	it( 'a language sale price with neither a stored nor a reference regular price is still an error', () => {
+		const item = variation( 11, 1, { i18n: { se: { regular_price: { value: '', source: '' }, sale_price: { value: '', source: '' } } } } );
+
+		expect( validateBulkNumericEdits( [ item ], { 'i18n:se.sale_price': op( 'set', '10' ) }, fields, settings ) ).toHaveLength( 1 );
+		expect( validateBulkNumericEdits( [ simple( 1, { regular_price: '' } ) ], { sale_price: '10' }, fields, settings ) ).toHaveLength( 1 );
 	} );
 
 	it( 'validateNumericOps reports the invalid inputs by field', () => {

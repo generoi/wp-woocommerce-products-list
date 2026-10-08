@@ -65,7 +65,14 @@ export function ChangeCell( { item }: { item: LogRow } ) {
 	);
 }
 
-export function createLogFields( settings: Settings, options: { withObject?: boolean } = {} ): Field< LogRow >[] {
+export interface LogFieldOptions {
+	withObject?: boolean;
+	/** The users with log rows (`GET /log/users`); when given, the User column filters by them. */
+	users?: Array< { id: number; name: string } >;
+}
+
+export function createLogFields( settings: Settings, options: LogFieldOptions = {} ): Field< LogRow >[] {
+	const users = options.users ?? [];
 	const fields: Field< LogRow >[] = [
 		{
 			id: 'created_at',
@@ -81,8 +88,15 @@ export function createLogFields( settings: Settings, options: { withObject?: boo
 			type: 'text',
 			label: __( 'User', 'wp-woocommerce-products-list' ),
 			enableSorting: false,
-			getValue: ( { item } ) => item.user?.name ?? '',
-			filterBy: false,
+			// The id is the filter value (the `user` param); the name is what the cell shows.
+			getValue: ( { item } ) => ( users.length ? String( item.user?.id ?? '' ) : item.user?.name ?? '' ),
+			render: ( { item } ) => <span>{ item.user?.name || ( item.user?.id ? `#${ item.user.id }` : '—' ) }</span>,
+			...( users.length
+				? {
+						elements: users.map( ( user ) => ( { value: String( user.id ), label: user.name || `#${ user.id }` } ) ),
+						filterBy: { operators: [ 'is' ] },
+				  }
+				: { filterBy: false } ),
 		},
 	];
 

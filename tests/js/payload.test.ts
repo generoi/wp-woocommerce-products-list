@@ -1,6 +1,7 @@
+import { getSettings as getDateSettings, setSettings as setDateSettings } from '@wordpress/date';
 import { addFilter, removeFilter } from '@wordpress/hooks';
-import { afterEach, describe, expect, it } from 'vitest';
-import { buildPayload, hasPayload } from '../../resources/edit/payload';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { buildPayload, hasPayload, toSiteDateTime } from '../../resources/edit/payload';
 import { FILTERS } from '../../resources/extensions/hooks';
 import { coreFields, editSettings, simple, variation } from './edit-fixtures';
 
@@ -8,7 +9,35 @@ const settings = editSettings();
 const fields = coreFields();
 
 describe( 'buildPayload', () => {
+	const dateSettings = getDateSettings();
+
+	// A +02:00 site (Europe/Helsinki in winter), as wp.date carries it on the admin page.
+	beforeAll( () => setDateSettings( { ...dateSettings, timezone: { offset: 2, offsetFormatted: '2', string: 'Europe/Helsinki', abbr: 'EET' } } ) );
+	afterAll( () => setDateSettings( dateSettings ) );
 	afterEach( () => removeFilter( FILTERS.savePayload, 'test/payload' ) );
+
+	it( 'sends scheduled sale dates as site-local wall-clock time, not the UTC instant the control emits', () => {
+		const item = simple( 1, { date_on_sale_from: null, date_on_sale_to: null } );
+		// DataForm's datetime control: "2026-11-01T00:00" typed on a Helsinki site → getDate(...).toISOString().
+		const payload = buildPayload( item, { date_on_sale_from: '2026-10-31T22:00:00.000Z', date_on_sale_to: '2026-11-30T21:59:00.000Z' }, fields, settings );
+
+		expect( payload ).toEqual( { date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T23:59:00' } );
+		expect( toSiteDateTime( '2026-10-31T22:00:00Z' ) ).toBe( '2026-11-01T00:00:00' );
+		expect( toSiteDateTime( '2026-10-31T23:00:00+01:00' ) ).toBe( '2026-11-01T00:00:00' );
+		// Summer time: +03:00.
+		expect( toSiteDateTime( '2026-06-30T21:00:00.000Z' ) ).toBe( '2026-07-01T00:00:00' );
+		expect( toSiteDateTime( '2026-06-30T21:00:00.000Z', 'date' ) ).toBe( '2026-07-01' );
+	} );
+
+	it( 'leaves site-local dates alone, clears with null and skips an unchanged date', () => {
+		const item = simple( 1, { date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: null } );
+
+		expect( buildPayload( item, { date_on_sale_from: '2026-10-31T22:00:00.000Z' }, fields, settings ) ).toEqual( {} );
+		expect( buildPayload( item, { date_on_sale_from: '2026-11-02T00:00:00' }, fields, settings ) ).toEqual( { date_on_sale_from: '2026-11-02T00:00:00' } );
+		expect( buildPayload( item, { date_on_sale_from: '' }, fields, settings ) ).toEqual( { date_on_sale_from: null } );
+		expect( toSiteDateTime( null ) ).toBeNull();
+		expect( toSiteDateTime( 'not a date' ) ).toBe( 'not a date' );
+	} );
 
 	it( 'writes plain values under the wc/v3 key and skips unchanged ones', () => {
 		const item = simple( 1, { status: 'publish', regular_price: '100' } );

@@ -23,6 +23,19 @@ export interface MergedItems {
 
 export const MIXED_LABEL = __( 'Mixed', 'wp-woocommerce-products-list' );
 
+/**
+ * The form value of a mixed select/radio field. A select shows its first
+ * option for a value it does not know, so the merged record carries this
+ * sentinel and the form adds a "Mixed (no change)" option for it; an edit
+ * set back to it is no edit (use-edit-state drops it).
+ */
+export const MIXED_VALUE = '__wc_pl_mixed__';
+
+/** A select/radio field: single value chosen from elements. */
+export function hasOptionList( field: ProductField ): boolean {
+	return ( Array.isArray( field.elements ) || typeof field.getElements === 'function' ) && field.type !== 'array' && field.type !== 'boolean';
+}
+
 function mixedFallback( sample: unknown ): unknown {
 	if ( Array.isArray( sample ) ) {
 		return [];
@@ -85,7 +98,7 @@ export function mergeItems( items: ProductListItem[], fields: ProductField[] ): 
 		const values = rows.map( ( item ) => readFieldValue( field, item ) );
 		const { value, isMixed } = mergeValues( values );
 
-		data[ field.id ] = value;
+		data[ field.id ] = isMixed && hasOptionList( field ) ? MIXED_VALUE : value;
 		mixed[ field.id ] = {
 			isMixed,
 			isEmpty: ! isMixed && isEmptyValue( value ),

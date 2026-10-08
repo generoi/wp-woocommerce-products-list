@@ -99,6 +99,17 @@ function assertId( id: unknown, what: string ): asserts id is string {
 	}
 }
 
+/** True when the list query can act on a filter of this field (docs/contracts.md §3.1). */
+export function hasFilterMapping( field: LooseProductField ): boolean {
+	const rest = ( field.rest ?? {} ) as { param?: string; toParams?: unknown };
+
+	if ( rest.param || typeof rest.toParams === 'function' ) {
+		return true;
+	}
+
+	return ( ( field.elements ?? [] ) as Array< { params?: unknown } > ).some( ( element ) => element && typeof element === 'object' && 'params' in element );
+}
+
 export function normalizeRegisteredField( field: LooseProductField ): ProductField {
 	assertId( field.id, 'field' );
 
@@ -107,6 +118,8 @@ export function normalizeRegisteredField( field: LooseProductField ): ProductFie
 
 	return {
 		...field,
+		// A filter the server cannot map would silently do nothing: offer it only with a mapping.
+		filterBy: field.filterBy === undefined && ! hasFilterMapping( field ) ? false : field.filterBy,
 		rest: {
 			...rest,
 			fields: rest.fields ?? [ field.id.split( '.' )[ 0 ] as string ],

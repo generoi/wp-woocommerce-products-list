@@ -69,6 +69,35 @@ describe( 'runSave', () => {
 		expect( patches[ 1 ] ).toEqual( [ { id: 1, status: 'draft', echoed: true } ] );
 	} );
 
+	it( 'normalises returned rows through normalizeRow and keeps the row’s thumbnails', async () => {
+		const normalizeRow = vi.fn( ( raw: { id: number }, parentId?: number ) => ( { ...raw, _kind: parentId ? 'variation' : 'product', _normalized: true } ) );
+		const d = deps( {
+			normalizeRow: normalizeRow as unknown as SaveDeps[ 'normalizeRow' ],
+			batchProducts: vi.fn( async ( update: Update[] ) => ( { update: update.map( ( row ) => ( { ...row, images: [ { id: 9, src: 'full.jpg' } ] } ) ) } ) as BatchResponse< RawProduct > ),
+			batchVariations: vi.fn( async ( _parentId: number, update: Update[] ) => ( { update: update.map( ( row ) => ( { ...row, image: { id: 9, src: 'full.jpg' } } ) ) } ) as BatchResponse< RawVariation > ),
+		} );
+		const result = await runSave( d, [ simple( 1, { status: 'publish' } ), variation( 41, 4 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( normalizeRow ).toHaveBeenCalledWith( expect.objectContaining( { id: 41 } ), 4 );
+		expect( normalizeRow ).toHaveBeenCalledWith( expect.objectContaining( { id: 1 } ), undefined );
+
+		const patches = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => call[ 0 ] as Array< Record< string, unknown > > );
+		const returned = patches.filter( ( patch ) => patch[ 0 ]?._normalized ).flat();
+
+		expect( returned ).toHaveLength( 2 );
+		expect( returned.every( ( row ) => ! ( 'images' in row ) && ! ( 'image' in row ) ) ).toBe( true );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 1 ] );
+	} );
+
+	it( 'turns known wc/v3 error codes into human text', async () => {
+		const d = deps( {
+			batchProducts: vi.fn( async ( update: Update[] ) => ( { update: update.map( ( row ) => ( { id: row.id, error: { code: 'woocommerce_rest_product_invalid_id', message: 'Invalid ID.' } } ) ) } ) as BatchResponse< RawProduct > ),
+		} );
+		const result = await runSave( d, [ simple( 1, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.errors ).toEqual( [ { id: 1, code: 'woocommerce_rest_product_invalid_id', message: expect.stringMatching( /no longer exists/ ) } ] );
+	} );
+
 	it( 'does not optimistically patch object-shaped keys (extension row data differs from its write shape)', async () => {
 		const d = deps();
 		await runSave( d, [ simple( 1, { i18n: { se: { name: { value: 'Old' } } } } ) ], { 'i18n:se.name': 'New', status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
@@ -144,6 +173,20 @@ describe( 'runSave', () => {
 
 		expect( d.batchVariations ).toHaveBeenCalledWith( 4, [ { id: 41, regular_price: '90.00' }, { id: 42, regular_price: '45.00' } ], expect.anything() );
 		expect( d.batchProducts ).not.toHaveBeenCalled();
+	} );
+
+	it( 'forwards the field list so the server trims the returned rows', async () => {
+		const d = deps();
+		const items = [ simple( 1, { regular_price: '100' } ), variation( 21, 2, { regular_price: '100' } ) ];
+
+		await runSave( d, items, { regular_price: '110' }, fields, settings, { applyToVariations: false, source: 'bulk', fields: [ 'id', 'regular_price', 'price' ] } );
+
+		expect( d.batchVariations ).toHaveBeenCalledWith( 2, expect.anything(), { batchId: 'batch-1', source: 'bulk', fields: [ 'id', 'regular_price', 'price' ] } );
+		expect( d.batchProducts ).toHaveBeenCalledWith( expect.anything(), { batchId: 'batch-1', source: 'bulk', fields: [ 'id', 'regular_price', 'price' ] } );
+
+		const bare = deps();
+		await runSave( bare, [ simple( 1, { regular_price: '100' } ) ], { regular_price: '110' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+		expect( bare.batchProducts ).toHaveBeenCalledWith( expect.anything(), { batchId: 'batch-1', source: 'quick' } );
 	} );
 
 	it( 'returns an empty result without requests when nothing changes', async () => {

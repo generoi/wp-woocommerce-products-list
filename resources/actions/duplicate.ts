@@ -5,10 +5,12 @@ import { runAction } from '../api/client';
 import { invalidateProducts } from '../store/products';
 import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
-import { canEdit, errorMessage, idsOf, isRealRow, rowFields, summarize } from './context';
+import { canEdit, dropFromSelection, errorMessage, idsOf, isRealRow, rowFields, summarize } from './context';
 import { notify } from './notices';
 
-export const createDuplicateAction: ActionFactory = ( { settings, fields } ) => {
+export const createDuplicateAction: ActionFactory = ( context ) => {
+	const { settings, fields } = context;
+
 	if ( ! settings.caps.edit ) {
 		return null;
 	}
@@ -47,6 +49,7 @@ export const createDuplicateAction: ActionFactory = ( { settings, fields } ) => 
 						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be duplicated.', 'wp-woocommerce-products-list' ) );
 					}
 
+					dropFromSelection( context, ok );
 					onActionPerformed?.( items );
 				} )
 				.catch( ( error: unknown ) => notify.error( errorMessage( error ) ) );

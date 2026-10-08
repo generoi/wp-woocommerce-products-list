@@ -22,7 +22,7 @@ export function sampleSettings( overrides: Partial< Settings > = {} ): Settings 
 		taxClasses: [ { value: '', label: 'Standard' } ],
 		shippingClasses: [],
 		taxonomies: [ { name: 'product_cat', label: 'Categories', restKey: 'categories', hierarchical: true, attribute: false } ],
-		features: { cogs: false, brands: false, reviews: true },
+		features: { cogs: false, brands: false, reviews: true, hardDelete: false },
 		limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 50, actionBatchSize: 100 },
 		links: { admin: '/wp/wp-admin/', rest: '/wp-json/', page: '', history: '', legacyList: '', newProduct: '', editProduct: '/wp/wp-admin/post.php?post=%d&action=edit', assets: '' },
 		fields: [],

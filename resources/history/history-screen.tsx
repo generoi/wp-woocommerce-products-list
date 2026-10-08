@@ -4,11 +4,11 @@
  * "Revert batch" (update rows only: trash/delete/duplicate are reported
  * as skipped by the server).
  */
-import { Button } from '@wordpress/components';
-import { useCallback, useMemo, useState } from '@wordpress/element';
+import { Button, Spinner } from '@wordpress/components';
+import { useCallback, useEffect, useMemo, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { getQueryArg } from '@wordpress/url';
-import { revertBatch } from '../api/client';
+import { getLog, getLogUsers, revertBatch } from '../api/client';
 import { notify } from '../actions/notices';
 import { DataViews } from '../dataviews';
 import type { Action, Filter, RenderModalProps, View } from '../dataviews';
@@ -16,6 +16,8 @@ import { getSettings } from '../settings';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { createLogFields, logQueryFromView } from './log-fields';
+import { describeBatchScope, summarizeBatch } from './batch-scope';
+import type { BatchScope } from './batch-scope';
 import { invalidateLog, useLog } from './use-log';
 import type { LogRow } from './use-log';
 import '../edit/style.scss';
@@ -43,6 +45,35 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	const row = items[ 0 ];
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
+	const [ scope, setScope ] = useState< BatchScope | null | 'loading' >( 'loading' );
+	const batchId = row?.batch_id;
+
+	useEffect( () => {
+		if ( ! batchId ) {
+			setScope( null );
+
+			return;
+		}
+
+		let cancelled = false;
+
+		setScope( 'loading' );
+		getLog( { batch: batchId, action: 'update', per_page: 100 } )
+			.then( ( result ) => {
+				if ( ! cancelled ) {
+					setScope( summarizeBatch( result.items, result.total ) );
+				}
+			} )
+			.catch( () => {
+				if ( ! cancelled ) {
+					setScope( null );
+				}
+			} );
+
+		return () => {
+			cancelled = true;
+		};
+	}, [ batchId ] );
 
 	const confirm = async () => {
 		if ( ! row ) {
@@ -93,6 +124,17 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 					<code>{ row.batch_id }</code> · { row.user?.name } · { row.created_at }
 				</p>
 			) : null }
+			<p className="wc-pl-confirm__scope" aria-live="polite">
+				{ scope === 'loading' ? (
+					<>
+						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
+					</>
+				) : scope ? (
+					<strong>{ describeBatchScope( scope ) }</strong>
+				) : (
+					__( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
+				) }
+			</p>
 			{ error ? (
 				<p className="wc-pl-confirm__error" role="alert">
 					{ error }
@@ -102,7 +144,7 @@ function RevertModal( { items, closeModal, onActionPerformed }: RenderModalProps
 				<Button variant="tertiary" onClick={ () => closeModal?.() } disabled={ busy } __next40pxDefaultSize>
 					{ __( 'Cancel', 'wp-woocommerce-products-list' ) }
 				</Button>
-				<Button variant="primary" isBusy={ busy } disabled={ busy || ! row } onClick={ () => void confirm() } __next40pxDefaultSize>
+				<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || scope === 'loading' } onClick={ () => void confirm() } __next40pxDefaultSize>
 					{ __( 'Revert batch', 'wp-woocommerce-products-list' ) }
 				</Button>
 			</div>
@@ -121,7 +163,35 @@ export function HistoryScreen() {
 		filters: initialFilters(),
 		layout: { density: 'compact' },
 	} ) );
-	const fields = useMemo( () => createLogFields( settings ), [ settings ] );
+	const [ users, setUsers ] = useState< Array< { id: number; name: string } > >( [] );
+	const fields = useMemo( () => createLogFields( settings, { users } ), [ settings, users ] );
+
+	useEffect( () => {
+		let cancelled = false;
+
+		getLogUsers()
+			.then( ( list ) => {
+				if ( ! cancelled ) {
+					setUsers( list );
+				}
+			} )
+			.catch( () => {} );
+
+		return () => {
+			cancelled = true;
+		};
+	}, [] );
+
+	useEffect( () => {
+		const title = __( 'History', 'wp-woocommerce-products-list' );
+		const previous = document.title;
+
+		document.title = document.title.includes( title ) ? document.title : `${ title } ‹ ${ document.title }`;
+
+		return () => {
+			document.title = previous;
+		};
+	}, [] );
 	const query = useMemo( () => logQueryFromView( view ), [ view ] );
 	const log = useLog( query );
 
@@ -178,6 +248,7 @@ export function HistoryScreen() {
 
 	return (
 		<div className="wc-products-list wc-pl-history">
+			<h1 className="wc-pl-history__title">{ __( 'History', 'wp-woocommerce-products-list' ) }</h1>
 			<DataViews< LogRow >
 				data={ log.items }
 				fields={ fields }

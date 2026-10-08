@@ -4,7 +4,7 @@
  * into the field and action objects the list renders. gds-woo-i18n ships no
  * JavaScript: every language column, filter and action comes through here.
  */
-import { createElement, useState } from '@wordpress/element';
+import { createElement, memo, useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import { DataForm } from '../dataviews';
 import type {
@@ -321,7 +321,7 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 		return value;
 	};
 
-	const render = ( { item, field }: DataViewRenderFieldProps< ProductListItem > ) => {
+	const renderCell = ( { item, field }: DataViewRenderFieldProps< ProductListItem > ) => {
 		const value = field.getValue( { item } );
 
 		if ( ! isEmptyValue( value ) ) {
@@ -343,6 +343,8 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 			displayValue( fallback, def, currency, settings )
 		);
 	};
+
+	const render = memo( renderCell );
 
 	const toParams: ToParams | undefined = def.filter
 		? ( value, operator ) => {
@@ -488,7 +490,7 @@ export function filterFromDeclarative( def: DeclarativeFilter ): DeclarativeProd
 /* Actions                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const ARG_TYPE_MAP: Record< DeclarativeActionArg[ 'type' ], FieldTypeName > = {
+const ARG_TYPE_MAP: Record< Exclude< DeclarativeActionArg[ 'type' ], 'array' >, FieldTypeName > = {
 	text: 'text',
 	select: 'text',
 	boolean: 'boolean',
@@ -498,28 +500,84 @@ const ARG_TYPE_MAP: Record< DeclarativeActionArg[ 'type' ], FieldTypeName > = {
 
 type ArgsData = Record< string, unknown >;
 
+/** The DataForm fields for the scalar args; `array` args get their own checkbox group. */
 function argFields( args: DeclarativeActionArg[] ): Field< ArgsData >[] {
-	return args.map( ( arg ) => ( {
-		id: arg.id,
-		label: arg.label || arg.id,
-		type: ARG_TYPE_MAP[ arg.type ],
-		elements: arg.options.length > 0 ? arg.options.map( ( option: DeclarativeOption ) => ( { value: option.value, label: option.label } ) ) : undefined,
-		isValid: { required: arg.required },
-	} ) );
+	return args
+		.filter( ( arg ) => arg.type !== 'array' )
+		.map( ( arg ) => ( {
+			id: arg.id,
+			label: arg.label || arg.id,
+			type: ARG_TYPE_MAP[ arg.type as Exclude< DeclarativeActionArg[ 'type' ], 'array' > ],
+			elements: arg.options.length > 0 ? arg.options.map( ( option: DeclarativeOption ) => ( { value: option.value, label: option.label } ) ) : undefined,
+			isValid: { required: arg.required },
+		} ) );
 }
 
-function defaultArgs( args: DeclarativeActionArg[] ): ArgsData {
+/**
+ * The form's initial values. A select shows its first option whatever the
+ * value is, so a required select without a default starts on that option
+ * (what the user sees is what is sent); `array` args start as a list.
+ */
+export function defaultArgs( args: DeclarativeActionArg[] ): ArgsData {
 	const data: ArgsData = {};
 
 	args.forEach( ( arg ) => {
-		data[ arg.id ] = arg.default ?? ( arg.type === 'boolean' ? false : '' );
+		if ( arg.type === 'array' ) {
+			const value = Array.isArray( arg.default ) ? arg.default.map( String ) : typeof arg.default === 'string' && arg.default !== '' ? arg.default.split( ',' ).map( ( v ) => v.trim() ) : [];
+			data[ arg.id ] = value.filter( ( v ) => arg.options.length === 0 || arg.options.some( ( option ) => option.value === v ) );
+
+			return;
+		}
+
+		if ( arg.type === 'boolean' ) {
+			data[ arg.id ] = arg.default ?? false;
+
+			return;
+		}
+
+		if ( arg.type === 'select' && isEmptyValue( arg.default ) && arg.required ) {
+			data[ arg.id ] = arg.options[ 0 ]?.value ?? '';
+
+			return;
+		}
+
+		data[ arg.id ] = arg.default ?? '';
 	} );
 
 	return data;
 }
 
-function missingRequired( args: DeclarativeActionArg[], data: ArgsData ): boolean {
+export function missingRequired( args: DeclarativeActionArg[], data: ArgsData ): boolean {
 	return args.some( ( arg ) => arg.required && isEmptyValue( data[ arg.id ] ) );
+}
+
+function ArrayArgControl( { arg, value, onChange }: { arg: DeclarativeActionArg; value: string[]; onChange: ( next: string[] ) => void } ) {
+	const name = `wc-products-list-arg-${ arg.id }`;
+
+	return createElement(
+		'fieldset',
+		{ className: 'wc-products-list-action-modal__group' },
+		createElement( 'legend', { className: 'wc-products-list-action-modal__group-label' }, arg.label || arg.id ),
+		...arg.options.map( ( option ) => {
+			const id = `${ name }-${ option.value }`;
+			const checked = value.includes( option.value );
+
+			return createElement(
+				'label',
+				{ key: option.value, htmlFor: id, className: 'wc-products-list-action-modal__option' },
+				createElement( 'input', {
+					type: 'checkbox',
+					id,
+					name,
+					value: option.value,
+					checked,
+					onChange: () => onChange( checked ? value.filter( ( v ) => v !== option.value ) : [ ...value, option.value ] ),
+				} ),
+				' ',
+				option.label
+			);
+		} )
+	);
 }
 
 export function actionableIds( items: ProductListItem[] ): number[] {
@@ -572,7 +630,8 @@ export function actionFromDeclarative( def: DeclarativeAction, run: ActionRunner
 	}
 
 	const fields = argFields( def.args );
-	const form = { fields: def.args.map( ( arg ) => arg.id ) };
+	const form = { fields: fields.map( ( field ) => field.id ) };
+	const arrayArgs = def.args.filter( ( arg ) => arg.type === 'array' );
 
 	const RenderModal = ( { items, closeModal, onActionPerformed }: RenderModalProps< ProductListItem > ) => {
 		const [ data, setData ] = useState< ArgsData >( () => defaultArgs( def.args ) );
@@ -610,6 +669,14 @@ export function actionFromDeclarative( def: DeclarativeAction, run: ActionRunner
 						onChange: ( changes: Record< string, unknown > ) => setData( ( previous ) => ( { ...previous, ...changes } ) ),
 				  } )
 				: null,
+			...arrayArgs.map( ( arg ) =>
+				createElement( ArrayArgControl, {
+					key: arg.id,
+					arg,
+					value: Array.isArray( data[ arg.id ] ) ? ( data[ arg.id ] as string[] ) : [],
+					onChange: ( next: string[] ) => setData( ( previous ) => ( { ...previous, [ arg.id ]: next } ) ),
+				} )
+			),
 			def.confirm ? createElement( 'p', { className: 'wc-products-list-action-modal__confirm' }, def.confirm ) : null,
 			error ? createElement( 'p', { className: 'wc-products-list-action-modal__error', role: 'alert' }, error ) : null,
 			createElement(

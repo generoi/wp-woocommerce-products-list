@@ -37,7 +37,7 @@ The row data under `path` comes from your `wc_products_list/row` filter; the edi
 | `type` | `text`, `html` (textarea), `price` (text control with the currency as suffix, locale parsing, validation), `integer`, `number`, `boolean`, `select` (with `options`), `date`, `datetime`, `media`, `array` |
 | `path` / `reference` | `getValue` reads `path`; when it is empty the column shows `reference` muted (`.wc-products-list-field--reference`), and the quick-edit form can show it beside the control |
 | `writePath` | `rest.write( value )` nests the value there: `i18n.se.name` → `{ "i18n": { "se": { "name": value } } }` |
-| `editable` / `readonly` / `bulk` | `edit` is `false` when not editable; `bulk: money` and `integer` get the set/increase/decrease control in bulk edit, `false` hides the field from bulk edit |
+| `editable` / `readonly` / `bulk` | `edit` is `false` when not editable; `bulk: money` and `integer` get the set/increase/decrease control in bulk edit (a sale-price field also gets "Regular price minus", amount or percent of the regular price), `false` hides the field from bulk edit |
 | `applies.product` | `true` or a list of parent product types the field is shown and edited for |
 | `applies.variation` | the field exists on variation rows too |
 | `group` / `tab` | the quick-edit tab; `i18n:se` becomes a tab per language |
@@ -63,7 +63,7 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 });
 ```
 
-**Actions** (`wc_products_list/actions`) show up in the row menu and the bulk toolbar and run `POST /wc-products-list/v1/actions/{id}` with the selected ids. Without `args` and `confirm` the action runs on click. With either, a modal collects the args (`text`, `select`, `boolean`, `integer`, `number`; `required` blocks the button) and shows the confirm text. `scope` limits the action to products, variations or both; `destructive` styles the button; the handler itself is a `GeneroWP\ProductsList\Actions\Action` registered through `wc_products_list/action_handlers`.
+**Actions** (`wc_products_list/actions`) show up in the row menu and the bulk toolbar and run `POST /wc-products-list/v1/actions/{id}` with the selected ids. Without `args` and `confirm` the action runs on click. With either, a modal collects the args (`text`, `select`, `boolean`, `integer`, `number`, `array`; `required` blocks the button) and shows the confirm text. The form starts from each arg's `default`; a required `select` without one starts on its first option, so the button is enabled with the value the user sees. An `array` arg is a checkbox group over its `options` and is sent as a list of the ticked values (`'default' => ['name']` or `'name,slug'` pre-ticks them); use it for "which fields" choices instead of a comma-separated text input. `scope` limits the action to products, variations or both; `destructive` styles the button; the handler itself is a `GeneroWP\ProductsList\Actions\Action` registered through `wc_products_list/action_handlers`.
 
 ## JavaScript API
 
@@ -86,7 +86,7 @@ add_filter('wc_products_list/filters', function (array $filters): array {
 | `patchItems( [ { id, …partial } ] )` | merges partial rows into every cached list without a request (for optimistic updates) |
 | `batchUpdate( { products?, variations? }, { source? } )` | saves through the bulk-edit path: variations first (per parent), then parents, under one batch id, logged; resolves `{ updated, errors, batchId }` |
 | `notices.success / error / info( message, options? )` | snackbar (default) or panel notices |
-| `getItems()` | the rows currently in the list, parents and expanded variations |
+| `getItems()` | the rows currently on screen, parents and expanded variations in display order (placeholder rows excluded; empty before the Catalog mounts and on the History screen) |
 | `hooks` | `wp.hooks` plus the names: `hooks.filters.query`, `hooks.actions.loaded`, `hooks.hookNamespace( 'my-plugin' )` |
 
 Every `register*` call bumps a registry version; the screen re-derives its fields and actions when it changes, so registering after mount works without a reload.
@@ -110,6 +110,8 @@ api.registerField( {
     edit: { group: 'notes', tab: 'notes', bulk: 'default' },
 } );
 ```
+
+A registered field is offered under **Add filter** only when the list query can act on it: give it `rest.param` (sent as `{ [param]: value }`), `rest.toParams( value, operator )`, or `elements` whose entries carry `params`; otherwise `filterBy` defaults to `false` (an explicit `filterBy` is kept either way).
 
 `getValue` is what the column and the form read. `setValue` is what DataForm applies to the form data while editing (it must produce the same shape the row has). `rest.write` is what goes into the wc/v3 request body on save. For a plain wc/v3 key (`sku`, `regular_price`) none of the three is needed.
 
@@ -148,7 +150,7 @@ Names are exported from `resources/extensions/hooks.ts` and available as `api.ho
 | `wcProductsList.statusTabs` | `{ id, label, count }[]` | `counts` |
 | `wcProductsList.quickEdit.tabs` | `QuickEditTab[]` | `items` |
 | `wcProductsList.quickEdit.layout` | the DataForm `Form` of a tab | `tab, items` |
-| `wcProductsList.bulkNumericFields` | field ids with the set/increase/decrease control | — |
+| `wcProductsList.bulkNumericFields` | field ids with the set/increase/decrease (and, for sale prices, regular-price-minus) control | — |
 
 | Action | Payload |
 | --- | --- |

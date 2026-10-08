@@ -3,7 +3,8 @@
  * product cache and the settings into the save runner.
  */
 import { doAction } from '@wordpress/hooks';
-import { batchProducts, batchVariations, getVariations, newBatchId } from '../api/client';
+import { rowFields } from '../actions/context';
+import { batchProducts, batchVariations, getVariations, newBatchId, toRow } from '../api/client';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
 import { invalidateProducts, patchItems } from '../store/products';
@@ -25,6 +26,7 @@ function realDeps(): SaveDeps {
 		patchItems,
 		newBatchId,
 		batchSize: settings.limits.batchSize,
+		normalizeRow: toRow,
 	};
 }
 
@@ -34,7 +36,9 @@ function changesStatus( edits: Record< string, unknown > ): boolean {
 }
 
 export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveOptions ): Promise< BatchResult > {
-	const result = await runSave( realDeps(), items, edits, fields, getSettings(), options );
+	// The rows a write returns are trimmed to what the list can show: the
+	// registered fields' keys, never the full wc/v3 object (PHP Rows::trimBatchItem).
+	const result = await runSave( realDeps(), items, edits, fields, getSettings(), { fields: rowFields( fields ), ...options } );
 
 	if ( result.updated.length > 0 && changesStatus( edits ) ) {
 		invalidateProducts( { counts: true } );

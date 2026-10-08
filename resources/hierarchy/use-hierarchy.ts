@@ -10,11 +10,25 @@
  * Expanded ids persist in sessionStorage so a reload keeps the tree open.
  * Loading goes through one limiter: at most 4 requests in flight for the
  * whole hierarchy (expand all, variationIdsOf and single expands share it).
+ *
+ * Speed rules (the table re-renders every row on every store change):
+ * - load progress is published through one coalesced emit per short window,
+ *   so an "expand all" whose responses trickle in produces a few renders,
+ *   not one per response; user gestures (expand, collapse, patches) emit
+ *   at once;
+ * - every load carries an AbortController: collapsing a parent, paging away
+ *   from it or unmounting aborts the request and drops it from the limiter
+ *   queue, so the page the user looks at is never queued behind the one
+ *   they left;
+ * - loaded children of parents that are neither expanded nor on the page
+ *   are evicted beyond a cap, so memory does not grow with every parent
+ *   ever visited.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
 import { addAction } from '@wordpress/hooks';
 import { __, sprintf } from '@wordpress/i18n';
 import { getVariations } from '../api/client';
+import { isAbortError } from '../api/errors';
 import { getSettings } from '../settings';
 import { ACTIONS } from '../extensions/hooks';
 import { getItemId } from '../types/product';
@@ -26,12 +40,30 @@ import { normalizeVariation } from './normalize';
 
 export const EXPANDED_STORAGE_KEY = 'wcProductsList.expanded';
 
-/** Rows above which expandAll asks before loading. */
-export const EXPAND_ALL_WARN_ROWS = 2000;
+/**
+ * Rows above which expandAll asks before loading. DataViews renders every
+ * row (no virtualisation): a 1,800-row table takes ~2 s per render with
+ * production React and holds hundreds of MB, so the warning comes early.
+ */
+export const EXPAND_ALL_WARN_ROWS = 600;
 
 export const VARIATIONS_PER_PAGE = 100;
 
-export const MAX_CONCURRENT_REQUESTS = 4;
+export const MAX_CONCURRENT_REQUESTS = 6;
+
+/** Loaded parents kept beyond the expanded ones and the current page. */
+export const MAX_CACHED_PARENTS = 60;
+
+/** Responses arriving within this window share one render (ms). */
+export const EMIT_WINDOW = 40;
+
+/**
+ * The window while `expandAll` runs (ms). A 100-parent page becomes one
+ * ~1,800-row table, and every render of it costs more than any request, so
+ * progress is published about once a second and once more when the last
+ * load finishes, instead of after each of the ~100 responses.
+ */
+export const EMIT_WINDOW_BULK = 1000;
 
 /** The `_fields` every variation request carries, whatever the view shows. */
 export const VARIATION_BASE_FIELDS = [ 'id', 'name', 'status', 'parent_id', 'attributes', 'image', 'sku', 'wc_products_list' ] as const;
@@ -82,8 +114,10 @@ export interface Hierarchy {
 	 * Expand a parent and return `current` plus its variation ids as
 	 * DataViews selection ids. DataViews drops selected ids that are not in
 	 * `data`, so the parent must be expanded for the selection to stick.
+	 * With `where`, only the variations it accepts are added (e.g. the
+	 * out-of-stock ones).
 	 */
-	selectVariations( parentId: number, current?: string[] ): Promise< string[] >;
+	selectVariations( parentId: number, current?: string[], where?: ( item: VariationRow ) => boolean ): Promise< string[] >;
 }
 
 export const getItemParentId = ( item: ProductListItem ): number | null => item._parentId;
@@ -96,22 +130,69 @@ export const getItemLevel = ( item: ProductListItem ): number => item._level;
 
 type Listener = () => void;
 
+interface Inflight {
+	promise: Promise< void >;
+	controller: AbortController;
+}
+
 let children: Map< number, ChildrenState > = new Map();
 const listeners = new Set< Listener >();
-const inflight = new Map< number, Promise< void > >();
+const inflight = new Map< number, Inflight >();
 const idCache = new Map< number, number[] >();
 
+/** What the mounted hook currently shows: used by the eviction and by the limiter's cancellation checks. */
+let currentExpanded: ReadonlySet< number > = new Set();
+let currentParents: ReadonlySet< number > = new Set();
+
+let emitTimer: ReturnType< typeof setTimeout > | undefined;
+let emitWaiters: Array< () => void > = [];
+
+/** Running `expandAll` calls; while above zero, publishes use the bulk window. */
+let bulkLoads = 0;
+
+function inBulkLoad(): boolean {
+	return bulkLoads > 0;
+}
+
 function emit(): void {
+	if ( emitTimer !== undefined ) {
+		clearTimeout( emitTimer );
+		emitTimer = undefined;
+	}
+
+	const waiters = emitWaiters;
+	emitWaiters = [];
+
 	for ( const listener of listeners ) {
 		listener();
 	}
+
+	waiters.forEach( ( resolve ) => resolve() );
 }
 
-function setChildren( parentId: number, state: ChildrenState ): void {
+/** Publish on the next window; resolves once the listeners ran. */
+function scheduleEmit(): Promise< void > {
+	return new Promise< void >( ( resolve ) => {
+		emitWaiters.push( resolve );
+
+		if ( emitTimer === undefined ) {
+			emitTimer = setTimeout( emit, inBulkLoad() ? EMIT_WINDOW_BULK : EMIT_WINDOW );
+		}
+	} );
+}
+
+function setChildren( parentId: number, state: ChildrenState, immediate = true ): Promise< void > {
 	const next = new Map( children );
 	next.set( parentId, state );
 	children = next;
-	emit();
+
+	if ( immediate ) {
+		emit();
+
+		return Promise.resolve();
+	}
+
+	return scheduleEmit();
 }
 
 export function subscribeChildren( listener: Listener ): () => void {
@@ -197,6 +278,7 @@ export function removeVariationRows( ids: number[] ): void {
 /** Forget loaded variations (all, or of the given parents); expanded parents reload on the next render. */
 export function invalidateVariations( parentIds?: number[] ): void {
 	if ( ! parentIds ) {
+		abortLoads();
 		children = new Map();
 		idCache.clear();
 		emit();
@@ -207,12 +289,38 @@ export function invalidateVariations( parentIds?: number[] ): void {
 	const next = new Map( children );
 
 	for ( const id of parentIds ) {
+		abortLoad( id );
 		next.delete( id );
 		idCache.delete( id );
 	}
 
 	children = next;
 	emit();
+}
+
+/** Loaded parents that are neither expanded nor on the page, oldest first, beyond the cap. */
+function evict(): void {
+	if ( children.size <= MAX_CACHED_PARENTS ) {
+		return;
+	}
+
+	const next = new Map( children );
+
+	for ( const [ parentId, state ] of children ) {
+		if ( next.size <= MAX_CACHED_PARENTS ) {
+			break;
+		}
+
+		if ( state.status !== 'loaded' || currentExpanded.has( parentId ) || currentParents.has( parentId ) ) {
+			continue;
+		}
+
+		next.delete( parentId );
+	}
+
+	if ( next.size !== children.size ) {
+		children = next;
+	}
 }
 
 /**
@@ -237,27 +345,83 @@ addAction( ACTIONS.deleted, 'wcProductsList/hierarchy', ( ids: number[] ) => {
 /* Request limiter                                                           */
 /* ------------------------------------------------------------------------ */
 
+export interface LimiterOptions {
+	/** Checked when the task reaches the front of the queue: true drops it with an abort error. */
+	isCancelled?: () => boolean;
+}
+
+export function abortError(): Error {
+	const error = new Error( 'Request aborted' );
+	error.name = 'AbortError';
+
+	return error;
+}
+
+interface Queued {
+	start: () => void;
+	cancel: () => void;
+	isCancelled?: () => boolean;
+}
+
+/**
+ * At most `concurrency` tasks at once, FIFO. A queued task whose
+ * `isCancelled()` says so when its turn comes is rejected without running,
+ * so a collapsed parent's remaining pages never take a slot.
+ */
 export function createLimiter( concurrency: number ) {
 	let active = 0;
-	const queue: Array< () => void > = [];
+	const queue: Queued[] = [];
 
-	const next = () => {
-		active -= 1;
-		queue.shift()?.();
+	const dequeue = () => {
+		while ( active < concurrency && queue.length ) {
+			const entry = queue.shift() as Queued;
+
+			if ( entry.isCancelled?.() ) {
+				entry.cancel();
+				continue;
+			}
+
+			active += 1;
+			entry.start();
+		}
 	};
 
-	return async function run< T >( task: () => Promise< T > ): Promise< T > {
-		if ( active >= concurrency ) {
-			await new Promise< void >( ( resolve ) => queue.push( resolve ) );
-		}
+	const release = () => {
+		active -= 1;
+		dequeue();
+	};
 
-		active += 1;
+	return function run< T >( task: () => Promise< T >, options: LimiterOptions = {} ): Promise< T > {
+		return new Promise< T >( ( resolve, reject ) => {
+			queue.push( {
+				isCancelled: options.isCancelled,
+				cancel: () => reject( abortError() ),
+				start: () => {
+					let result: Promise< T >;
 
-		try {
-			return await task();
-		} finally {
-			next();
-		}
+					try {
+						result = task();
+					} catch ( error ) {
+						release();
+						reject( error );
+
+						return;
+					}
+
+					result.then(
+						( value ) => {
+							release();
+							resolve( value );
+						},
+						( error: unknown ) => {
+							release();
+							reject( error );
+						}
+					);
+				},
+			} );
+			dequeue();
+		} );
 	};
 }
 
@@ -292,17 +456,41 @@ function restFields( fields: ProductField[] ): string[] {
 	return Array.from( keys );
 }
 
+/** Abort one parent's load, if any; its state goes back to idle so a later expand refetches. */
+export function abortLoad( parentId: number ): void {
+	const entry = inflight.get( parentId );
+
+	if ( ! entry ) {
+		return;
+	}
+
+	inflight.delete( parentId );
+	entry.controller.abort();
+}
+
+export function abortLoads(): void {
+	for ( const parentId of Array.from( inflight.keys() ) ) {
+		abortLoad( parentId );
+	}
+}
+
+/** Parents currently loading (tests, the toolbar). */
+export function loadingParentIds(): number[] {
+	return Array.from( inflight.keys() );
+}
+
 /**
  * Load all variations of a parent: page 1 first (it carries the total), then
- * the remaining pages up to the cap, through the shared limiter. Rows are
- * kept in page order whatever order the responses arrive in.
+ * the remaining pages in parallel up to the cap, through the shared limiter.
+ * Page 1 is published as soon as it arrives; the rest when complete. Rows
+ * are kept in page order whatever order the responses arrive in.
  */
 function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariations, maxChildren: number ): Promise< void > {
 	const parentId = parent.id;
 	const pending = inflight.get( parentId );
 
 	if ( pending ) {
-		return pending;
+		return pending.promise;
 	}
 
 	const previous = children.get( parentId );
@@ -311,43 +499,66 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 		return Promise.resolve();
 	}
 
-	setChildren( parentId, { status: 'loading', items: previous?.items ?? [], total: previous?.total ?? 0 } );
+	const controller = new AbortController();
+	const { signal } = controller;
+	const entry: Inflight = { controller, promise: Promise.resolve() };
+	const isCancelled = () => signal.aborted;
+
+	// The loading marker shows at once for a single expand; during expandAll the markers share the bulk window too.
+	void setChildren( parentId, { status: 'loading', items: previous?.items ?? [], total: previous?.total ?? 0 }, ! inBulkLoad() );
 
 	const perPage = VARIATIONS_PER_PAGE;
 	const cap = maxChildren > 0 ? maxChildren : Infinity;
 	const normalize = ( rows: RawVariation[] ) => rows.map( ( row ) => normalizeVariation( row, parent ) );
 
-	const task = ( async () => {
+	entry.promise = ( async () => {
 		try {
-			const first = await limit( () => fetch( parentId, 1, { perPage, fields } ) );
+			const first = await limit( () => fetch( parentId, 1, { perPage, fields, signal } ), { isCancelled } );
 			const pages: VariationRow[][] = [ normalize( first.items ) ];
 			const total = first.total || first.items.length;
 			const wanted = Math.min( total, cap );
 			const lastPage = Math.max( 1, Math.ceil( wanted / perPage ) );
 
 			if ( lastPage > 1 ) {
-				setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total } );
+				void setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total }, false );
 
 				await Promise.all(
 					Array.from( { length: lastPage - 1 }, ( _, index ) => index + 2 ).map( async ( page ) => {
-						const result = await limit( () => fetch( parentId, page, { perPage, fields } ) );
+						const result = await limit( () => fetch( parentId, page, { perPage, fields, signal } ), { isCancelled } );
 						pages[ page - 1 ] = normalize( result.items );
 					} )
 				);
 			}
 
-			setChildren( parentId, { status: 'loaded', items: pages.flat(), total } );
+			if ( signal.aborted ) {
+				return;
+			}
+
+			evict();
+			await setChildren( parentId, { status: 'loaded', items: pages.flat(), total }, false );
 		} catch ( error ) {
+			if ( signal.aborted || isAbortError( error ) ) {
+				// Collapsed or paged away: back to idle, the next expand
+				// refetches. A load started since (retry, re-expand) owns the state.
+				if ( ! inflight.has( parentId ) && children.get( parentId )?.status === 'loading' ) {
+					await setChildren( parentId, { status: 'idle', items: [], total: 0 }, false );
+				}
+
+				return;
+			}
+
 			const partial = children.get( parentId );
-			setChildren( parentId, { status: 'error', items: partial?.items ?? [], total: partial?.total ?? 0, error: errorMessage( error ) } );
+			await setChildren( parentId, { status: 'error', items: partial?.items ?? [], total: partial?.total ?? 0, error: errorMessage( error ) }, false );
 		} finally {
-			inflight.delete( parentId );
+			if ( inflight.get( parentId ) === entry ) {
+				inflight.delete( parentId );
+			}
 		}
 	} )();
 
-	inflight.set( parentId, task );
+	inflight.set( parentId, entry );
 
-	return task;
+	return entry.promise;
 }
 
 async function loadVariationIds( parentId: number, fetch: FetchVariations ): Promise< number[] > {
@@ -421,7 +632,7 @@ function defaultConfirm( rows: number ): boolean {
 	return window.confirm(
 		sprintf(
 			/* translators: %d: number of rows */
-			__( 'This will show about %d rows, which may be slow. Continue?', 'wp-woocommerce-products-list' ),
+			__( 'This will show about %d rows on one page, which makes the table slow to render and scroll. Continue? (A smaller page size or a filter keeps it fast.)', 'wp-woocommerce-products-list' ),
 			rows
 		)
 	);
@@ -471,13 +682,36 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 	const latestRef = useRef( { parentsById, fieldKeys, fetch, maxChildren, expandedItemIds } );
 	useLayoutEffect( () => {
 		latestRef.current = { parentsById, fieldKeys, fetch, maxChildren, expandedItemIds };
+		currentExpanded = expandedSet;
+		currentParents = new Set( parentsById.keys() );
 	} );
+
+	// Loads for parents that left the page are wasted work and would queue
+	// the new page's expansions behind them: abort them. Unmounting aborts
+	// everything.
+	useEffect( () => {
+		for ( const parentId of loadingParentIds() ) {
+			if ( ! parentsById.has( parentId ) ) {
+				abortLoad( parentId );
+			}
+		}
+	}, [ parentsById ] );
+
+	useEffect( () => () => abortLoads(), [] );
 
 	const setExpanded = useCallback(
 		( ids: number[] ) => {
 			const unique = Array.from( new Set( ids.filter( ( id ) => Number.isInteger( id ) && id > 0 ) ) );
+			const current = latestRef.current.expandedItemIds;
 
-			setExpandedState( ( current ) => ( sameIds( current, unique ) ? current : unique ) );
+			// Collapsed while loading: stop the request.
+			for ( const id of current ) {
+				if ( ! unique.includes( id ) ) {
+					abortLoad( id );
+				}
+			}
+
+			setExpandedState( ( state ) => ( sameIds( state, unique ) ? state : unique ) );
 			writeExpanded( storage, unique );
 		},
 		[ storage ]
@@ -570,8 +804,19 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 				return false;
 			}
 
-			setExpanded( [ ...current, ...missing.map( ( parent ) => parent.id ) ] );
-			await Promise.all( missing.map( ( parent ) => load( parent.id ) ) );
+			bulkLoads += 1;
+
+			try {
+				setExpanded( [ ...current, ...missing.map( ( parent ) => parent.id ) ] );
+				await Promise.all( missing.map( ( parent ) => load( parent.id ) ) );
+			} finally {
+				bulkLoads -= 1;
+
+				// The last responses do not wait for the bulk window.
+				if ( ! inBulkLoad() && emitTimer !== undefined ) {
+					emit();
+				}
+			}
 
 			return true;
 		},
@@ -589,11 +834,12 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 	}, [] );
 
 	const selectVariations = useCallback(
-		async ( parentId: number, current: string[] = [] ): Promise< string[] > => {
+		async ( parentId: number, current: string[] = [], where?: ( item: VariationRow ) => boolean ): Promise< string[] > => {
 			await expand( parentId );
 
 			const state = children.get( parentId );
-			const ids = ( state?.items ?? [] ).map( ( item ) => getItemId( item ) );
+			const matching = ( state?.items ?? [] ).filter( ( item ) => ! where || where( item ) );
+			const ids = matching.map( ( item ) => getItemId( item ) );
 			const have = new Set( current );
 
 			return [ ...current, ...ids.filter( ( id ) => ! have.has( id ) ) ];
@@ -624,8 +870,11 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 
 /** Tests: reset the module store. */
 export function resetHierarchyStore(): void {
+	abortLoads();
 	children = new Map();
 	inflight.clear();
 	idCache.clear();
+	currentExpanded = new Set();
+	currentParents = new Set();
 	emit();
 }

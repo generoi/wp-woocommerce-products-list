@@ -12,21 +12,33 @@ import { isBatchItemError } from '../types';
 import type { FetchVariations } from './apply-to-variations';
 import { resolveSaveTargets } from './apply-to-variations';
 import type { SaveTarget } from './apply-to-variations';
+import { humanizeError } from './errors';
 import { isVariation, parentIdOf } from './field-value';
 import { buildPayload, hasPayload } from './payload';
 
+export interface SaveRequestOptions {
+	batchId: string;
+	source: 'quick' | 'bulk';
+	/** The wc/v3 fields the returned rows are trimmed to (what the list shows); whole objects when missing. */
+	fields?: string[];
+}
+
 export interface SaveDeps {
-	batchProducts( update: Array< { id: number } & Record< string, unknown > >, options: { batchId: string; source: 'quick' | 'bulk' } ): Promise< BatchResponse< RawProduct > >;
-	batchVariations( parentId: number, update: Array< { id: number } & Record< string, unknown > >, options: { batchId: string; source: 'quick' | 'bulk' } ): Promise< BatchResponse< RawVariation > >;
+	batchProducts( update: Array< { id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawProduct > >;
+	batchVariations( parentId: number, update: Array< { id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawVariation > >;
 	fetchVariations: FetchVariations;
 	patchItems( items: Array< Partial< ProductListItem > & { id: number } > ): void;
 	newBatchId(): string;
 	batchSize: number;
+	/** Normalise a wc/v3 object a write returned the way list reads are (toRow: hierarchy keys, `wcProductsList.item` filter). */
+	normalizeRow?( raw: RawProduct | RawVariation, parentId?: number ): ProductListItem;
 }
 
 export interface SaveOptions {
 	applyToVariations: boolean;
 	source: 'quick' | 'bulk';
+	/** Trim the rows a write returns to these wc/v3 fields (a 100-row page is tens of KB instead of a megabyte). */
+	fields?: string[];
 	onProgress?( done: number, total: number ): void;
 	/** Variations already fetched by the modal (keyed by parent id), so the save does not fetch them again. */
 	prefetchedVariations?: ReadonlyMap< number, ProductListItem[] >;
@@ -60,6 +72,22 @@ function errorMessage( error: unknown ): string {
 	}
 
 	return String( error );
+}
+
+/**
+ * A write returns the object with full-size `images`; the list shows
+ * thumbnails. Unless the save touched them, the row keeps the ones it has.
+ */
+export function withoutUntouchedImages< Row extends Record< string, unknown > >( row: Row, payload: Record< string, unknown > ): Row {
+	const copy: Record< string, unknown > = { ...row };
+
+	for ( const key of [ 'images', 'image' ] ) {
+		if ( ! ( key in payload ) ) {
+			delete copy[ key ];
+		}
+	}
+
+	return copy as Row;
 }
 
 function errorCode( error: unknown ): string | undefined {
@@ -132,7 +160,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		return result;
 	}
 
-	const requestOptions = { batchId, source: options.source };
+	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ) };
 	const byId = new Map( prepared.map( ( entry ) => [ entry.target.item.id, entry ] ) );
 
 	const applyResponse = ( group: Prepared[], response: BatchResponse< RawProduct | RawVariation > ): void => {
@@ -144,7 +172,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 				const original = byId.get( failed.id );
 
 				seen.add( failed.id );
-				result.errors.push( { id: failed.id, message: failed.error.message, code: failed.error.code } );
+				result.errors.push( { id: failed.id, message: humanizeError( failed.error.code, failed.error.message ), code: failed.error.code } );
 
 				if ( original ) {
 					deps.patchItems( [ original.snapshot as Partial< ProductListItem > & { id: number } ] );
@@ -154,24 +182,27 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 			}
 
 			seen.add( entry.id );
-			deps.patchItems( [ entry as Partial< ProductListItem > & { id: number } ] );
 
 			const original = byId.get( entry.id );
+			const parentId = original ? parentIdOf( original.target.item ) : 0;
+			const normalized = deps.normalizeRow ? deps.normalizeRow( entry, parentId > 0 ? parentId : undefined ) : ( entry as ProductListItem );
+			const row = withoutUntouchedImages( normalized as Record< string, unknown >, original?.payload ?? {} ) as ProductListItem;
 
-			result.updated.push( { ...( original?.target.item ?? {} ), ...entry } as ProductListItem );
+			deps.patchItems( [ row ] );
+			result.updated.push( { ...( original?.target.item ?? {} ), ...row } as ProductListItem );
 		}
 
 		for ( const entry of group ) {
 			if ( ! seen.has( entry.target.item.id ) ) {
-				result.errors.push( { id: entry.target.item.id, message: 'No result returned for this item.', code: 'missing_result' } );
+				result.errors.push( { id: entry.target.item.id, message: humanizeError( 'missing_result', '' ), code: 'missing_result' } );
 				deps.patchItems( [ entry.snapshot as Partial< ProductListItem > & { id: number } ] );
 			}
 		}
 	};
 
 	const failGroup = ( group: Prepared[], error: unknown ): void => {
-		const message = errorMessage( error );
 		const code = errorCode( error );
+		const message = humanizeError( code, errorMessage( error ) );
 
 		for ( const entry of group ) {
 			result.errors.push( { id: entry.target.item.id, message, code } );
