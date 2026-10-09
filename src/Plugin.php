@@ -101,6 +101,11 @@ class Plugin
          */
         $modules = apply_filters(self::FILTER_MODULES, self::MODULES);
 
+        // SPIKE: native revisions as product history, behind a constant.
+        if (History\History::enabled()) {
+            $modules[] = History\History::class;
+        }
+
         foreach ($modules as $module) {
             if (! is_subclass_of($module, Module::class)) {
                 continue;

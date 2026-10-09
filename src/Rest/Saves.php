@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Rest;
 
+use GeneroWP\ProductsList\History\History;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Recorder;
@@ -378,7 +379,11 @@ final class Saves
         }
 
         self::forwardFields($request);
-        Recorder::begin($product, $request, $creating);
+
+        // SPIKE: with native revisions the field log stays quiet.
+        if (! History::enabled()) {
+            Recorder::begin($product, $request, $creating);
+        }
 
         $invalidTerms = self::invalidTermList($request);
 
@@ -484,7 +489,10 @@ final class Saves
         }
 
         self::clearBrands($product, $request);
-        Recorder::complete($product, $request);
+
+        if (! History::enabled()) {
+            Recorder::complete($product, $request);
+        }
     }
 
     /**
