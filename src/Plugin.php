@@ -168,4 +168,21 @@ class Plugin
          */
         return (string) apply_filters('wc_products_list/capability', 'edit_products');
     }
+
+    /**
+     * Who may read the change log and revert from it. The log holds old
+     * and new values of every user's changes, private products' included,
+     * so the default is the capability to edit other users' products,
+     * which a revert's wc/v3 writes need anyway.
+     */
+    public static function logCapability(): string
+    {
+        /**
+         * Filters the capability required to read the change log (History)
+         * and to revert batches from it.
+         *
+         * @param  string  $capability
+         */
+        return (string) apply_filters('wc_products_list/log_capability', 'edit_others_products');
+    }
 }

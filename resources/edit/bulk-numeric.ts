@@ -33,43 +33,125 @@ export type NumericOp = {
 	 * charm pricing does. Empty or missing: the store's precision only.
 	 */
 	round?: string;
+	/** Which way `round` goes: to the nearest price point (a tie goes up, as PHP's round() does), always up, or always down. */
+	roundMode?: RoundMode;
 };
 
-/** The endings the bulk control offers (two-decimal currencies). */
+export type RoundMode = 'nearest' | 'up' | 'down';
+
+/** The cent endings the bulk control offers (two-decimal currencies priced in cents: €, $, £). */
 export const ROUNDING_ENDINGS: readonly string[] = [ '00', '90', '95', '99' ];
 
-/** "rounded to ,95" for the summary. */
-export function describeRounding( round: string, settings?: Pick< Settings, 'currency' > ): string {
+/**
+ * Whole-unit price points (`w…`): kronor prices end in whole units (2 149 kr,
+ * 2 199 kr, 499 kr), never in öre. `w9` ends in 9, `w49` in 49 or 99, `w99`
+ * in 99, `w0` is the nearest 10.
+ */
+export const WHOLE_UNIT_ENDINGS: readonly string[] = [ 'w9', 'w49', 'w99', 'w0' ];
+
+/** The price points a rounding spec allows, as a period and an offset in minor units; null when it does not fit the decimals. */
+function pricePoints( decimals: number, spec: string ): { period: number; offset: number } | null {
+	const scale = scaleOf( Math.max( 0, decimals ) );
+	const whole = /^w(\d+)$/.exec( spec );
+
+	if ( whole ) {
+		switch ( whole[ 1 ] ) {
+			case '9':
+				return { period: 10 * scale, offset: 9 * scale };
+			case '49':
+				return { period: 50 * scale, offset: 49 * scale };
+			case '99':
+				return { period: 100 * scale, offset: 99 * scale };
+			case '0':
+				return { period: 10 * scale, offset: 0 };
+			default:
+				return null;
+		}
+	}
+
+	if ( decimals <= 0 || ! /^\d+$/.test( spec ) || spec.length > decimals ) {
+		return null;
+	}
+
+	return { period: scale, offset: Number( spec.padEnd( decimals, '0' ) ) };
+}
+
+function roundingTarget( round: string, settings?: Pick< Settings, 'currency' > ): string {
+	switch ( round ) {
+		case '00':
+			return __( 'whole units', 'wp-woocommerce-products-list' );
+		case 'w9':
+			return '…9';
+		case 'w49':
+			return __( '…49 or …99', 'wp-woocommerce-products-list' );
+		case 'w99':
+			return '…99';
+		case 'w0':
+			return __( 'the nearest 10', 'wp-woocommerce-products-list' );
+		default:
+			return `${ settings?.currency.decimalSeparator ?? '.' }${ round }`;
+	}
+}
+
+/** "rounded to ,95", "rounded up to …9" for the summary. */
+export function describeRounding( round: string, settings?: Pick< Settings, 'currency' >, mode: RoundMode = 'nearest' ): string {
+	const target = roundingTarget( round, settings );
+
+	if ( mode === 'up' ) {
+		/* translators: %s: a price ending, e.g. ",95" or "…9" */
+		return sprintf( __( 'rounded up to %s', 'wp-woocommerce-products-list' ), target );
+	}
+
+	if ( mode === 'down' ) {
+		/* translators: %s: a price ending, e.g. ",95" or "…9" */
+		return sprintf( __( 'rounded down to %s', 'wp-woocommerce-products-list' ), target );
+	}
+
 	/* translators: %s: a price ending, e.g. ",95" */
-	return sprintf( __( 'rounded to %s', 'wp-woocommerce-products-list' ), `${ settings?.currency.decimalSeparator ?? '.' }${ round }` );
+	return sprintf( __( 'rounded to %s', 'wp-woocommerce-products-list' ), target );
 }
 
 /**
- * `units` (minor units) moved to the nearest amount ending in `ending`
- * (a tie goes down: the lower price). Never below zero; unchanged when
- * the ending does not fit the currency's decimals.
+ * `units` (minor units) moved to a price point of `spec` (a cent ending
+ * like "95", or a whole-unit one like "w9"): the nearest one (a tie goes
+ * up, half-up like PHP's round(): 2 139,50 → 2 140), the next one up, or
+ * the next one down. Never below zero (rounding down past zero leaves the
+ * value as it is); unchanged when the spec does not fit the decimals.
  */
-export function roundToEnding( units: number, decimals: number, ending: string ): number {
-	if ( decimals <= 0 || ! /^\d+$/.test( ending ) || ending.length > decimals ) {
+export function roundToPricePoint( units: number, decimals: number, spec: string, mode: RoundMode = 'nearest' ): number {
+	const points = pricePoints( decimals, spec );
+
+	if ( ! points ) {
 		return units;
 	}
 
-	const scale = scaleOf( decimals );
-	const tail = Number( ending.padEnd( decimals, '0' ) );
-	const base = Math.floor( units / scale ) * scale;
-	let best: number | null = null;
+	const { period, offset } = points;
+	const low = Math.floor( ( units - offset ) / period ) * period + offset;
 
-	for ( const candidate of [ base - scale + tail, base + tail, base + scale + tail ] ) {
-		if ( candidate < 0 ) {
-			continue;
-		}
-
-		if ( best === null || Math.abs( candidate - units ) < Math.abs( best - units ) ) {
-			best = candidate;
-		}
+	if ( low === units ) {
+		return units;
 	}
 
-	return best ?? units;
+	const high = low + period;
+
+	if ( mode === 'up' ) {
+		return high;
+	}
+
+	if ( mode === 'down' ) {
+		return low >= 0 ? low : units;
+	}
+
+	if ( low < 0 ) {
+		return high;
+	}
+
+	return high - units <= units - low ? high : low;
+}
+
+/** `roundToPricePoint` to the nearest point (the original "ending" helper). */
+export function roundToEnding( units: number, decimals: number, ending: string ): number {
+	return roundToPricePoint( units, decimals, ending, 'nearest' );
 }
 
 export type NumericKind = 'money' | 'integer';
@@ -299,7 +381,7 @@ export function computeNumericOp( current: string | number | null | undefined, o
 	}
 
 	if ( kind === 'money' && op.round && units > 0 ) {
-		units = roundToEnding( units, decimals, op.round );
+		units = roundToPricePoint( units, decimals, op.round, op.roundMode ?? 'nearest' );
 	}
 
 	return units / scale;

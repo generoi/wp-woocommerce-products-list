@@ -26,6 +26,8 @@ export interface Caps {
 	deleteOthers: boolean;
 	manageWoocommerce: boolean;
 	manageTerms: boolean;
+	/** History, Undo and Revert (`wc_products_list/log_capability`, default edit_others_products). */
+	viewLog?: boolean;
 }
 
 export interface TaxonomySettings {
@@ -48,6 +50,8 @@ export interface Limits {
 	batchSize: number;
 	/** Ids per /actions/{action} request. */
 	actionBatchSize: number;
+	/** Per-action maximum ids per request (duplicate 5, trash/delete 20…); falls back to actionBatchSize. */
+	actionBatchSizes?: Record< string, number >;
 }
 
 export interface Links {

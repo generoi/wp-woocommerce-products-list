@@ -9,7 +9,7 @@
  * Prices are only offered for copying between languages that sell in the
  * same currency: copying 79 € into the Swedish price would sell for 79 kr.
  */
-import { Button, CheckboxControl, SelectControl, TextControl, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
+import { Button, CheckboxControl, SelectControl, TextControl } from '@wordpress/components';
 import { useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { KeyboardEvent } from 'react';
@@ -170,7 +170,13 @@ function escapeRegExp( text: string ): string {
  * run edits what they show. A template's {brand} and {category} are filled
  * in by the server; the preview shows them as typed.
  */
-export function previewTransform( def: DeclarativeAction, data: Record< string, unknown >, tabId: string, items: ProductListItem[], fields: ProductField[] ): { lines: PreviewLine[]; changes: number } | null {
+export function previewTransform(
+	def: DeclarativeAction,
+	data: Record< string, unknown >,
+	tabId: string,
+	items: ProductListItem[],
+	fields: ProductField[]
+): { lines: PreviewLine[]; changes: number; unloaded: number; emptyTemplate: number } | null {
 	const operation = String( data.operation ?? '' );
 
 	if ( ! [ 'replace', 'prefix', 'suffix', 'template' ].includes( operation ) || ! def.args.some( ( arg ) => arg.id === 'text' ) || missingArg( def, data ) ) {
@@ -186,6 +192,24 @@ export function previewTransform( def: DeclarativeAction, data: Record< string, 
 	const shown = data.base === 'shown';
 	const lines: PreviewLine[] = [];
 	let changes = 0;
+	// Values the editor has not loaded (SEO texts are no bulk field): the preview cannot say what they become.
+	let unloaded = 0;
+	// Rows where every token of the template is empty: the server refuses them (gds_woo_i18n_empty_template).
+	let emptyTemplate = 0;
+	const nameField = byId.get( `${ tabId }.name` );
+	// {name} is the product's name as it shows in this language: its translation, else the default-language name.
+	const shownNameOf = ( item: ProductListItem ): string => {
+		const own = nameField ? readFieldValue( nameField, item ) : undefined;
+
+		if ( typeof own === 'string' && own !== '' ) {
+			return own;
+		}
+
+		const fallback = nameField ? readReference( nameField, item ) : undefined;
+
+		return typeof fallback === 'string' && fallback !== '' ? fallback : String( ( item as { name?: unknown } ).name ?? '' );
+	};
+	const tokens = operation === 'template' ? Array.from( new Set( text.match( /\{(name|default_name|brand|category|sku)\}/g ) ?? [] ) ) : [];
 
 	for ( const item of items ) {
 		if ( item._placeholder ) {
@@ -199,8 +223,17 @@ export function previewTransform( def: DeclarativeAction, data: Record< string, 
 				continue;
 			}
 
-			const old = typeof readFieldValue( field, item ) === 'string' ? ( readFieldValue( field, item ) as string ) : '';
+			const raw = readFieldValue( field, item );
 			const reference = readReference( field, item );
+
+			// Neither the translation nor the value it falls back to is loaded: unknown, not "(not translated)".
+			// A template does not need them (its {name} is the item's name).
+			if ( raw === undefined && reference === undefined && operation !== 'template' ) {
+				unloaded += 1;
+				continue;
+			}
+
+			const old = typeof raw === 'string' ? raw : '';
 			const base = old !== '' || ! shown ? old : typeof reference === 'string' ? reference : '';
 			let next = base;
 
@@ -211,12 +244,24 @@ export function previewTransform( def: DeclarativeAction, data: Record< string, 
 			} else if ( operation === 'suffix' ) {
 				next = base === '' || base.endsWith( text ) ? base : base + text;
 			} else {
-				const shownName = old || ( typeof reference === 'string' ? reference : '' );
+				const values: Record< string, string | null > = {
+					'{name}': shownNameOf( item ),
+					'{default_name}': String( ( item as { name?: unknown } ).name ?? '' ),
+					'{sku}': String( ( item as { sku?: unknown } ).sku ?? '' ),
+					// Filled in by the server: unknown here.
+					'{brand}': null,
+					'{category}': null,
+				};
+
+				if ( tokens.length && tokens.every( ( token ) => values[ token ] === '' ) ) {
+					emptyTemplate += 1;
+					continue;
+				}
 
 				next = text
-					.replace( /\{name\}/g, shownName )
-					.replace( /\{default_name\}/g, String( ( item as { name?: unknown } ).name ?? '' ) )
-					.replace( /\{sku\}/g, String( ( item as { sku?: unknown } ).sku ?? '' ) );
+					.replace( /\{name\}/g, values[ '{name}' ] ?? '' )
+					.replace( /\{default_name\}/g, values[ '{default_name}' ] ?? '' )
+					.replace( /\{sku\}/g, values[ '{sku}' ] ?? '' );
 			}
 
 			if ( next.trim() === '' || next === old || ( operation !== 'template' && next === base && old === '' ) ) {
@@ -231,7 +276,7 @@ export function previewTransform( def: DeclarativeAction, data: Record< string, 
 		}
 	}
 
-	return { lines, changes };
+	return { lines, changes, unloaded, emptyTemplate };
 }
 
 /** The ids an action runs on: variations only when its scope takes them. */
@@ -273,6 +318,9 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	const [ running, setRunning ] = useState( false );
 	const [ confirming, setConfirming ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
+	// How many items the last run went to, until a setting changes: the preview (made from the values before) is not shown again.
+	const [ applied, setApplied ] = useState< number | null >( null );
+	const confirmRef = useRef< HTMLDivElement >( null );
 	const ids = useMemo( () => toolIds( def, items ), [ def, items ] );
 	const copies = copiesBetweenLanguages( def );
 	const args = def.args.filter( ( arg ) => arg.id !== LANG_ARG && argShown( arg, def, data ) );
@@ -280,6 +328,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	const preview = useMemo( () => ( fields ? previewTransform( def, data, tabId, items, fields ) : null ), [ def, data, tabId, items, fields ] );
 	const set = ( id: string, value: unknown ) => {
 		setError( null );
+		setApplied( null );
+		setConfirming( false );
 		setData( ( previous ) => ( { ...previous, [ id ]: value } ) );
 	};
 	const dirty = ! sameData( data, ranWith );
@@ -314,10 +364,12 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		}
 
 		const snapshot = data;
+		const count = ids.length;
 
 		run( def, ids, sent )
 			.then( () => {
 				setRanWith( snapshot );
+				setApplied( count );
 				onDone();
 			} )
 			.catch( ( reason: unknown ) => setError( reason instanceof Error ? reason.message : __( 'The action failed.', 'wp-woocommerce-products-list' ) ) )
@@ -338,21 +390,37 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 			return;
 		}
 
-		if ( def.confirm || def.destructive ) {
-			setConfirming( true );
-		} else {
-			go();
-		}
+		// A tool saves at once, outside the editor's Update / Cancel: it always asks first, inline (no dialog), and the
+		// yes is a press of its own button: an Enter in the tool's inputs only gets here.
+		setConfirming( true );
+		setTimeout( () => confirmRef.current?.focus(), 0 );
 	};
 
-	// Enter in one of the tool's inputs runs the tool, not the editor's Update.
+	// Enter in one of the tool's inputs asks to run the tool (never the editor's Update, never the confirm's yes).
 	const onKeyDown = ( event: KeyboardEvent< HTMLDivElement > ) => {
+		if ( event.key === 'Escape' && confirming ) {
+			event.preventDefault();
+			event.stopPropagation();
+			setConfirming( false );
+
+			return;
+		}
+
 		if ( event.key === 'Enter' && event.target instanceof HTMLInputElement && event.target.type !== 'checkbox' ) {
 			event.preventDefault();
 			event.stopPropagation();
-			start();
+
+			if ( ! confirming ) {
+				start();
+			}
 		}
 	};
+
+	const itemsCount = sprintf(
+		/* translators: %d: number of items */
+		_n( '%d item', '%d items', ids.length, 'wp-woocommerce-products-list' ),
+		ids.length
+	);
 
 	return (
 		<div className="wc-pl-language-tools__tool" onKeyDown={ onKeyDown }>
@@ -423,9 +491,34 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 					return null;
 				} ) }
 			</div>
-			{ preview ? (
+			{ applied !== null && ! dirty ? (
+				<p className="wc-pl-language-tools__applied" role="status">
+					{ sprintf(
+						/* translators: 1: action label, 2: number of items */
+						_n( '%1$s applied to %2$d item. Undo it from the notice; Cancel does not undo it.', '%1$s applied to %2$d items. Undo it from the notice; Cancel does not undo it.', applied, 'wp-woocommerce-products-list' ),
+						def.label,
+						applied
+					) }
+				</p>
+			) : preview ? (
 				<div className="wc-pl-language-tools__preview" aria-live="polite">
-					{ preview.changes === 0 ? (
+					{ preview.emptyTemplate > 0 ? (
+						<p className="wc-pl-language-tools__warning">
+							{ sprintf(
+								/* translators: %d: number of values whose template tokens are all empty */
+								_n(
+									'%d value is skipped: every token in the template is empty for it.',
+									'%d values are skipped: every token in the template is empty for them.',
+									preview.emptyTemplate,
+									'wp-woocommerce-products-list'
+								),
+								preview.emptyTemplate
+							) }
+						</p>
+					) : null }
+					{ preview.changes === 0 && preview.unloaded > 0 ? (
+						<p className="wc-pl-language-tools__description">{ __( 'No preview: the current values of these fields are not loaded in this editor.', 'wp-woocommerce-products-list' ) }</p>
+					) : preview.changes === 0 ? (
 						<p className="wc-pl-language-tools__description">{ __( 'Preview: this changes none of the loaded values.', 'wp-woocommerce-products-list' ) }</p>
 					) : (
 						<>
@@ -452,28 +545,50 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 					{ error }
 				</p>
 			) : null }
-			<Button variant="secondary" isDestructive={ def.destructive } isBusy={ running } aria-disabled={ blocked } onClick={ start } __next40pxDefaultSize>
-				{ sprintf(
-					/* translators: 1: action label, 2: language, 3: number of items */
-					__( '%1$s: %2$s (%3$d)', 'wp-woocommerce-products-list' ),
-					def.label,
-					tabLabel,
-					ids.length
-				) }
-			</Button>
 			{ confirming ? (
-				<ConfirmDialog
-					isOpen
-					confirmButtonText={ def.label }
-					onConfirm={ () => {
-						setConfirming( false );
-						go();
-					} }
-					onCancel={ () => setConfirming( false ) }
-				>
-					{ def.confirm ?? def.description }
-				</ConfirmDialog>
-			) : null }
+				<div className="wc-pl-language-tools__confirm" ref={ confirmRef } tabIndex={ -1 } role="group" aria-label={ sprintf( /* translators: %s: action label */ __( 'Confirm %s', 'wp-woocommerce-products-list' ), def.label ) }>
+					<p>
+						{ def.confirm ? `${ def.confirm } ` : '' }
+						{ sprintf(
+							/* translators: 1: action label, 2: language, 3: "N items" */
+							__( '%1$s (%2$s) saves now to %3$s, separately from Update: Cancel will not undo it (the notice that follows has Undo).', 'wp-woocommerce-products-list' ),
+							def.label,
+							tabLabel,
+							itemsCount
+						) }
+					</p>
+					<div className="wc-pl-language-tools__confirm-buttons">
+						<Button
+							variant="primary"
+							isDestructive={ def.destructive }
+							onClick={ () => {
+								setConfirming( false );
+								go();
+							} }
+							__next40pxDefaultSize
+						>
+							{ sprintf(
+								/* translators: %s: "N items" */
+								__( 'Apply now to %s', 'wp-woocommerce-products-list' ),
+								itemsCount
+							) }
+						</Button>
+						<Button variant="tertiary" onClick={ () => setConfirming( false ) } __next40pxDefaultSize>
+							{ __( 'Back', 'wp-woocommerce-products-list' ) }
+						</Button>
+					</div>
+				</div>
+			) : (
+				<Button variant="secondary" isDestructive={ def.destructive } isBusy={ running } aria-disabled={ blocked } onClick={ start } __next40pxDefaultSize>
+					{ sprintf(
+						/* translators: 1: action label, 2: language, 3: "N items" */
+						__( '%1$s: %2$s, apply now to %3$s…', 'wp-woocommerce-products-list' ),
+						def.label,
+						tabLabel,
+						itemsCount
+					) }
+				</Button>
+			) }
 		</div>
 	);
 }

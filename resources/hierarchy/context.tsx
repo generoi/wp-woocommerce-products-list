@@ -25,6 +25,12 @@ export interface HierarchyViewValue {
 	onRetryChildren?( parentId: number ): void;
 	/** Variation rows the current search matched by SKU (hierarchy/search-match.ts). */
 	searchMatchIds?: ReadonlySet< number >;
+	/** A variation-level filter narrows the expanded parents ("3 of 15 variations match"). */
+	variationFilterActive?: boolean;
+	/** List every variation of one parent despite the filter. */
+	onShowAllChildren?( parentId: number ): void;
+	/** Narrow one parent to the matching variations again. */
+	onShowMatchingChildren?( parentId: number ): void;
 }
 
 const HierarchyContext = createContext< Hierarchy | null >( null );

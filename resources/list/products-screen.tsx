@@ -14,7 +14,7 @@
  */
 import { __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
-import { __, sprintf } from '@wordpress/i18n';
+import { __, _n, sprintf } from '@wordpress/i18n';
 import useProductActions from '../actions';
 import { realRows } from '../actions/context';
 import { notify } from '../actions/notices';
@@ -32,7 +32,7 @@ import { HierarchyProvider } from '../hierarchy/context';
 import { footerCountLabel } from '../hierarchy/footer-count';
 import { HierarchicalDataViews } from '../hierarchy/hierarchical-dataviews';
 import { useSearchReveal } from '../hierarchy/search-match';
-import { useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
+import { getChildrenState, useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
 import { useCounts, useProductList } from '../store/products';
 import { setCurrentRows, setVisibleFieldIds } from '../store/rows';
 import { useView } from '../store/view';
@@ -44,6 +44,8 @@ import { ColumnsMenu } from './columns-menu';
 import { DEFAULT_LAYOUTS, PER_PAGE_SIZES } from './default-view';
 import { EmptyState } from './empty-state';
 import { useSelection } from './selection';
+import type { SelectionApi } from './selection';
+import { useVariationFilter } from './variation-filter';
 import { SelectionBar } from './selection-bar';
 import { StatusTabs } from './status-tabs';
 import { withWholeSelection } from './whole-selection';
@@ -122,6 +124,48 @@ function ExpandAllButton( { onClick }: { onClick: () => void } ) {
 	);
 }
 
+/** The keyboard shortcut to the bulk edit button: Alt+B (Option+B), from anywhere on the screen but the editor and text fields. */
+export const BULK_EDIT_SHORTCUT = 'Alt+B';
+
+export function isBulkEditShortcut( event: Pick< KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'code' | 'key' > ): boolean {
+	return event.altKey && ! event.ctrlKey && ! event.metaKey && ! event.shiftKey && ( event.code === 'KeyB' || event.key === 'b' || event.key === 'B' );
+}
+
+/**
+ * Expand the page's variable products (as far as Expand all may) and add
+ * their loaded variations, the ones the variation-level filters let
+ * through, to the selection: "Colour: Black with wool" → every black
+ * variation on the page, ready for Bulk edit, Disable or Trash.
+ */
+export async function selectMatchingVariations(
+	parents: ProductRow[],
+	hierarchy: { expandAll(): Promise< boolean >; isExpanded( id: number ): boolean },
+	selection: Pick< SelectionApi, 'addRows' >,
+	children: () => ReadonlyMap< number, { status: string; items: ProductListItem[] } > = getChildrenState
+): Promise< number > {
+	await hierarchy.expandAll();
+
+	const state = children();
+	const rows = parents
+		.filter( ( parent ) => parent._hasChildren && hierarchy.isExpanded( parent.id ) )
+		.flatMap( ( parent ) => {
+			const entry = state.get( parent.id );
+
+			return entry?.status === 'loaded' ? entry.items : [];
+		} );
+
+	selection.addRows( rows );
+
+	return rows.length;
+}
+
+/** The same view in the table layout, with the table's own layout options. */
+export function tableViewOf( view: View ): View {
+	const table = DEFAULT_LAYOUTS.table && DEFAULT_LAYOUTS.table !== true ? DEFAULT_LAYOUTS.table : undefined;
+
+	return { ...view, type: 'table', ...( table?.layout ? { layout: table.layout } : {} ) } as View;
+}
+
 export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const { view, setView, tab, setTab, isModified, resetView } = useView( fields, settings );
 	const list = useProductList( view, tab, fields );
@@ -143,7 +187,10 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			return null;
 		} );
 	}, [] );
-	const hierarchyOptions = useMemo( () => ( { confirmExpandAll } ), [ confirmExpandAll ] );
+	// "Colour: Black", "Any variation: Out of stock": expanded parents list the matching variations only.
+	const variationFilter = useVariationFilter( view, fields );
+	const variationFilterSpec = useMemo( () => ( { key: variationFilter.key, params: variationFilter.params } ), [ variationFilter.key, variationFilter.params ] );
+	const hierarchyOptions = useMemo( () => ( { confirmExpandAll, variationFilter: variationFilterSpec } ), [ confirmExpandAll, variationFilterSpec ] );
 	const hierarchy = useHierarchy( parents, visibleFields, hierarchyOptions );
 	// The selection spans pages, searches, filters and sorts; a status tab is another list.
 	// A variation SKU / barcode search opens the parent at the matching variation.
@@ -216,6 +263,11 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 				const initialTab = initialTabFor( viewRef.current.filters as Array< { field: string; value?: unknown } > | undefined );
 
+				// The editor is a table row: the grid and list layouts have no row to put it in.
+				if ( viewRef.current.type !== 'table' ) {
+					setView( tableViewOf( viewRef.current ) );
+				}
+
 				if ( rows.length === 1 ) {
 					setSession( { mode: 'quick', id: rows[ 0 ]!.id, initialTab, origin: focusOriginForRow( rows[ 0 ]! ) } );
 
@@ -227,7 +279,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				setSession( { mode: 'bulk', initialTab, origin: captureFocusOrigin() } );
 			} )();
 		},
-		[ leaveEditor ]
+		[ leaveEditor, setView ]
 	);
 	const advanceEditor = useCallback( ( row: ProductListItem ) => {
 		setSession( { mode: 'quick', id: row.id, initialTab: sessionRef.current?.initialTab, origin: focusOriginForRow( row ) } );
@@ -384,6 +436,54 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	);
 
 	const hasExpandable = parents.some( ( item ) => item._hasChildren );
+
+	// Alt+B from a row (or anywhere on the screen outside the editor and text fields) opens the editor on the selection.
+	const canEditSelection = useMemo( () => actions.some( ( action ) => action.id === 'quick-edit' ), [ actions ] );
+	useEffect( () => {
+		const onKeyDown = ( event: KeyboardEvent ) => {
+			if ( ! isBulkEditShortcut( event ) || ! canEditSelection ) {
+				return;
+			}
+
+			const target = event.target as HTMLElement | null;
+			const inField = target?.matches?.( 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable="true"]' );
+
+			const onScreen = target === document.body || Boolean( target?.closest?.( '.wc-products-list' ) );
+
+			if ( inField || ! onScreen || target?.closest?.( '.wc-pl-editor-row, [role="dialog"]' ) ) {
+				return;
+			}
+
+			const rows = selectedRef.current.rows;
+
+			if ( ! rows.length ) {
+				return;
+			}
+
+			event.preventDefault();
+			openEditor( rows );
+		};
+
+		document.addEventListener( 'keydown', onKeyDown );
+
+		return () => document.removeEventListener( 'keydown', onKeyDown );
+	}, [ canEditSelection, openEditor ] );
+
+	const [ selectingMatching, setSelectingMatching ] = useState( false );
+	const onSelectMatching = useCallback( () => {
+		setSelectingMatching( true );
+		void selectMatchingVariations( parents, hierarchy, selected )
+			.then( ( count ) => {
+				notify.info(
+					sprintf(
+						/* translators: %d: number of variations added to the selection */
+						_n( '%d matching variation selected.', '%d matching variations selected.', count, 'wp-woocommerce-products-list' ),
+						count
+					)
+				);
+			} )
+			.finally( () => setSelectingMatching( false ) );
+	}, [ parents, hierarchy, selected ] );
 	// No "0 products" before the first answer: the table shows its own loading state.
 	const countLabel = useMemo(
 		() => ( list.isLoading && ! hierarchy.rows.length ? __( 'Loading products…', 'wp-woocommerce-products-list' ) : footerCountLabel( { data: hierarchy.rows, selection: [], totalItems: list.total } ) ),
@@ -395,11 +495,16 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				{ countLabel }
 			</span>
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
-			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } />
+			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } />
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
 			{ hasExpandable && (
 				<>
 					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } />
+					{ hierarchy.variationFilterActive && (
+						<Button size="compact" variant="tertiary" onClick={ onSelectMatching } disabled={ selectingMatching } isBusy={ selectingMatching }>
+							{ __( 'Select matching variations', 'wp-woocommerce-products-list' ) }
+						</Button>
+					) }
 					<Button size="compact" variant="tertiary" onClick={ () => guardedHierarchy.collapseAll() } disabled={ hierarchy.expandedItemIds.length === 0 }>
 						{ __( 'Collapse all', 'wp-woocommerce-products-list' ) }
 					</Button>
@@ -484,6 +589,9 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 							childrenState={ hierarchy.childrenState }
 							onRetryChildren={ hierarchy.retry }
 							searchMatchIds={ searchMatchIds }
+							variationFilterActive={ hierarchy.variationFilterActive }
+							onShowAllChildren={ hierarchy.showAllVariations }
+							onShowMatchingChildren={ hierarchy.showMatchingVariations }
 						/>
 						</ErrorBoundary>
 					</div>

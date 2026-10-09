@@ -5,7 +5,7 @@ import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { resetHierarchyStore } from '../../resources/hierarchy/use-hierarchy';
 import { setSettings } from '../../resources/settings';
-import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, patchItems, refreshParentsOf, resetEditedRows, retainEditedRows, useProductList } from '../../resources/store/products';
+import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, isEdited, markEdited, patchItems, refreshParentsOf, resetEditedRows, retainEditedRows, useProductList } from '../../resources/store/products';
 import type { View } from '../../resources/dataviews';
 import { cache } from '../../resources/store/query-cache';
 import type { ListResult } from '../../resources/api/client';
@@ -147,6 +147,7 @@ describe( 'edited rows that leave the filter', () => {
 
 		// An action (a language-tools copy) patches 10 and 11, then the list refetches without them.
 		patchItems( [ { id: 10, name: 'Fixed' }, { id: 11, name: 'Fixed too' } ] );
+		doAction( ACTIONS.actionPerformed, { action: 'i18n_copy', ids: [ 10, 11 ], batchId: 'b', items: [] } );
 		listProducts.mockResolvedValue( { items: [ parent( 12 ) ], total: 1, totalPages: 1 } );
 		invalidateProducts( { counts: false } );
 
@@ -163,6 +164,39 @@ describe( 'edited rows that leave the filter', () => {
 		rerender( { v: view } );
 		await result.current.refetch();
 		await waitFor( () => expect( result.current.items.map( ( item ) => item.id ) ).toEqual( [ 12 ] ) );
+
+		unmount();
+	} );
+
+	it( 'only marks rows written by a save or an action, never a cache merge', () => {
+		// Hydrating an editor, a rollback, a parent's refreshed price range: merges only.
+		patchItems( [ { id: 20, name: 'Hydrated' } ] );
+		expect( isEdited( 20 ) ).toBe( false );
+
+		doAction( ACTIONS.saved, { updated: [ parent( 21 ) ], errors: [] }, { source: 'quick' } );
+		expect( isEdited( 21 ) ).toBe( true );
+
+		doAction( ACTIONS.actionPerformed, { action: 'x', ids: [ 22 ], batchId: 'b', items: [] } );
+		expect( isEdited( 22 ) ).toBe( true );
+
+		markEdited( [ 23, -1, 0 ] );
+		expect( isEdited( 23 ) ).toBe( true );
+		expect( isEdited( -1 ) ).toBe( false );
+	} );
+
+	it( 'lets a row the editor only hydrated leave a filtered list on refetch', async () => {
+		listProducts.mockResolvedValue( { items: [ parent( 10 ), parent( 11 ) ], total: 2, totalPages: 1 } );
+		const view: View = { type: 'table', page: 1, perPage: 20, fields: [], search: 'missing' };
+		const { result, unmount } = renderHook( ( { v } ) => useProductList( v, 'all', [] ), { initialProps: { v: view } } );
+		await waitFor( () => expect( result.current.items ).toHaveLength( 2 ) );
+
+		// The quick edit opened (hydrated 11) and was cancelled; something else refetched the list.
+		patchItems( [ { id: 11, name: 'P11', description: 'full' } as Partial< ProductListItem > & { id: number } ] );
+		listProducts.mockResolvedValue( { items: [ parent( 10 ) ], total: 1, totalPages: 1 } );
+		invalidateProducts( { counts: false } );
+
+		await waitFor( () => expect( result.current.items.map( ( item ) => item.id ) ).toEqual( [ 10 ] ) );
+		expect( result.current.total ).toBe( 1 );
 
 		unmount();
 	} );

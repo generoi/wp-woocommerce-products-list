@@ -156,6 +156,7 @@ export function NameCell( { item, children }: NameCellProps ) {
 					{ __( 'Matches search', 'wp-woocommerce-products-list' ) }
 				</span>
 			) }
+			{ level === 0 && view && <FilteredChildrenNote item={ item } view={ view } /> }
 			{ item._noLongerMatches && (
 				<span className="wc-pl-name__stale" title={ __( 'Edited here; it no longer matches the filters and leaves the list when the view changes.', 'wp-woocommerce-products-list' ) }>
 					{ __( 'No longer matches', 'wp-woocommerce-products-list' ) }
@@ -171,5 +172,79 @@ export function NameCell( { item, children }: NameCellProps ) {
 				</span>
 			) }
 		</div>
+	);
+}
+
+/**
+ * On an expanded parent while a variation-level filter is on: "3 of 15
+ * variations match · Show all", or, once opened up, "All 15 variations ·
+ * Only matching".
+ */
+function FilteredChildrenNote( { item, view }: { item: ProductListItem; view: HierarchyViewValue } ) {
+	if ( ! view.variationFilterActive || ! view.expandedItemIds.includes( item.id ) ) {
+		return null;
+	}
+
+	const state = view.childrenState?.get( item.id );
+
+	if ( state?.status !== 'loaded' ) {
+		return null;
+	}
+
+	const all = Math.max( item._childCount, state.filtered ? 0 : state.total );
+
+	if ( state.filtered ) {
+		const matching = Math.max( state.total, state.items.length );
+
+		return (
+			<span className="wc-pl-name__filtered">
+				{ all > 0
+					? sprintf(
+							/* translators: 1: variations matching the filters, 2: variations of the product */
+							_n( '%1$d of %2$d variation matches', '%1$d of %2$d variations match', all, 'wp-woocommerce-products-list' ),
+							matching,
+							all
+					  )
+					: sprintf(
+							/* translators: %d: variations matching the filters */
+							_n( '%d variation matches', '%d variations match', matching, 'wp-woocommerce-products-list' ),
+							matching
+					  ) }
+				{ view.onShowAllChildren && (
+					<button
+						type="button"
+						className="wc-pl-name__filtered-toggle"
+						onClick={ ( event ) => {
+							stop( event );
+							view.onShowAllChildren?.( item.id );
+						} }
+					>
+						{ __( 'Show all', 'wp-woocommerce-products-list' ) }
+					</button>
+				) }
+			</span>
+		);
+	}
+
+	return (
+		<span className="wc-pl-name__filtered">
+			{ sprintf(
+				/* translators: %d: variations of the product */
+				_n( 'All %d variation', 'All %d variations', all, 'wp-woocommerce-products-list' ),
+				all
+			) }
+			{ view.onShowMatchingChildren && (
+				<button
+					type="button"
+					className="wc-pl-name__filtered-toggle"
+					onClick={ ( event ) => {
+						stop( event );
+						view.onShowMatchingChildren?.( item.id );
+					} }
+				>
+					{ __( 'Only matching', 'wp-woocommerce-products-list' ) }
+				</button>
+			) }
+		</span>
 	);
 }

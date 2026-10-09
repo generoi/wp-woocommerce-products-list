@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import apiFetch from '@wordpress/api-fetch';
-import { batchProducts, batchVariations, listProducts } from '../../resources/api/client';
+import { batchProducts, batchVariations, listProducts, runAction } from '../../resources/api/client';
 import { setSettings } from '../../resources/settings';
 import { editSettings } from './edit-fixtures';
 
@@ -132,5 +132,36 @@ describe( 'list reads', () => {
 		fetchMock.mockResolvedValueOnce( new Response( JSON.stringify( { code: 'rest_forbidden', message: 'Sorry', data: { status: 403 } } ), { status: 403 } ) );
 
 		await expect( listProducts( { page: 1 } ) ).rejects.toMatchObject( { code: 'rest_forbidden', status: 403 } );
+	} );
+} );
+
+describe( 'runAction chunking', () => {
+	afterEach( () => setSettings( undefined ) );
+
+	it( 'chunks by the action\'s own limit and re-chunks to the server\'s data.max on wc_products_list_too_many_ids', async () => {
+		setSettings( editSettings( { limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 100, actionBatchSize: 100, actionBatchSizes: { duplicate: 5, trash: 3 } } } ) );
+		fetchMock.mockReset();
+		fetchMock.mockImplementation( async ( options: { data: { ids: number[] } } ) => ( { results: options.data.ids.map( ( id ) => ( { id, ok: true } ) ), items: [] } ) );
+
+		const ids = Array.from( { length: 12 }, ( _, index ) => index + 1 );
+		const result = await runAction( 'duplicate', ids );
+
+		expect( calls().map( ( call ) => ( call.data as { ids: number[] } ).ids.length ) ).toEqual( [ 5, 5, 2 ] );
+		expect( result.results ).toHaveLength( 12 );
+		expect( new Set( calls().map( ( call ) => ( call as { wcProductsList?: { batchId?: string } } ).wcProductsList?.batchId ) ).size ).toBe( 1 );
+
+		fetchMock.mockReset();
+		fetchMock.mockImplementation( async ( options: { data: { ids: number[] } } ) => {
+			if ( options.data.ids.length > 2 ) {
+				throw { code: 'wc_products_list_too_many_ids', message: 'Too many', data: { status: 400, max: 2 } };
+			}
+
+			return { results: options.data.ids.map( ( id ) => ( { id, ok: true } ) ), items: [] };
+		} );
+
+		const trashed = await runAction( 'trash', [ 1, 2, 3, 4, 5 ] );
+
+		expect( trashed.results.map( ( row ) => row.id ) ).toEqual( [ 1, 2, 3, 4, 5 ] );
+		expect( calls().map( ( call ) => ( call.data as { ids: number[] } ).ids ) ).toEqual( [ [ 1, 2, 3 ], [ 1, 2 ], [ 3 ], [ 4, 5 ] ] );
 	} );
 } );

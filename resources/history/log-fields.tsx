@@ -28,6 +28,33 @@ export const ACTION_OPTIONS = [
 	{ value: 'duplicate', label: __( 'Duplicate', 'wp-woocommerce-products-list' ) },
 ];
 
+/**
+ * The actions History names: the core ones, then the extension actions the
+ * server declares (gds-woo-i18n's `i18n_transform` is "Edit translated text"),
+ * so the log never shows an action's key.
+ */
+export function actionOptions( settings?: Pick< Settings, 'actions' > | null ): Array< { value: string; label: string } > {
+	const known = new Set( ACTION_OPTIONS.map( ( option ) => option.value ) );
+	const declared = ( settings?.actions ?? [] ).filter( ( def ) => def.id && ! known.has( def.id ) ).map( ( def ) => ( { value: def.id, label: def.label || humanizeKey( def.id ) } ) );
+
+	return [ ...ACTION_OPTIONS, ...declared ];
+}
+
+/** `i18n_transform` → "I18n transform": the last resort for an action nothing declares any more. */
+function humanizeKey( key: string ): string {
+	const words = key.replace( /[_-]+/g, ' ' ).trim();
+
+	return words ? words.charAt( 0 ).toUpperCase() + words.slice( 1 ) : key;
+}
+
+/** The label of a logged action key. */
+export function actionLabel( action: string, settings?: Pick< Settings, 'actions' > | null ): string {
+	return actionOptions( settings ).find( ( option ) => option.value === action )?.label ?? humanizeKey( action );
+}
+
+/** The `/log` params; `search` matches product names, values and messages. */
+export type LogQueryWithSearch = LogQuery;
+
 function text( value: string | null ): string {
 	if ( value === null || value === undefined ) {
 		return '—';
@@ -113,7 +140,7 @@ export function ChangeCell( { item }: { item: LogRow } ) {
 
 	// A failed write with several fields keeps what it tried in context; one field keeps it in old/new.
 	if ( item.action !== 'update' && ! item.field ) {
-		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
+		return <span className="wc-pl-history__change">{ item.message || actionLabel( item.action, cellSettings ) }</span>;
 	}
 
 	if ( ( item.status === 'skipped' || ( ! item.field && item.status === 'error' ) ) && item.old_value === null && item.new_value === null ) {
@@ -227,10 +254,10 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 			type: 'text',
 			label: __( 'Action', 'wp-woocommerce-products-list' ),
 			enableSorting: false,
-			elements: ACTION_OPTIONS,
+			elements: actionOptions( settings ),
 			filterBy: { operators: [ 'is' ] },
 			getValue: ( { item } ) => item.action,
-			render: ( { item } ) => <span>{ ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label ?? item.action }</span>,
+			render: ( { item } ) => <span>{ actionLabel( item.action, settings ) }</span>,
 		},
 		{
 			id: 'field',
@@ -287,8 +314,16 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 }
 
 /** Translate the DataViews view (filters, page) into the `/log` params. */
-export function logQueryFromView( view: { page?: number; perPage?: number; filters?: Array< { field: string; operator: string; value: unknown } > }, base: Partial< LogQuery > = {} ): LogQuery {
-	const query: LogQuery = { ...base, page: view.page ?? 1, per_page: view.perPage ?? 50 };
+export function logQueryFromView(
+	view: { page?: number; perPage?: number; search?: string; filters?: Array< { field: string; operator: string; value: unknown } > },
+	base: Partial< LogQuery > = {}
+): LogQueryWithSearch {
+	const query: LogQueryWithSearch = { ...base, page: view.page ?? 1, per_page: view.perPage ?? 50 };
+
+	// A product name (or a value, a message): the server matches the names of the products the rows are about.
+	if ( view.search && view.search.trim() !== '' ) {
+		query.search = view.search.trim();
+	}
 
 	for ( const filter of view.filters ?? [] ) {
 		const value = Array.isArray( filter.value ) ? filter.value[ 0 ] : filter.value;

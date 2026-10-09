@@ -60,7 +60,8 @@ async function fetchTermElements( taxonomy: string ): Promise< Option[] > {
 
 	do {
 		const result = await getTerms( taxonomy, { page, perPage: 100 } );
-		out.push( ...result.items.map( ( term ) => ( { value: term.id, label: term.name } ) ) );
+		// The slug rides along: a variation stores its attribute value as the term slug (attributes.tsx).
+		out.push( ...result.items.map( ( term ) => ( { value: term.id, label: term.name, slug: term.slug } as Option ) ) );
 		totalPages = result.totalPages;
 		page += 1;
 	} while ( page <= totalPages && page <= 20 );
@@ -81,10 +82,15 @@ export function termElements( taxonomy: string ): Promise< Option[] > {
 		const stored = readStoredTerms( taxonomy );
 
 		promise = stored
-			? Promise.resolve( stored )
+			? Promise.resolve( stored ).then( ( terms ) => {
+					rememberSlugs( taxonomy, terms );
+
+					return terms;
+			  } )
 			: fetchTermElements( taxonomy )
 					.then( ( terms ) => {
 						storeTerms( taxonomy, terms );
+						rememberSlugs( taxonomy, terms );
 
 						return terms;
 					} )
@@ -98,8 +104,64 @@ export function termElements( taxonomy: string ): Promise< Option[] > {
 	return promise;
 }
 
+const slugCache = new Map< string, Map< number, string > >();
+
+function rememberSlugs( taxonomy: string, terms: Option[] ): void {
+	const slugs = new Map< number, string >();
+
+	for ( const term of terms ) {
+		const slug = ( term as Option & { slug?: unknown } ).slug;
+
+		if ( typeof slug === 'string' && slug !== '' ) {
+			slugs.set( Number( term.value ), slug );
+		}
+	}
+
+	slugCache.set( taxonomy, slugs );
+}
+
+/**
+ * The slugs of term ids, read synchronously from the terms loaded so far
+ * (the filter's elements, or the sessionStorage copy). Null until the
+ * taxonomy's terms have loaded, or when an id is unknown.
+ */
+export function termSlugs( taxonomy: string, ids: unknown[] ): string[] | null {
+	let slugs = slugCache.get( taxonomy );
+
+	if ( ! slugs ) {
+		const stored = readStoredTerms( taxonomy );
+
+		if ( ! stored ) {
+			return null;
+		}
+
+		rememberSlugs( taxonomy, stored );
+		slugs = slugCache.get( taxonomy );
+	}
+
+	const out: string[] = [];
+
+	for ( const id of ids ) {
+		const slug = slugs?.get( Number( id ) );
+
+		if ( slug === undefined ) {
+			return null;
+		}
+
+		out.push( slug );
+	}
+
+	return out;
+}
+
 export function clearTermElements( taxonomy?: string ): void {
 	const store = storage();
+
+	if ( taxonomy ) {
+		slugCache.delete( taxonomy );
+	} else {
+		slugCache.clear();
+	}
 
 	if ( taxonomy ) {
 		termCache.delete( taxonomy );

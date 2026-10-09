@@ -98,9 +98,17 @@ describe( 'language tools', () => {
 		fireEvent.click( screen.getByText( 'Svenska tools: Copy translations' ) );
 		expect( screen.queryByLabelText( 'Regular price' ) ).not.toBeInTheDocument();
 		fireEvent.click( screen.getByLabelText( 'Name' ) );
-		fireEvent.click( screen.getByRole( 'button', { name: 'Copy translations: Svenska (2)' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Copy translations: Svenska, apply now to 2 items…' } ) );
+
+		// It saves outside Update / Cancel: it says so and asks first, inline (no dialog).
+		expect( run ).not.toHaveBeenCalled();
+		expect( document.querySelector( '.components-modal__frame' ) ).toBeNull();
+		expect( screen.getByText( /saves now to 2 items, separately from Update: Cancel will not undo it/ ) ).toBeInTheDocument();
+		fireEvent.click( screen.getByRole( 'button', { name: 'Apply now to 2 items' } ) );
 
 		await waitFor( () => expect( onDone ).toHaveBeenCalled() );
+		// The preview made from the values before is replaced by what was done.
+		expect( await screen.findByText( 'Copy translations applied to 2 items. Undo it from the notice; Cancel does not undo it.' ) ).toBeInTheDocument();
 		expect( run ).toHaveBeenCalledWith( expect.objectContaining( { id: 'i18n_copy' } ), [ 1, 41 ], { lang: 'se', source: 'fi', fields: [ 'name' ], overwrite: false } );
 		expect( toolIds( { ...copyAction(), scope: 'product' }, [ simple( 1 ), variation( 41, 1 ) ] ) ).toEqual( [ 1 ] );
 	} );
@@ -138,7 +146,7 @@ describe( 'language tools', () => {
 		expect( screen.getByLabelText( 'Sale price' ) ).toBeInTheDocument();
 
 		// Empty: an inline prompt, no request.
-		fireEvent.click( screen.getByRole( 'button', { name: 'Adjust market prices: Svenska (1)' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Adjust market prices: Svenska, apply now to 1 item…' } ) );
 		expect( await screen.findByText( 'Fill in "Amount" first.' ) ).toBeInTheDocument();
 		expect( run ).not.toHaveBeenCalled();
 
@@ -149,8 +157,13 @@ describe( 'language tools', () => {
 
 		document.addEventListener( 'keydown', outer );
 		amount.dispatchEvent( enter );
-		document.removeEventListener( 'keydown', outer );
 		expect( outer ).not.toHaveBeenCalled();
+		// Enter asks; a second Enter in the field is not the yes: only the confirm's own button runs it.
+		await screen.findByRole( 'button', { name: 'Apply now to 1 item' } );
+		amount.dispatchEvent( new KeyboardEvent( 'keydown', { key: 'Enter', bubbles: true, cancelable: true } ) );
+		document.removeEventListener( 'keydown', outer );
+		expect( run ).not.toHaveBeenCalled();
+		fireEvent.click( screen.getByRole( 'button', { name: 'Apply now to 1 item' } ) );
 		await waitFor( () => expect( run ).toHaveBeenCalledWith( expect.objectContaining( { id: 'i18n_prices' } ), [ 1 ], { lang: 'se', fields: [ 'regular_price' ], operation: 'increase_percent', amount: '5', rounding: 'none' } ) );
 	} );
 
@@ -187,6 +200,36 @@ describe( 'language tools', () => {
 		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'suffix', text: ' (SE)', base: 'stored' }, 'i18n:se', items, fields )?.changes ).toBe( 2 );
 		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'suffix', text: ' (SE)', base: 'shown' }, 'i18n:se', items, fields )?.lines[ 1 ] ).toMatchObject( { before: '(not translated)', after: 'Sandal (SE)' } );
 		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'template', text: '{default_name} | {sku}' }, 'i18n:se', items, fields )?.lines[ 0 ]?.after ).toBe( 'Boot | S1' );
+		// Values the editor never loaded (SEO texts in a bulk edit) are unknown, not "(not translated)".
+		type Tree = { i18n?: { se?: { name?: { value?: string; source?: string } } } };
+		const byPath = fields.map( ( field ) =>
+			field.id === 'i18n:se.name' ? { ...field, rest: { ...field.rest, read: ( item: unknown ) => ( item as Tree ).i18n?.se?.name?.value }, reference: ( item: unknown ) => ( item as Tree ).i18n?.se?.name?.source } : field
+		) as typeof fields;
+		const bare = [ simple( 4, { name: 'Spray' } ) ];
+		const unknown = previewTransform( transformAction(), { fields: [ 'name' ], operation: 'suffix', text: ' | Widetoes', base: 'shown' }, 'i18n:se', bare, byPath );
+
+		expect( unknown ).toMatchObject( { changes: 0, unloaded: 1, lines: [] } );
+		// {name} in a template on another field (an SEO title) is the name the product shows: its translation, else the default name.
+		type Seo = { i18n?: { se?: { meta_title?: { value?: string; source?: string } } } };
+		const withSeo = [
+			...fields,
+			{
+				...fields.find( ( field ) => field.id === 'i18n:se.name' )!,
+				id: 'i18n:se.meta_title',
+				label: 'SEO title',
+				rest: { fields: [ 'i18n' ], read: ( item: unknown ) => ( item as Seo ).i18n?.se?.meta_title?.value, applies: { product: true, variation: false } },
+				reference: ( item: unknown ) => ( item as Seo ).i18n?.se?.meta_title?.source,
+			},
+		] as typeof fields;
+		const seoDef = transformAction();
+		seoDef.args[ 0 ] = { ...seoDef.args[ 0 ], options: [ { value: 'meta_title', label: 'SEO title' } ] } as ( typeof seoDef.args )[ number ];
+		const seo = previewTransform( seoDef, { fields: [ 'meta_title' ], operation: 'template', text: '{name} kaufen | Widetoes' }, 'i18n:se', items, withSeo );
+
+		expect( seo?.lines.map( ( line ) => line.after ) ).toEqual( [ 'Känga vinter kaufen | Widetoes', 'Sandal kaufen | Widetoes', 'Sko vinter kaufen | Widetoes' ] );
+		// Every token empty for a row: the server skips it, the preview says so.
+		const noSku = previewTransform( transformAction(), { fields: [ 'name' ], operation: 'template', text: '{sku} (SE)' }, 'i18n:se', [ simple( 9, { name: 'X', sku: '' } ) ], fields );
+
+		expect( noSku ).toMatchObject( { changes: 0, emptyTemplate: 1 } );
 		// Nothing to preview until the text is there.
 		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'replace', find: '' }, 'i18n:se', items, fields ) ).toBeNull();
 	} );
@@ -200,7 +243,8 @@ describe( 'language tools', () => {
 		fireEvent.change( screen.getByLabelText( 'Find (find & replace)' ), { target: { value: 'x' } } );
 		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
 
-		fireEvent.click( screen.getByRole( 'button', { name: 'Edit translated text: Svenska (1)' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Edit translated text: Svenska, apply now to 1 item…' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Apply now to 1 item' } ) );
 		await waitFor( () => expect( onDirtyChange ).toHaveBeenLastCalledWith( 0 ) );
 	} );
 } );

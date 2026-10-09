@@ -98,11 +98,15 @@ export function withEditorRow( rows: ProductListItem[], session: EditorSession |
 
 /**
  * Whether a view change swaps the rows under an open editor: another page,
- * page size, search, sort or filter set. Column, density and layout changes
- * leave the rows (and the editor) where they are.
+ * page size, search, sort or filter set, or another layout (the editor is
+ * a row of the table: in a grid card it would be squeezed to the card's
+ * width, so switching to Grid or List closes it, after the discard confirm
+ * when something was typed). Column and density changes leave the rows
+ * (and the editor) where they are.
  */
 export function viewChangesRows( current: ViewLike, next: ViewLike ): boolean {
 	return (
+		( current.type ?? 'table' ) !== ( next.type ?? 'table' ) ||
 		current.page !== next.page ||
 		current.perPage !== next.perPage ||
 		( current.search ?? '' ) !== ( next.search ?? '' ) ||
@@ -113,6 +117,7 @@ export function viewChangesRows( current: ViewLike, next: ViewLike ): boolean {
 }
 
 export interface ViewLike {
+	type?: string;
 	page?: number;
 	perPage?: number;
 	search?: string;

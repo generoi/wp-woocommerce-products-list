@@ -5,6 +5,7 @@
 import { applyFilters } from '@wordpress/hooks';
 import type { Filter, View } from '../dataviews';
 import { getQueryParamCallbacks } from '../extensions/api';
+import { attributeTaxonomyOf, attributeVariationFilter } from '../fields/attributes';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, QueryParams, Settings } from '../types';
 
@@ -59,6 +60,9 @@ type ElementWithParams = { value: unknown; params?: Record< string, unknown > };
 
 /** Declarative fields carry their own mapping (extensions/declarative.ts). */
 type WithToParams = { rest: { toParams?: ( value: unknown, operator: Filter[ 'operator' ] ) => QueryParams } };
+
+/** A field may also narrow the expanded variations (an extension's own variation-level filter). */
+type WithToVariationParams = { rest: { toVariationParams?: ( value: unknown, operator: Filter[ 'operator' ] ) => QueryParams } };
 
 function csv( value: unknown ): string | undefined {
 	const list = ( Array.isArray( value ) ? value : [ value ] ).filter( ( v ) => v !== undefined && v !== null && v !== '' );
@@ -319,4 +323,81 @@ export function buildVariationsQuery( parentId: number, page: number, fields: Pr
 	};
 
 	return clean( applyFilters( FILTERS.variationsQuery, params, { parentId, page } ) as QueryParams );
+}
+
+export interface VariationFilter {
+	/** Params for `products/{id}/variations`: only the variations the active filters are about. Empty: every variation. */
+	params: QueryParams;
+	/** Attribute taxonomies whose term slugs are not loaded yet: load them (fields/terms.tsx) and build again. */
+	pending: string[];
+	/** A stable key of `params`, for the hierarchy's cache. */
+	key: string;
+}
+
+/**
+ * The filters that are about variations, as variations-endpoint params, so
+ * an expanded parent lists only the variations the list was filtered for:
+ *
+ * - "Variation stock: Any variation: Out of stock" and the product "Stock"
+ *   filter → `stock_status` (the variation filter wins when both are set);
+ * - "Attribute: Colour is any of …" → `attributes[][attribute]`, `[terms][]`
+ *   (slugs, what `attribute_pa_*` meta stores);
+ * - an extension field's `rest.toVariationParams`.
+ */
+export function variationFilterParams( view: View, fields: ProductField[] ): VariationFilter {
+	const params: QueryParams = {};
+	const attributes: Array< { attribute: string; terms: string[] } > = [];
+	const pending: string[] = [];
+	let productStock: string | undefined;
+
+	for ( const filter of view.filters ?? [] ) {
+		const value = filter.value;
+
+		if ( value === undefined || value === null || value === '' || ( Array.isArray( value ) && ! value.length ) ) {
+			continue;
+		}
+
+		if ( filter.field === 'variation_stock' && filter.operator === 'is' ) {
+			params.stock_status = String( scalar( value ) );
+			continue;
+		}
+
+		if ( filter.field === 'stock_status' && filter.operator === 'is' ) {
+			productStock = String( scalar( value ) );
+			continue;
+		}
+
+		const taxonomy = attributeTaxonomyOf( filter.field );
+
+		if ( taxonomy ) {
+			const narrowed = attributeVariationFilter( taxonomy, value, filter.operator );
+
+			if ( narrowed === null ) {
+				pending.push( taxonomy );
+			} else if ( narrowed ) {
+				attributes.push( narrowed );
+			}
+
+			continue;
+		}
+
+		const field = fields.find( ( f ) => f.id === filter.field );
+		const toVariationParams = ( field as unknown as WithToVariationParams | undefined )?.rest?.toVariationParams;
+
+		if ( typeof toVariationParams === 'function' ) {
+			Object.assign( params, toVariationParams( value, filter.operator ) );
+		}
+	}
+
+	if ( productStock !== undefined && params.stock_status === undefined ) {
+		params.stock_status = productStock;
+	}
+
+	if ( attributes.length ) {
+		( params as Record< string, unknown > ).attributes = attributes;
+	}
+
+	const cleaned = clean( params );
+
+	return { params: cleaned, pending, key: Object.keys( cleaned ).length ? JSON.stringify( cleaned ) : '' };
 }

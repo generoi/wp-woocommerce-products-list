@@ -137,6 +137,10 @@ export interface LogBatch {
 	errors?: number;
 	/** Distinct items the batch left unwritten (status `skipped` rows). */
 	skipped?: number;
+	/** Why items were left unwritten (`unchanged`: they already had the value, …). */
+	skipped_reasons?: string[];
+	/** A readable name for an action batch ("Moved to trash", "Copy translations (Suomi → Svenska): Name"); null for field edits. */
+	summary?: string | null;
 	/** The batch this one reverted, when it is a revert. */
 	reverts?: string | null;
 	/** The latest revert of this batch. */
@@ -155,6 +159,8 @@ export interface LogQuery {
 	action?: string;
 	since?: string;
 	until?: string;
+	/** Matches values and product, variation and parent names. */
+	search?: string;
 	page?: number;
 	per_page?: number;
 }
@@ -525,7 +531,26 @@ export async function batchVariations(
 	return result;
 }
 
-/** `POST /actions/{action}` in chunks of `limits.actionBatchSize`, one batch id. */
+/** Ids per `POST /actions/{action}` request: the action's own limit (`limits.actionBatchSizes`), else `limits.actionBatchSize`. */
+export function actionBatchSizeOf( action: string ): number {
+	const limits = getSettings().limits;
+	const own = limits.actionBatchSizes?.[ action ];
+
+	return typeof own === 'number' && own > 0 ? own : limits.actionBatchSize;
+}
+
+/** The `data.max` of a 400 `wc_products_list_too_many_ids`, or null. */
+function tooManyIdsMax( error: unknown ): number | null {
+	if ( typeof error !== 'object' || error === null || ( error as { code?: unknown } ).code !== 'wc_products_list_too_many_ids' ) {
+		return null;
+	}
+
+	const max = Number( ( error as { data?: { max?: unknown } } ).data?.max );
+
+	return Number.isInteger( max ) && max > 0 ? max : null;
+}
+
+/** `POST /actions/{action}` in chunks of the action's batch size, one batch id. */
 export async function runAction(
 	action: string,
 	ids: number[],
@@ -538,13 +563,30 @@ export async function runAction(
 	const path = addQueryArgs( `${ OWN }/actions/${ action }`, options?.fields?.length ? { fields: options.fields.join( ',' ) } : {} );
 	const result: ActionResponse = { batch_id: batchId, results: [], items: [] };
 
-	for ( const part of chunk( ids, getSettings().limits.actionBatchSize ) ) {
-		const response = await request< ActionResponse >( {
-			path,
-			method: 'POST',
-			data: { ids: part, args },
-			...listMode( { ...options, batchId } ),
-		} );
+	const queue = chunk( ids, actionBatchSizeOf( action ) );
+
+	while ( queue.length ) {
+		const part = queue.shift() as number[];
+		let response: ActionResponse;
+
+		try {
+			response = await request< ActionResponse >( {
+				path,
+				method: 'POST',
+				data: { ids: part, args },
+				...listMode( { ...options, batchId } ),
+			} );
+		} catch ( error ) {
+			// The server's limit is lower than ours (a filter changed it): re-chunk to it.
+			const max = tooManyIdsMax( error );
+
+			if ( max !== null && max < part.length ) {
+				queue.unshift( ...chunk( part, max ) );
+				continue;
+			}
+
+			throw error;
+		}
 		result.results.push( ...( response.results ?? [] ) );
 		result.items.push( ...( response.items ?? [] ).map( ( raw ) => toRow( raw as RawProduct ) ) );
 	}
@@ -591,7 +633,7 @@ export async function getLogUsers( options?: RequestOptions ): Promise< Array< {
 	return Array.isArray( users ) ? users : [];
 }
 
-export async function getLogBatches( params: { page?: number; perPage?: number; batch?: string; user?: number; source?: string; since?: string; until?: string } = {}, options?: RequestOptions ): Promise< ListResult< LogBatch > > {
+export async function getLogBatches( params: { page?: number; perPage?: number; batch?: string; user?: number; source?: string; since?: string; until?: string; search?: string } = {}, options?: RequestOptions ): Promise< ListResult< LogBatch > > {
 	const { page, perPage, ...filters } = params;
 	const response = await request< { items: LogBatch[]; total: number; totalPages: number } >( {
 		path: addQueryArgs( `${ OWN }/log/batches`, { page: page ?? 1, per_page: perPage ?? 20, ...Object.fromEntries( Object.entries( filters ).filter( ( [ , value ] ) => value !== undefined && value !== '' ) ) } ),
@@ -617,6 +659,8 @@ export interface RevertPlan {
 	failed?: number;
 	/** Items the batch left unwritten (status `skipped`): nothing to put back. */
 	left_out?: number;
+	/** `left_out` by reason: `{ unchanged: 5 }`. */
+	left_out_reasons?: Record< string, number >;
 	/** The latest revert of this batch, or null. */
 	reverted_by?: RevertedBy | null;
 	/** Distinct users with rows in the batch; more than one makes it not revertable (409 wc_products_list_batch_shared). */
@@ -673,7 +717,7 @@ export async function revertBatch( batchId: string, options?: RevertOptions ): P
 }
 
 /** Why the app left an item out of a save (POST /log/skipped `reason`). */
-export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'other';
+export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'unchanged' | 'other';
 
 export interface SkippedItem {
 	id: number;

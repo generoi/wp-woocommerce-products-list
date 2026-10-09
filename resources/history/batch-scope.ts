@@ -6,6 +6,32 @@
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { LogRow, RevertPlan } from '../api/client';
 
+/** Short "why" of a skip reason (LogController::SKIP_REASONS), for counts such as "5 skipped (already had the value)". */
+export function skipReasonLabel( reason: string ): string {
+	switch ( reason ) {
+		case 'unchanged':
+			return __( 'already had the value', 'wp-woocommerce-products-list' );
+		case 'trashed':
+			return __( 'trashed meanwhile', 'wp-woocommerce-products-list' );
+		case 'deleted':
+			return __( 'deleted meanwhile', 'wp-woocommerce-products-list' );
+		case 'conflict':
+			return __( 'changed by someone else', 'wp-woocommerce-products-list' );
+		case 'no_stock_management':
+			return __( 'stock not managed', 'wp-woocommerce-products-list' );
+		case 'has_sale':
+			return __( 'already on sale', 'wp-woocommerce-products-list' );
+		case 'no_sale_price':
+			return __( 'no sale price', 'wp-woocommerce-products-list' );
+		case 'below_zero':
+			return __( 'would go below zero', 'wp-woocommerce-products-list' );
+		case 'not_applicable':
+			return __( 'field does not apply', 'wp-woocommerce-products-list' );
+		default:
+			return __( 'other reasons', 'wp-woocommerce-products-list' );
+	}
+}
+
 /** Actions whose rows a revert never writes back; mirrors Revert::NOT_REVERTABLE in src/Log/Revert.php. */
 export const NOT_REVERTABLE_ACTIONS: ReadonlySet< string > = new Set( [ 'trash', 'restore', 'delete', 'duplicate', 'create' ] );
 
@@ -32,15 +58,34 @@ export interface BatchScope {
 	failed?: number;
 	/** Items the batch left unwritten (status `skipped` rows): nothing to put back. */
 	leftOut?: number;
+	/** `leftOut` by reason (`{ unchanged: 5 }`). */
+	leftOutReasons?: Record< string, number >;
+	/** The labels of the not-revertable actions among `skipped` ("Move to Trash", "Duplicate"). */
+	skippedActions?: string[];
 }
 
 /** The scope from `GET /log/batch/{id}`: exact counts for any size, no field names. */
-export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > & Partial< Pick< RevertPlan, 'failed' | 'left_out' > > ): BatchScope {
+export function scopeFromPlan(
+	plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > & Partial< Pick< RevertPlan, 'failed' | 'left_out' | 'left_out_reasons' > >,
+	labelOf: ( action: string ) => string = ( action ) => action
+): BatchScope {
 	const failedEntries = plan.skipped.filter( ( entry ) => entry.action === 'failed' ).length;
 	const failed = Math.max( failedEntries, plan.failed ?? 0 );
 	const skipped = plan.skipped.length - failedEntries;
+	const skippedActions = Array.from( new Set( plan.skipped.filter( ( entry ) => entry.action !== 'failed' ).map( ( entry ) => labelOf( entry.action ) ) ) );
+	const reasons = plan.left_out_reasons && typeof plan.left_out_reasons === 'object' && ! Array.isArray( plan.left_out_reasons ) ? plan.left_out_reasons : null;
 
-	return { changes: Math.max( 0, plan.rows - skipped - failed ), objects: plan.objects, fields: [], partial: false, skipped, failed, ...( plan.left_out ? { leftOut: plan.left_out } : {} ) };
+	return {
+		changes: Math.max( 0, plan.rows - skipped - failed ),
+		objects: plan.objects,
+		fields: [],
+		partial: false,
+		skipped,
+		failed,
+		...( skippedActions.length ? { skippedActions } : {} ),
+		...( plan.left_out ? { leftOut: plan.left_out } : {} ),
+		...( reasons && Object.keys( reasons ).length ? { leftOutReasons: reasons } : {} ),
+	};
 }
 
 /**
@@ -84,11 +129,18 @@ export function describeBatchScope( scope: BatchScope ): string {
 
 	if ( scope.skipped ) {
 		parts.push(
-			sprintf(
-				/* translators: %d: number of log entries the revert leaves alone */
-				_n( '%d entry (trash, restore, delete or duplicate) is not reverted.', '%d entries (trash, restore, delete or duplicate) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
-				scope.skipped
-			)
+			scope.skippedActions?.length
+				? sprintf(
+						/* translators: 1: number of log entries the revert leaves alone, 2: their actions ("Move to Trash, Duplicate") */
+						_n( '%1$d entry (%2$s) is not reverted.', '%1$d entries (%2$s) are not reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
+						scope.skipped,
+						scope.skippedActions.join( ', ' )
+				  )
+				: sprintf(
+						/* translators: %d: number of log entries the revert leaves alone */
+						_n( '%d entry cannot be reverted.', '%d entries cannot be reverted.', scope.skipped, 'wp-woocommerce-products-list' ),
+						scope.skipped
+				  )
 		);
 	}
 
@@ -103,13 +155,40 @@ export function describeBatchScope( scope: BatchScope ): string {
 	}
 
 	if ( scope.leftOut ) {
-		parts.push(
-			sprintf(
-				/* translators: %d: number of items the batch left out when it ran */
-				_n( '%d item was left out when the batch ran (see Show changes); nothing to put back.', '%d items were left out when the batch ran (see Show changes); nothing to put back.', scope.leftOut, 'wp-woocommerce-products-list' ),
-				scope.leftOut
-			)
-		);
+		const reasons = scope.leftOutReasons ?? {};
+		const unchanged = Math.min( scope.leftOut, reasons.unchanged ?? 0 );
+		const other = scope.leftOut - unchanged;
+
+		if ( unchanged ) {
+			parts.push(
+				sprintf(
+					/* translators: %d: number of items the batch left out because they already had the value */
+					_n( '%d item was left out because it already had this value; nothing to put back.', '%d items were left out because they already had this value; nothing to put back.', unchanged, 'wp-woocommerce-products-list' ),
+					unchanged
+				)
+			);
+		}
+
+		if ( other ) {
+			const why = Object.keys( reasons )
+				.filter( ( reason ) => reason !== 'unchanged' )
+				.map( skipReasonLabel );
+
+			parts.push(
+				why.length
+					? sprintf(
+							/* translators: 1: number of items the batch left out when it ran, 2: why ("trashed meanwhile, stock not managed") */
+							_n( '%1$d item was left out when the batch ran (%2$s); nothing to put back.', '%1$d items were left out when the batch ran (%2$s); nothing to put back.', other, 'wp-woocommerce-products-list' ),
+							other,
+							why.join( ', ' )
+					  )
+					: sprintf(
+							/* translators: %d: number of items the batch left out when it ran */
+							_n( '%d item was left out when the batch ran (see Show changes); nothing to put back.', '%d items were left out when the batch ran (see Show changes); nothing to put back.', other, 'wp-woocommerce-products-list' ),
+							other
+					  )
+			);
+		}
 	}
 
 	return parts.join( ' ' );

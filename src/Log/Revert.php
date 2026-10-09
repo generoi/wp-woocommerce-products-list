@@ -171,6 +171,7 @@ final class Revert
     public static function body(int $id, array $fields): array
     {
         $body = ['id' => $id];
+        $nullable = self::nullableFields();
 
         foreach ($fields as $path => $stored) {
             $segments = explode('.', $path);
@@ -195,11 +196,42 @@ final class Revert
                 $target = &$target[$segment];
             }
 
-            $target[end($segments)] = $value;
+            // A field that had no value: wc/v3 clears an integer|null field
+            // (low_stock_amount) only for `null`; `''` would be stored as 0.
+            $target[end($segments)] = ($stored === null || $stored === '') && in_array($path, $nullable, true) ? null : $value;
             unset($target);
         }
 
         return $body;
+    }
+
+    public const FILTER_NULLABLE_FIELDS = 'wc_products_list/revert_nullable_fields';
+
+    public const NULLABLE_FIELDS = ['low_stock_amount', 'stock_quantity'];
+
+    /**
+     * Fields a revert clears with `null` rather than `''`: the integer
+     * fields wc/v3 takes as `integer|null` and turns any other empty
+     * value into 0 (`wc_stock_amount('')`). An unset low stock threshold
+     * means "use the store's (or the parent's)"; 0 means "never notify".
+     * `stock_quantity`: `null` leaves the quantity as it is, where `''`
+     * would write 0; an unset quantity goes with stock management being
+     * off, which the same revert puts back and WooCommerce then clears it.
+     *
+     * @return array<int, string>
+     */
+    public static function nullableFields(): array
+    {
+        /**
+         * Filters the fields a revert sets to `null` when their old value was empty.
+         *
+         * @param  mixed  $fields  a list of field paths
+         */
+        $fields = function_exists('apply_filters')
+            ? apply_filters(self::FILTER_NULLABLE_FIELDS, self::NULLABLE_FIELDS)
+            : self::NULLABLE_FIELDS;
+
+        return array_values(array_map('strval', array_filter(is_array($fields) ? $fields : [], 'is_scalar')));
     }
 
     /**

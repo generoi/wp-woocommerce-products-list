@@ -17,6 +17,8 @@ export interface ChildrenState {
 	/** `X-WP-Total` of the first page; 0 until known. */
 	total: number;
 	error?: string;
+	/** Loaded under a variation-level filter: `items`/`total` are the matching variations only. */
+	filtered?: boolean;
 }
 
 export const EMPTY_CHILDREN: ChildrenState = Object.freeze( { status: 'idle', items: [], total: 0 } ) as ChildrenState;

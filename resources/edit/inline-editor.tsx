@@ -62,6 +62,8 @@ import type { SaveResult } from './save';
 import { planSave } from './save-runner';
 import type { SavePlan } from './save-runner';
 import { undoBatch } from './undo';
+import { canUndo } from './log-access';
+import { selectRows } from '../list/selection';
 import { useEditState } from './use-edit-state';
 import { saleScheduleProblems } from './sale-schedule';
 import { clearFlaggedControls, collectInvalidFields, controlForField, flagInvalidControls, focusControl, focusFirstInvalidControl, invalidMessageId, revealInvalidControls, validateFormData } from './validity';
@@ -329,6 +331,53 @@ function isTextEntry( target: EventTarget | null ): target is HTMLInputElement {
 
 	// Token and combobox inputs use Enter to pick a suggestion.
 	return ! target.getAttribute( 'aria-autocomplete' ) && ! target.closest( '[role="combobox"], .components-form-token-field, [aria-haspopup="listbox"]' );
+}
+
+/**
+ * Whether Enter in `target` must not reach the browser's implicit form
+ * submission: every form control except a button, a textarea and a link
+ * (they keep their own Enter). A select, a checkbox or a radio would
+ * otherwise submit the editor.
+ */
+export function blocksImplicitSubmit( target: EventTarget | null ): boolean {
+	if ( ! ( target instanceof Element ) ) {
+		return false;
+	}
+
+	if ( target instanceof HTMLButtonElement || target instanceof HTMLTextAreaElement || target instanceof HTMLAnchorElement ) {
+		return false;
+	}
+
+	if ( target instanceof HTMLInputElement ) {
+		return ! [ 'button', 'submit', 'reset', 'image' ].includes( target.type );
+	}
+
+	return target instanceof HTMLSelectElement;
+}
+
+/**
+ * Bring a notice of the editor (its problem list, its "Update anyway?")
+ * into view and give it the keyboard focus, so it is read out and the next
+ * Tab walks its field links. Returns whether it was found.
+ */
+export function revealNotice( root: HTMLElement | null, selector: string ): boolean {
+	const notice = root?.querySelector< HTMLElement >( selector );
+
+	if ( ! notice ) {
+		return false;
+	}
+
+	if ( ! notice.hasAttribute( 'tabindex' ) ) {
+		notice.setAttribute( 'tabindex', '-1' );
+	}
+
+	notice.focus( { preventScroll: true } );
+
+	if ( typeof notice.scrollIntoView === 'function' ) {
+		notice.scrollIntoView( { block: 'center', inline: 'nearest' } );
+	}
+
+	return notice.ownerDocument.activeElement === notice;
 }
 
 /** The sticky chrome above the table (the admin bar, the table header when it sticks): what a scrolled-to editor must clear. */
@@ -603,7 +652,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const rootRef = useRef< HTMLFormElement >( null );
 	const formRef = useRef< HTMLDivElement >( null );
 	const focusedRef = useRef( false );
-	const saveRef = useRef< ( advance?: boolean ) => Promise< void > >( async () => {} );
+	const saveRef = useRef< ( advance?: boolean, implicit?: boolean ) => Promise< void > >( async () => {} );
 
 	const fieldsWithToggle = useMemo( () => withScheduleSale( allFields ), [ allFields ] );
 	// Bulk mode adds the add/remove/replace select in front of the list fields.
@@ -838,10 +887,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
 	const saleChoiceNeeded = bulk && runningSales.count > 0 && saleChoice === null;
 
-	/** After a partial failure only the failed rows (and the parents whose variations failed) are sent again. */
+	/**
+	 * After a partial failure only the failed rows are sent again: a parent
+	 * whose variations failed comes along to carry them, without its own
+	 * edits (they saved) unless the parent itself failed.
+	 */
 	const retryTargets = useMemo( () => {
 		if ( ! failedIds ) {
-			return { items, prefetched: variations.byParent as ReadonlyMap< number, ProductListItem[] > };
+			return { items, prefetched: variations.byParent as ReadonlyMap< number, ProductListItem[] >, carriersOnly: undefined };
 		}
 
 		const prefetched = new Map< number, ProductListItem[] >();
@@ -853,9 +906,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			);
 		}
 
+		const retried = items.filter( ( item ) => failedIds.has( item.id ) || ( isVariableParent( item ) && ( prefetched.get( item.id )?.length ?? 0 ) > 0 ) );
+
 		return {
-			items: items.filter( ( item ) => failedIds.has( item.id ) || ( isVariableParent( item ) && ( prefetched.get( item.id )?.length ?? 0 ) > 0 ) ),
+			items: retried,
 			prefetched: prefetched as ReadonlyMap< number, ProductListItem[] >,
+			carriersOnly: new Set( retried.filter( ( item ) => ! failedIds.has( item.id ) ).map( ( item ) => item.id ) ) as ReadonlySet< number >,
 		};
 	}, [ failedIds, items, variations ] );
 
@@ -983,7 +1039,55 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		onClick: () => void undoBatch( batchId, { focus: captureFocusOrigin() } ),
 	} );
 
-	const save = async ( advance = false ) => {
+	/**
+	 * Show what blocks (or needs a yes before) this Update next to the
+	 * buttons, flag the fields it names, and bring it into view with the
+	 * keyboard focus on it: a bulk editor is taller than the screen and the
+	 * list would otherwise appear below the fold with nothing moving.
+	 */
+	const reportProblems = ( list: EditError[], kind: 'errors' | 'warnings' ) => {
+		if ( kind === 'errors' ) {
+			setErrors( list );
+		} else {
+			setWarnings( list );
+		}
+
+		const flagged = new Map< string, string >();
+
+		for ( const entry of list ) {
+			if ( entry.field && ! flagged.has( entry.field ) ) {
+				flagged.set( entry.field, entry.message );
+			}
+		}
+
+		// A warning is a question, not a broken field: only errors flag their controls.
+		if ( kind === 'warnings' ) {
+			flagged.clear();
+		}
+
+		setInvalidFields( Array.from( flagged, ( [ field, message ] ) => ( { field, message } ) ) );
+
+		setTimeout( () => {
+			if ( ! mountedRef.current ) {
+				return;
+			}
+
+			const root = formRef.current;
+
+			flagInvalidControls(
+				root,
+				Array.from( flagged.keys() ).map( ( field ) => {
+					const label = fieldLabels[ field ] ?? field;
+
+					// A bulk numeric field is an operation select and a value input: the value is what is wrong.
+					return { field, label: controlForField( root, `${ label }: value` ) ? `${ label }: value` : label };
+				} )
+			);
+			revealNotice( rootRef.current, kind === 'errors' ? '.wc-pl-edit__errors' : '.wc-pl-edit__warnings' );
+		}, 0 );
+	};
+
+	const save = async ( advance = false, implicit = false ) => {
 		if ( saving || loading ) {
 			return;
 		}
@@ -1008,7 +1112,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const opErrors = validateNumericOps( pendingEdits, visibleFields, settings ).map( ( error ) => ( { id: 0, ...error } ) );
 
 		if ( opErrors.length ) {
-			setErrors( opErrors );
+			reportProblems( opErrors, 'errors' );
 
 			return;
 		}
@@ -1018,7 +1122,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		if ( ! variationsReady ) {
-			setErrors( [ { id: 0, message: variations.error ?? __( 'The variations are still loading.', 'wp-woocommerce-products-list' ) } ] );
+			reportProblems( [ { id: 0, message: variations.error ?? __( 'The variations are still loading.', 'wp-woocommerce-products-list' ) } ], 'errors' );
 
 			return;
 		}
@@ -1026,7 +1130,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const projected = validateBulkNumericEdits( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
 
 		if ( projected.length ) {
-			setErrors( projected );
+			reportProblems( projected, 'errors' );
 
 			return;
 		}
@@ -1055,8 +1159,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const clamped = projectWarnings( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
 		const warningKey = clamped.map( ( warning ) => `${ warning.id }:${ warning.field }` ).join( '|' );
 
-		if ( clamped.length && acknowledged !== warningKey ) {
-			setWarnings( clamped.map( ( warning ) => ( { id: warning.id, field: warning.field, message: warning.message } ) ) );
+		// The yes is a press of "Update anyway" itself: an Enter in a field (or a select) shows the question again instead.
+		if ( clamped.length && ( acknowledged !== warningKey || implicit ) ) {
+			reportProblems(
+				clamped.map( ( warning ) => ( { id: warning.id, field: warning.field, message: warning.message } ) ),
+				'warnings'
+			);
 			setAcknowledged( warningKey );
 
 			return;
@@ -1096,6 +1204,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				applyToVariations,
 				source: bulk ? 'bulk' : 'quick',
 				prefetchedVariations: retryTargets.prefetched,
+				...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
 				...rowOptions,
 				onProgress: ( done, total ) => {
 					if ( mountedRef.current ) {
@@ -1127,10 +1236,30 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			const skippedNames = dropped.size ? listNames( retryTargets.items.filter( ( item ) => dropped.has( item.id ) ) ) : '';
 
 			if ( result.errors.length === 0 ) {
+				// The rows a bulk save left out (no stock management, already on sale…) are still selected: narrow the selection to them.
+				const skippedIds = bulk ? Array.from( new Set( ( result.skippedItems ?? [] ).map( ( item ) => item.id ) ) ) : [];
+				const selectSkipped = skippedIds.length
+					? [
+							{
+								label: sprintf(
+									/* translators: %d: number of items the save left out */
+									_n( 'Select the %d skipped', 'Select the %d skipped', skippedIds.length, 'wp-woocommerce-products-list' ),
+									skippedIds.length
+								),
+								onClick: () => void selectRows( skippedIds ),
+							},
+					  ]
+					: [];
+				const savedActions = [
+					...( updated > 0 && canUndo() ? [ undoAction( result.batchId ) ] : [] ),
+					// A bulk save also links to its batch in History (what changed, revert later).
+					...( updated > 0 && bulk && historyAction( result.batchId ) ? [ historyAction( result.batchId )! ] : [] ),
+					...selectSkipped,
+				];
+
 				notify.success( successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ), {
 					id: SAVED_NOTICE_ID,
-					// A bulk save also links to its batch in History (what changed, revert later).
-					actions: updated > 0 ? [ undoAction( result.batchId ), ...( bulk && historyAction( result.batchId ) ? [ historyAction( result.batchId )! ] : [] ) ] : undefined,
+					actions: savedActions.length ? savedActions : undefined,
 				} );
 
 				if ( advance && nextRow ) {
@@ -1151,7 +1280,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// Who failed and why, always: the editor may be gone by now (its rows left the list mid-save), and the snackbar is then all there is.
 			const history = historyAction( result.batchId );
 
-			const partialActions = [ ...( updated > 0 ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ];
+			const partialActions = [ ...( updated > 0 && canUndo() ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ];
 
 			if ( mountedRef.current ) {
 				// The editor lists who failed and why; the snackbar carries the counts and the Undo, and expires like any other.
@@ -1169,7 +1298,27 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						message: goneSet.has( error.id ) ? `${ error.message } ${ __( 'It leaves the list when this editor closes.', 'wp-woocommerce-products-list' ) }` : error.message,
 					} ) )
 				);
-				setFailedIds( new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) ) );
+				const failedNow = new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) );
+
+				setFailedIds( failedNow );
+
+				// A retry works on the values the rows have now, not on the ones the editor opened with: the saved rows
+				// take what the server returned, and the failed rows are fetched again (a relative op resolves on that).
+				setHydrated( ( current ) => {
+					const next = new Map( current );
+
+					for ( const row of result.updated ) {
+						const known = next.get( row.id );
+
+						if ( known ) {
+							next.set( row.id, mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem );
+						}
+					}
+
+					failedNow.forEach( ( id ) => next.delete( id ) );
+
+					return next;
+				} );
 			}
 		} catch ( error ) {
 			failed = true;
@@ -1208,7 +1357,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			const advance = submitRequested === 'next';
 
 			setSubmitRequested( false );
-			void saveRef.current( advance );
+			// From the keyboard in a field: never the answer to "Update anyway?".
+			void saveRef.current( advance, true );
 		}
 	}, [ submitRequested ] );
 
@@ -1315,14 +1465,22 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		// Plain Enter in a single-line field updates, as in the classic quick edit; Cmd/Ctrl+Enter from anywhere (a textarea too).
 		// Shift+Enter (or Shift+Cmd+Enter) updates and moves on to the next row.
 		if ( ! modifier && ! isTextEntry( event.target ) ) {
+			// Chrome submits the form on Enter in a closed <select>, a checkbox or a radio (implicit submission); here that
+			// would save the whole edit, and answer a pending "Update anyway?" with yes. Only a button (and a textarea, a
+			// link) keeps its own Enter.
+			if ( blocksImplicitSubmit( event.target ) ) {
+				event.preventDefault();
+			}
+
 			return;
 		}
+
+		event.preventDefault();
 
 		if ( event.shiftKey && ! nextRow ) {
 			return;
 		}
 
-		event.preventDefault();
 		setSubmitRequested( event.shiftKey ? 'next' : 'save' );
 	};
 
@@ -1440,13 +1598,16 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		if ( plan ) {
 			const base = saveLabelFor( plan );
 
-			// Replacing sales that run now ends them on save: the button says so.
-			return saleChoice === 'replace' && runningSales.count > 0 && plan.writes.length > 0
+			// Replacing sales that run now ends them on save: the button says how many, counted on the rows the plan really writes
+			// (the "only where it gets cheaper" guard and the other skip rules leave some running).
+			const ending = plan.endedRunningSales ?? 0;
+
+			return saleChoice === 'replace' && ending > 0 && plan.writes.length > 0
 				? sprintf(
 						/* translators: 1: "Update N items", 2: number of sales running now */
-						_n( '%1$s, ending %2$d running sale', '%1$s, ending %2$d running sales', runningSales.count, 'wp-woocommerce-products-list' ),
+						_n( '%1$s, ending %2$d running sale', '%1$s, ending %2$d running sales', ending, 'wp-woocommerce-products-list' ),
 						base,
-						runningSales.count
+						ending
 				  )
 				: base;
 		}
@@ -1506,6 +1667,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					return;
 				}
 
+				// The submit button itself (a click, or Enter / Space on it): implicit submission from the fields is stopped in onKeyDown.
 				void save();
 			} }
 		>

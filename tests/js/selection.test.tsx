@@ -3,7 +3,7 @@ import { doAction } from '@wordpress/hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
-import { MAX_SELECT_ALL, SELECT_ALL_FIELDS, useSelection } from '../../resources/list/selection';
+import { MAX_SELECT_ALL, SELECT_ALL_FIELDS, selectRows, useSelection } from '../../resources/list/selection';
 import type { FetchPage } from '../../resources/list/selection';
 import { setSettings } from '../../resources/settings';
 import type { ProductListItem } from '../../resources/types';
@@ -75,37 +75,59 @@ describe( 'useSelection', () => {
 		expect( result.current.selection ).toEqual( [] );
 	} );
 
-	it( 'is cleared by a bulk save that went through, and drops rows a save found gone', () => {
+	it( 'survives a bulk save, so edits chain on the same set, and drops rows a save found gone', () => {
 		const { result } = renderHook( ( { rows, tab } ) => useSelection( rows, tab ), { initialProps: { rows: page1, tab: 'all' } } );
 
 		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
 		act( () => {
-			// Only the variations were written ("apply to variations"); the parents are done too.
-			doAction( ACTIONS.saved, { updated: [ { id: 2001 } ], errors: [], batchId: 'b' }, { source: 'bulk' } );
+			doAction( ACTIONS.saved, { updated: [ { id: 2001 }, { id: 1 } ], errors: [], batchId: 'b' }, { source: 'bulk' } );
 		} );
-		expect( result.current.selection ).toEqual( [] );
+		expect( result.current.selection ).toEqual( [ '1', '2', '3' ] );
 
-		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
 		act( () => {
 			doAction( ACTIONS.saved, { updated: [ { id: 1 } ], errors: [ { id: 2, message: 'gone', code: 'woocommerce_rest_product_invalid_id' }, { id: 3, message: 'x', code: 'rest_invalid_param' } ], batchId: 'b' }, { source: 'bulk' } );
 		} );
-		// 1 saved, 2 deleted elsewhere, 3 failed and stays for the retry.
-		expect( result.current.selection ).toEqual( [ '3' ] );
+		// 1 saved and stays, 2 deleted elsewhere leaves, 3 failed and stays for the retry.
+		expect( result.current.selection ).toEqual( [ '1', '3' ] );
 	} );
 
-	it( 'clears on a status tab change, and drops saved and deleted rows', () => {
+	it( 'selectRows narrows the mounted selection from outside ("Select the skipped")', () => {
+		const { result, unmount } = renderHook( () => useSelection( page1, 'all' ) );
+
+		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
+		act( () => {
+			expect( selectRows( [ 2, 3 ] ) ).toBe( true );
+		} );
+		expect( result.current.selection ).toEqual( [ '2', '3' ] );
+
+		unmount();
+		expect( selectRows( [ 1 ] ) ).toBe( false );
+	} );
+
+	it( 'addRows keeps rows that are not on the page yet', () => {
+		const { result } = renderHook( () => useSelection( page1, 'all' ) );
+		const variation = normalizeVariation( { id: 501, name: 'Black' }, 1 );
+
+		act( () => result.current.onPageSelectionChange( [ '1' ] ) );
+		act( () => result.current.addRows( [ variation, page1[ 0 ]! ] ) );
+		expect( result.current.selection ).toEqual( [ '1', '501' ] );
+		expect( result.current.offPageCount ).toBe( 1 );
+		expect( result.current.rows[ 1 ] ).toBe( variation );
+	} );
+
+	it( 'clears on a status tab change, and drops deleted rows', () => {
 		const { result, rerender } = renderHook( ( { rows, tab } ) => useSelection( rows, tab ), { initialProps: { rows: page1, tab: 'all' } } );
 
 		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
 		act( () => {
-			doAction( ACTIONS.saved, { updated: [ { id: 1 } ], errors: [ { id: 2, message: 'x' } ], batchId: 'b' }, { source: 'bulk' } );
+			doAction( ACTIONS.saved, { updated: [ { id: 1 } ], errors: [ { id: 2, message: 'x' } ], batchId: 'b' }, { source: 'quick' } );
 		} );
-		expect( result.current.selection ).toEqual( [ '2', '3' ] );
+		expect( result.current.selection ).toEqual( [ '1', '2', '3' ] );
 
 		act( () => {
 			doAction( ACTIONS.deleted, [ 3 ], { action: 'trash', batchId: 'b' } );
 		} );
-		expect( result.current.selection ).toEqual( [ '2' ] );
+		expect( result.current.selection ).toEqual( [ '1', '2' ] );
 
 		rerender( { rows: page1, tab: 'trash' } );
 		expect( result.current.selection ).toEqual( [] );
@@ -182,18 +204,16 @@ describe( 'useSelection after a server action', () => {
 	beforeEach( () => setSettings( sampleSettings() ) );
 	afterEach( () => setSettings( undefined ) );
 
-	it( 'drops the rows a declarative action processed, so a filter the action emptied cannot keep a stale bulk edit', () => {
+	it( 'keeps the rows a declarative action processed; those the refetch filtered out count as not in this view', () => {
 		const { result, rerender } = renderHook( ( { rows } ) => useSelection( rows, 'all' ), { initialProps: { rows: page1 } } );
 
 		act( () => result.current.onPageSelectionChange( [ '1', '2', '3' ] ) );
 		act( () => {
-			// Copy translations wrote 1 and 2; 3 failed and stays for a retry.
 			doAction( ACTIONS.actionPerformed, { action: 'i18n_copy', ids: [ 1, 2 ], batchId: 'b', items: [] } );
 		} );
-		expect( result.current.selection ).toEqual( [ '3' ] );
+		expect( result.current.selection ).toEqual( [ '1', '2', '3' ] );
 
-		// The list refetched without them: nothing is "on other pages".
 		rerender( { rows: [ product( 3 ) ] } );
-		expect( result.current.offPageCount ).toBe( 0 );
+		expect( result.current.offPageCount ).toBe( 2 );
 	} );
 } );

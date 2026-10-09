@@ -210,12 +210,12 @@ class LogTest extends RestTestCase
     public function test_log_filters(): void
     {
         $product = $this->simpleProduct();
-        $other = $this->simpleProduct();
+        $other = $this->simpleProduct(['name' => 'Lenka winter boot']);
         $otherUser = self::factory()->user->create(['role' => 'shop_manager']);
 
         $this->seed([
             ['batch_id' => 'b1', 'object_id' => $product->get_id(), 'field' => 'regular_price', 'old_value' => '1', 'new_value' => '2', 'created_at' => '2026-10-01 10:00:00'],
-            ['batch_id' => 'b1', 'object_id' => $product->get_id(), 'field' => 'i18n.se.name', 'old_value' => '', 'new_value' => 'Saga', 'created_at' => '2026-10-01 10:00:00'],
+            ['batch_id' => 'b1', 'object_id' => $product->get_id(), 'field' => 'i18n.se.name', 'old_value' => '', 'new_value' => 'Ullsockor', 'created_at' => '2026-10-01 10:00:00'],
             ['batch_id' => 'b2', 'object_id' => $other->get_id(), 'parent_id' => $product->get_id(), 'object_type' => 'variation', 'field' => 'sale_price', 'old_value' => '', 'new_value' => '9', 'source' => 'bulk', 'user_id' => $otherUser, 'created_at' => '2026-10-05 10:00:00'],
             ['batch_id' => 'b3', 'object_id' => $other->get_id(), 'field' => 'status', 'action' => 'trash', 'source' => 'action', 'created_at' => '2026-10-07 10:00:00'],
         ]);
@@ -233,8 +233,15 @@ class LogTest extends RestTestCase
         $this->assertSame(['b3', 'b2'], $ids(['since' => '2026-10-05']));
         $this->assertSame(['b1', 'b1'], $ids(['until' => '2026-10-04T00:00:00']));
         $this->assertSame(['b2'], $ids(['since' => '2026-10-02', 'until' => '2026-10-06']));
-        $this->assertSame(['b1'], $ids(['search' => 'saga']));
+        $this->assertSame(['b1'], $ids(['search' => 'ullsock']));
         $this->assertSame([], $ids(['search' => '100%']));
+        // The name of the product a row is about (b2 is a row of a variation of the Saga boot).
+        $this->assertSame(['b3', 'b2'], $ids(['search' => 'lenka']));
+        $this->assertSame(['b2', 'b1', 'b1'], $ids(['search' => 'saga wide']));
+
+        // Batches: the whole batch of a matching product, with its own counts.
+        $batches = $this->data($this->request('GET', '/wc-products-list/v1/log/batches', ['search' => 'lenka']))['items'];
+        $this->assertSame(['b3', 'b2'], array_column($batches, 'batch_id'));
     }
 
     public function test_log_users_lists_who_made_changes(): void

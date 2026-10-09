@@ -16,6 +16,7 @@ function api( overrides: Partial< SelectionApi > = {} ): SelectionApi {
 		offPageCount: 0,
 		onPageSelectionChange: vi.fn(),
 		set: vi.fn(),
+		addRows: vi.fn(),
 		clear: vi.fn(),
 		selectAllMatching: vi.fn( async () => 0 ),
 		cancelSelectAll: vi.fn(),

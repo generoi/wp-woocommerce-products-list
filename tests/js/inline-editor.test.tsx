@@ -139,6 +139,13 @@ describe( 'InlineEditor', () => {
 		expect( notify.info ).toHaveBeenCalledWith( '2 updated, 1 failed.', expect.objectContaining( { id: 'wc-pl-saved', actions: expect.arrayContaining( [ expect.objectContaining( { label: 'Undo' } ) ] ) } ) );
 		expect( notify.error ).not.toHaveBeenCalled();
 
+		// The failed row is fetched again, so a retry works on its current values (not the ones the editor opened with).
+		const { listProducts } = await import( '../../resources/api/client' );
+
+		await waitFor( () =>
+			expect( ( listProducts as unknown as ReturnType< typeof vi.fn > ).mock.calls.some( ( [ query ] ) => String( ( query as Record< string, unknown > ).include ) === '3' ) ).toBe( true )
+		);
+
 		// The retry sends only the failed row.
 		saveEdits.mockResolvedValueOnce( { updated: [ simple( 3, { featured: true } ) ], errors: [], batchId: 'b2', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
 		fireEvent.click( screen.getByRole( 'button', { name: 'Retry 1 failed' } ) );
@@ -780,5 +787,78 @@ describe( 'InlineEditor, round 4', () => {
 		// The problem list links to the fields.
 		expect( screen.getByRole( 'button', { name: 'stock_quantity' } ) ).toBeInTheDocument();
 		expect( saveEdits ).not.toHaveBeenCalled();
+	} );
+} );
+
+describe( 'InlineEditor, round 6', () => {
+	const stockRows = () => [ simple( 1, { name: 'Low', manage_stock: true, stock_quantity: 1 } ), simple( 2, { name: 'High', manage_stock: true, stock_quantity: 9 } ) ];
+
+	async function openDecrease() {
+		const rows = stockRows();
+		const { listProducts } = await import( '../../resources/api/client' );
+
+		( listProducts as unknown as ReturnType< typeof vi.fn > ).mockImplementationOnce( async () => ( { items: rows, total: 0, totalPages: 1 } ) );
+
+		const view = renderEditor( rows );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+
+		const operation = screen.getByLabelText( 'stock_quantity: operation' ) as HTMLSelectElement;
+
+		fireEvent.change( operation, { target: { value: 'decrease' } } );
+
+		const value = screen.getByLabelText( 'stock_quantity: value' ) as HTMLInputElement;
+
+		fireEvent.change( value, { target: { value: '5' } } );
+		await screen.findByRole( 'button', { name: 'Update 2 products' } );
+
+		return { view, operation, value };
+	}
+
+	it( 'Enter on a select never submits the editor (Chrome\'s implicit submission), nor on a checkbox', async () => {
+		const { operation } = await openDecrease();
+
+		// Prevented: the browser's implicit submission never runs.
+		expect( fireEvent.keyDown( operation, { key: 'Enter' } ) ).toBe( false );
+		await new Promise( ( resolve ) => setTimeout( resolve, 20 ) );
+		expect( saveEdits ).not.toHaveBeenCalled();
+		expect( screen.queryByText( /would go below zero/ ) ).not.toBeInTheDocument();
+	} );
+
+	it( '"Update anyway?" is answered only by its button: Enter in a field or a select shows the question again', async () => {
+		saveEdits.mockResolvedValueOnce( { updated: [ simple( 1 ), simple( 2 ) ], errors: [], batchId: 'b1', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+
+		const { view, operation, value } = await openDecrease();
+
+		fireEvent.keyDown( value, { key: 'Enter' } );
+
+		expect( ( await screen.findAllByText( '1 row would go below zero. Update anyway?' ) ).length ).toBeGreaterThan( 0 );
+		// The question takes the keyboard focus (and comes into view): it is not left below the fold.
+		await waitFor( () => expect( document.activeElement?.closest( '.wc-pl-edit__warnings' ) ).not.toBeNull() );
+		expect( screen.getByRole( 'button', { name: 'Update anyway' } ) ).toBeInTheDocument();
+
+		// Enter on the next select (Tab, Tab, Enter): no save.
+		expect( fireEvent.keyDown( operation, { key: 'Enter' } ) ).toBe( false );
+		// Enter in the value field again: the question stays, no save.
+		fireEvent.keyDown( value, { key: 'Enter' } );
+		await new Promise( ( resolve ) => setTimeout( resolve, 20 ) );
+		expect( saveEdits ).not.toHaveBeenCalled();
+		expect( screen.getByRole( 'button', { name: 'Update anyway' } ) ).toBeInTheDocument();
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Update anyway' } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+		await waitFor( () => expect( view.close ).toHaveBeenCalled() );
+	} );
+
+	it( 'a blocked bulk Update moves focus to the problem list and flags the field it names', async () => {
+		const { value } = await openDecrease();
+
+		// A fractional stock amount is refused by the op rules.
+		fireEvent.change( value, { target: { value: '2.5' } } );
+		fireEvent.click( document.querySelector( '.wc-pl-edit__footer button[type="submit"]' )! );
+
+		await waitFor( () => expect( document.activeElement?.closest( '.wc-pl-edit__errors' ) ).not.toBeNull() );
+		expect( saveEdits ).not.toHaveBeenCalled();
+		await waitFor( () => expect( screen.getByLabelText( 'stock_quantity: value' ) ).toHaveAttribute( 'aria-invalid', 'true' ) );
 	} );
 } );

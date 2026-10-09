@@ -50,5 +50,14 @@ describe( 'sale price direction', () => {
 		expect( plan.writes.map( ( entry ) => entry.target.item.id ) ).toEqual( [ 12, 13 ] );
 		expect( plan.notLowerSkipped.map( ( row ) => row.id ) ).toEqual( [ 11 ] );
 		expect( plan.saleSkipped ).toEqual( [] );
+		// Only Diva's running sale really ends: the button counts it, not Mojo's (left alone) nor Plain (no sale).
+		expect( plan.endedRunningSales ).toBe( 1 );
+		expect( plan.replacedSales ).toBe( 1 );
+	} );
+
+	it( 'counts every running sale the plan replaces when nothing guards them', () => {
+		const plan = planSave( [ diva, mojo, plain ], minus25, fields, settings, { applyToVariations: false } );
+
+		expect( plan.endedRunningSales ).toBe( 2 );
 	} );
 } );

@@ -121,10 +121,12 @@ final class ActionsController
             ), ['status' => 404]);
         }
 
-        $parsed = self::parseIds($request['ids'], Bootstrap::ACTION_BATCH_SIZE);
+        $max = Bootstrap::actionBatchSize($actionId);
+        $parsed = self::parseIds($request['ids'], $max);
 
         if (! $parsed['ok']) {
-            return new WP_Error($parsed['code'], $parsed['message'], ['status' => 400]);
+            // `max`: the ids this action takes per request, to chunk by.
+            return new WP_Error($parsed['code'], $parsed['message'], ['status' => 400, 'max' => $max]);
         }
 
         $args = $action->sanitizeArgs(is_array($request['args']) ? $request['args'] : []);
@@ -140,10 +142,15 @@ final class ActionsController
         $results = [];
         $rows = [];
         $survivors = [];
+        $parents = [];
 
         foreach ($parsed['ids'] as $id) {
             [$result, $logRows, $product] = $this->runOne($action, $id, $args, $request, $batchId);
             $results[] = $result;
+
+            if ($product instanceof WC_Product_Variation && ($result['changed'] ?? 0) > 0 && $product->get_parent_id() > 0) {
+                $parents[$product->get_parent_id()] = true;
+            }
 
             foreach ($logRows as $row) {
                 $rows[] = $row;
@@ -153,6 +160,8 @@ final class ActionsController
                 $survivors[] = $id;
             }
         }
+
+        self::syncParents(array_keys($parents));
 
         Logger::log($rows);
         Logger::flush();
@@ -164,6 +173,31 @@ final class ActionsController
             'results' => $results,
             'items' => $this->refresh($survivors, is_string($fields) ? $fields : null),
         ]);
+    }
+
+    /**
+     * Once per parent whose variations an action changed: the parent's
+     * cached children and price range (transients) are dropped and its
+     * price, stock status and lookup row are synced from the variations
+     * that are left. WooCommerce's data store does neither when a
+     * variation is trashed or restored (its REST delete clears the
+     * transients itself), so the shop would keep showing the old range.
+     *
+     * @param  array<int, int>  $parentIds
+     */
+    public static function syncParents(array $parentIds): void
+    {
+        foreach ($parentIds as $parentId) {
+            wc_delete_product_transients($parentId);
+
+            $parent = wc_get_product($parentId);
+
+            if ($parent instanceof \WC_Product_Variable) {
+                \WC_Product_Variable::sync($parent);
+            }
+
+            wc_delete_product_transients($parentId);
+        }
     }
 
     /**
@@ -242,7 +276,11 @@ final class ActionsController
         }
 
         if ($rows === []) {
-            $rows[] = $base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => 'ok', 'message' => ''];
+            // Nothing to change (it already had the value): a `skipped` row,
+            // so History counts it apart from the changes and a revert of
+            // the batch leaves it out without calling it a failure.
+            $base['context'] = ['reason' => 'unchanged'] + $base['context'];
+            $rows[] = $base + ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => Logger::STATUS_SKIPPED, 'message' => LogController::skipMessage('unchanged')];
         }
 
         // How many fields the handler changed on this id: the app's notice

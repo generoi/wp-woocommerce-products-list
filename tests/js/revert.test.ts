@@ -54,8 +54,8 @@ describe( 'scopeFromPlan', () => {
 	it( 'describes the plan exactly, naming what is left alone', () => {
 		const scope = scopeFromPlan( { rows: 160, objects: 158, skipped: [ { id: 9, object_type: 'product', action: 'trash' }, { id: 10, object_type: 'product', action: 'delete' } ] } );
 
-		expect( scope ).toEqual( { changes: 158, objects: 158, fields: [], partial: false, skipped: 2, failed: 0 } );
-		expect( describeBatchScope( scope ) ).toBe( 'This will put back 158 changes on 158 items. 2 entries (trash, restore, delete or duplicate) are not reverted.' );
+		expect( scope ).toEqual( { changes: 158, objects: 158, fields: [], partial: false, skipped: 2, failed: 0, skippedActions: [ 'trash', 'delete' ] } );
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 158 changes on 158 items. 2 entries (trash, delete) are not reverted.' );
 		expect( describeBatchScope( scopeFromPlan( { rows: 1, objects: 1, skipped: [] } ) ) ).toBe( 'This will put back 1 change on 1 item.' );
 	} );
 
@@ -63,7 +63,23 @@ describe( 'scopeFromPlan', () => {
 		const scope = scopeFromPlan( { rows: 4, objects: 2, failed: 1, skipped: [ { id: 9, object_type: 'product', action: 'failed' }, { id: 10, object_type: 'product', action: 'trash' } ] } );
 
 		expect( scope ).toMatchObject( { changes: 2, skipped: 1, failed: 1 } );
-		expect( describeBatchScope( scope ) ).toBe( 'This will put back 2 changes on 2 items. 1 entry (trash, restore, delete or duplicate) is not reverted. 1 failed change, nothing to revert.' );
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 2 changes on 2 items. 1 entry (trash) is not reverted. 1 failed change, nothing to revert.' );
+	} );
+} );
+
+describe( 'left-out items', () => {
+	it( 'says items that already had the value were left out, not that they are trash or delete entries', () => {
+		const scope = scopeFromPlan( { rows: 1, objects: 1, skipped: [], left_out: 6, left_out_reasons: { unchanged: 5, trashed: 1 } }, ( action ) => action );
+
+		expect( describeBatchScope( scope ) ).toBe(
+			'This will put back 1 change on 1 item. 5 items were left out because they already had this value; nothing to put back. 1 item was left out when the batch ran (trashed meanwhile); nothing to put back.'
+		);
+	} );
+
+	it( 'names the not-revertable actions by their labels', () => {
+		const scope = scopeFromPlan( { rows: 3, objects: 1, skipped: [ { id: 1, object_type: 'product', action: 'duplicate' } ] }, () => 'Duplicate' );
+
+		expect( describeBatchScope( scope ) ).toBe( 'This will put back 2 changes on 1 item. 1 entry (Duplicate) is not reverted.' );
 	} );
 } );
 
@@ -93,7 +109,7 @@ describe( 'isRevertableRow', () => {
 		];
 
 		expect( summarizeBatch( rows, 4 ) ).toEqual( { changes: 3, objects: 2, fields: [ 'i18n.se.name', 'i18n.se.slug' ], partial: false } );
-		expect( describeBatchScope( { changes: 3, objects: 2, fields: [], partial: false, skipped: 1 } ) ).toBe( 'This will put back 3 changes on 2 items. 1 entry (trash, restore, delete or duplicate) is not reverted.' );
+		expect( describeBatchScope( { changes: 3, objects: 2, fields: [], partial: false, skipped: 1 } ) ).toBe( 'This will put back 3 changes on 2 items. 1 entry cannot be reverted.' );
 	} );
 } );
 

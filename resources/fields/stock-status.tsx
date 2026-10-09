@@ -30,6 +30,11 @@ export function createStockStatusField( settings: Settings ): ProductField {
 	return field( {
 		id: 'stock_status',
 		type: 'text',
+		// The label is also the edit form's: it stays "Stock". As a filter it
+		// judges the product's own status (a variable product is out of stock
+		// only when every variation is) and narrows the expanded variations to
+		// the same status ("3 of 15 variations match"); "Variation stock" is the
+		// any-variation filter.
 		label: __( 'Stock', 'wp-woocommerce-products-list' ),
 		elements: settings.stockStatuses,
 		// wc/v3 validates `stock_status` against its enum: one value at a time.

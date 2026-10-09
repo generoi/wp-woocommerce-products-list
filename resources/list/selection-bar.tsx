@@ -23,7 +23,11 @@ export interface SelectionBarProps {
 	actions: ProductAction[];
 	/** Open the inline editor on these rows. */
 	onEdit( rows: ProductListItem[] ): void;
+	/** The keyboard shortcut that opens the editor on the selection (announced on the button). */
+	shortcut?: string;
 }
+
+export const BULK_EDIT_BUTTON_ID = 'wc-products-list-bulk-edit';
 
 /** "12 selected (4 not in this view)": on other pages, or filtered out since they were selected. */
 export function selectionLabel( count: number, offPage: number ): string {
@@ -41,7 +45,7 @@ export function selectionLabel( count: number, offPage: number ): string {
 	) })`;
 }
 
-export function SelectionBar( { selection, total, pageProducts, query, actions, onEdit }: SelectionBarProps ) {
+export function SelectionBar( { selection, total, pageProducts, query, actions, onEdit, shortcut }: SelectionBarProps ) {
 	const canEdit = useMemo( () => actions.some( ( action ) => action.id === 'quick-edit' ), [ actions ] );
 	const count = selection.selection.length;
 	const progress = selection.selectAllProgress;
@@ -57,6 +61,16 @@ export function SelectionBar( { selection, total, pageProducts, query, actions, 
 			{ count > 0 && (
 				<span className="wc-products-list__selection-count" aria-live="polite">
 					{ selectionLabel( count, selection.offPageCount ) }
+					{ canEdit && shortcut && (
+						<span className="screen-reader-text">
+							{ ' ' }
+							{ sprintf(
+								/* translators: %s: a keyboard shortcut ("Alt+B") */
+								__( 'Press %s to edit the selection.', 'wp-woocommerce-products-list' ),
+								shortcut
+							) }
+						</span>
+					) }
 				</span>
 			) }
 			{ progress && (
@@ -87,7 +101,14 @@ export function SelectionBar( { selection, total, pageProducts, query, actions, 
 				</span>
 			) }
 			{ count > 0 && canEdit && (
-				<Button size="compact" variant="primary" onClick={ () => onEdit( selection.rows ) }>
+				<Button
+					id={ BULK_EDIT_BUTTON_ID }
+					size="compact"
+					variant="primary"
+					onClick={ () => onEdit( selection.rows ) }
+					aria-keyshortcuts={ shortcut }
+					title={ shortcut ? `${ count > 1 ? __( 'Bulk edit', 'wp-woocommerce-products-list' ) : __( 'Quick edit', 'wp-woocommerce-products-list' ) } (${ shortcut })` : undefined }
+				>
 					{ count > 1 ? __( 'Bulk edit', 'wp-woocommerce-products-list' ) : __( 'Quick edit', 'wp-woocommerce-products-list' ) }
 				</Button>
 			) }

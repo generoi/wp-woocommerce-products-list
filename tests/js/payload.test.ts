@@ -60,7 +60,23 @@ describe( 'buildPayload', () => {
 			settings
 		);
 
-		expect( payload ).toEqual( { regular_price: '80.00', stock_quantity: 10 } );
+		// The stock op goes as WooCommerce's inventory_delta: the server adds it to the stock at write time (an order placed meanwhile is kept).
+		expect( payload ).toEqual( { regular_price: '80.00', inventory_delta: 6 } );
+	} );
+
+	it( 'sends a relative stock op as inventory_delta, and a decrease clamped at zero as the absolute 0', () => {
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 62 } ), { stock_quantity: { operation: 'increase', value: '1' } }, fields, settings ) ).toEqual( {
+			inventory_delta: 1,
+		} );
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 9 } ), { stock_quantity: { operation: 'decrease', value: '3' } }, fields, settings ) ).toEqual( {
+			inventory_delta: -3,
+		} );
+		// Clamped at zero by the projection: absolute, so the write never leaves negative stock.
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 9 } ), { stock_quantity: { operation: 'decrease', value: '20' } }, fields, settings ) ).toEqual( {
+			stock_quantity: 0,
+		} );
+		// "Change to" stays absolute; a row without a stock number has no delta to add to.
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 9 } ), { stock_quantity: { operation: 'set', value: '20' } }, fields, settings ) ).toEqual( { stock_quantity: 20 } );
 	} );
 
 	it( 'sends a plain stock value as a number and an empty one as null', () => {

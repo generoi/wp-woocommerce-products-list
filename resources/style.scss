@@ -373,6 +373,24 @@ $link: #2271b1;
 	font-style: italic;
 }
 
+// A stored translation equal to the default value: copied, not translated yet.
+.wc-products-list-field--same {
+	color: $muted;
+	font-style: italic;
+}
+
+.wc-products-list-field__copied {
+	display: inline-block;
+	padding: 0 4px;
+	border-radius: 2px;
+	background: #f0f0f1;
+	color: #50575e;
+	font-size: 11px;
+	font-style: normal;
+	line-height: 16px;
+	white-space: nowrap;
+}
+
 // A variation name built from an attribute value without a translation: a small tag linking to the term.
 .wc-products-list-field__untranslated {
 	display: inline-block;

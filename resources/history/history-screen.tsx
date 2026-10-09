@@ -26,7 +26,7 @@ import type { LogFieldOption } from '../fields/log-labels';
 import type { ProductField, Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
-import { createLogFields, formatLogValue, logQueryFromView } from './log-fields';
+import { actionLabel, createLogFields, formatLogValue, logQueryFromView } from './log-fields';
 import { describeBatchScope, isRevertableRow, scopeFromPlan } from './batch-scope';
 import { describeConflict, relativeConflicts, runRevert } from './revert';
 import type { RevertOutcome } from './revert';
@@ -334,7 +334,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
 					</>
 				) : plan ? (
-					<strong>{ describeBatchScope( scopeFromPlan( plan ) ) }</strong>
+					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ) ) }</strong>
 				) : (
 					__( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
@@ -599,7 +599,8 @@ export function HistoryScreen( { fields: productFields = [] }: { fields?: Produc
 					defaultLayouts={ { table: { titleField: 'created_at' } } }
 					actions={ batchActions }
 					isLoading={ batches.isLoading }
-					search={ false }
+					search
+					searchLabel={ __( 'Search product names and values', 'wp-woocommerce-products-list' ) }
 					header={ header }
 					config={ { perPageSizes: [ 25, 50, 100 ] } }
 					empty={ <EmptyLog error={ batches.error } filtered={ Boolean( batchView.filters?.length || batchView.search ) } onReset={ resetBatchFilters } /> }
@@ -616,7 +617,8 @@ export function HistoryScreen( { fields: productFields = [] }: { fields?: Produc
 					defaultLayouts={ { table: { titleField: 'created_at' } } }
 					actions={ actions }
 					isLoading={ log.isLoading }
-					search={ false }
+					search
+					searchLabel={ __( 'Search product names and values', 'wp-woocommerce-products-list' ) }
 					header={ header }
 					config={ { perPageSizes: [ 25, 50, 100 ] } }
 					empty={ <EmptyLog error={ log.error } filtered={ Boolean( view.filters?.length || view.search ) } onReset={ resetFilters } /> }

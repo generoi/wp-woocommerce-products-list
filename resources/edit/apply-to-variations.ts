@@ -87,7 +87,7 @@ export async function resolveSaveTargets(
 	items: ProductListItem[],
 	edits: Record< string, unknown >,
 	fields: ProductField[],
-	options: { applyToVariations: boolean; fetchVariations: FetchVariations }
+	options: { applyToVariations: boolean; fetchVariations: FetchVariations; carriersOnly?: ReadonlySet< number > }
 ): Promise< SaveTarget[] > {
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const { sellable } = splitParentEdits( edits, fields );
@@ -101,25 +101,31 @@ export async function resolveSaveTargets(
 		variableParents.forEach( ( parentItem, index ) => byParent.set( parentItem.id, variationLists[ index ] ?? [] ) );
 	}
 
-	return resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: byParent } );
+	return resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: byParent, carriersOnly: options.carriersOnly } );
 }
 
 /**
  * The same, with the variations already in hand (the modal fetches them
  * when the option is ticked, so the plan it shows before Save is exact).
  * A parent missing from `variationsByParent` contributes no variations.
+ * A parent in `carriersOnly` only carries its variations (a retry of the
+ * variations that failed): its own edits already saved and are not sent again.
  */
 export function resolveSaveTargetsWith(
 	items: ProductListItem[],
 	edits: Record< string, unknown >,
 	fields: ProductField[],
-	options: { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] > }
+	options: { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] >; carriersOnly?: ReadonlySet< number > }
 ): SaveTarget[] {
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const { parent, sellable } = splitParentEdits( edits, fields );
 	const targets = new Map< number, SaveTarget >();
 
 	for ( const item of rows ) {
+		if ( options.carriersOnly?.has( item.id ) ) {
+			continue;
+		}
+
 		if ( isVariableParent( item ) ) {
 			targets.set( item.id, { item, edits: parent, viaParent: false } );
 		} else {

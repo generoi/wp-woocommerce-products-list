@@ -88,6 +88,12 @@ final class Saves
      */
     public static function beforeDispatch($result, WP_REST_Request $request, $route = null, $handler = null)
     {
+        if ($request->get_method() !== 'GET') {
+            // The route's permission check passed: from here on, what the
+            // request does is a save attempt that may be logged.
+            self::$dispatched[spl_object_id($request)] = true;
+        }
+
         if ($result !== null || $request->get_method() === 'GET' || ! ListMode::active()) {
             return $result;
         }
@@ -101,6 +107,9 @@ final class Saves
 
         return $result;
     }
+
+    /** @var array<int, true> write requests (spl_object_id) that passed their permission check */
+    private static array $dispatched = [];
 
     /** @var array<int, true> requests (spl_object_id) whose transient deletions are deferred */
     private static array $deferring = [];
@@ -226,11 +235,32 @@ final class Saves
             $response = self::nameSkuOwners($response, $request);
         }
 
+        $key = spl_object_id($request);
+        $dispatched = isset(self::$dispatched[$key]);
+        unset(self::$dispatched[$key]);
+
         if ($request->get_method() !== 'GET' && (Recorder::hasPending() || ListMode::active())) {
-            Recorder::abandon($response, $request);
+            if ($dispatched && self::mayLog()) {
+                Recorder::abandon($response, $request);
+            } else {
+                // Refused before its callback ran (not logged in, no
+                // capability, the route's permission check, invalid
+                // params): nothing was attempted, nothing is logged.
+                Recorder::discard();
+            }
         }
 
         return $response;
+    }
+
+    /**
+     * Whether the current user's failed writes are logged: a logged-in
+     * user with the list capability. Anyone else is refused, and a
+     * refusal is not a change.
+     */
+    public static function mayLog(): bool
+    {
+        return get_current_user_id() > 0 && current_user_can(Plugin::capability());
     }
 
     /** WooCommerce's code for a SKU that is malformed or already taken. */

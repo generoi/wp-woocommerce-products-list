@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fetchAllVariations, resolveSaveTargets, splitParentEdits, variationFetchFields } from '../../resources/edit/apply-to-variations';
+import { fetchAllVariations, resolveSaveTargets, resolveSaveTargetsWith, splitParentEdits, variationFetchFields } from '../../resources/edit/apply-to-variations';
 import { coreFields, simple, variable, variation } from './edit-fixtures';
 
 const fields = coreFields();
@@ -84,5 +84,24 @@ describe( 'fetchAllVariations', () => {
 		expect( rows.map( ( r ) => r.id ) ).toEqual( [ 1, 2, 3 ] );
 		expect( getPage ).toHaveBeenCalledTimes( 3 );
 		expect( getPage.mock.calls[ 1 ] ).toEqual( [ 7, 2, [ 'id' ] ] );
+	} );
+} );
+
+describe( 'resolveSaveTargetsWith, a retry', () => {
+	it( 'a parent that only carries its failed variations does not send its own (already saved) edits again', () => {
+		const failed = variation( 21, 2 );
+		const byParent = new Map( [ [ 2, [ failed ] ] ] );
+		const edits = { ...saleEdits, stock_quantity: { operation: 'increase', value: '1' } };
+
+		const carried = resolveSaveTargetsWith( [ variable( 2 ) ], edits, fields, { applyToVariations: true, variationsByParent: byParent, carriersOnly: new Set( [ 2 ] ) } );
+
+		expect( carried.map( ( t ) => t.item.id ) ).toEqual( [ 21 ] );
+		expect( carried[ 0 ]?.edits ).not.toHaveProperty( 'stock_quantity' );
+
+		// The parent itself failed: it is sent again with its own edits.
+		const again = resolveSaveTargetsWith( [ variable( 2 ) ], edits, fields, { applyToVariations: true, variationsByParent: byParent } );
+
+		expect( again.map( ( t ) => t.item.id ) ).toEqual( [ 2, 21 ] );
+		expect( again[ 0 ]?.edits ).toHaveProperty( 'stock_quantity' );
 	} );
 } );

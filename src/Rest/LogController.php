@@ -25,7 +25,10 @@ final class LogController
 
     public function register(): void
     {
-        $permission = static fn (): bool => current_user_can(Plugin::capability());
+        // Reading the log and reverting from it: the log capability. Recording
+        // the items a save of one's own left out: the list capability.
+        $permission = static fn (): bool => current_user_can(Plugin::logCapability());
+        $writer = static fn (): bool => current_user_can(Plugin::capability());
 
         register_rest_route(Plugin::REST_NAMESPACE, '/log', [
             'methods' => 'GET',
@@ -36,7 +39,6 @@ final class LogController
                 'action' => ['type' => 'string'],
                 'object_id' => ['type' => 'integer'],
                 'parent_id' => ['type' => 'integer'],
-                'search' => ['type' => 'string'],
             ],
         ]);
 
@@ -100,7 +102,7 @@ final class LogController
         register_rest_route(Plugin::REST_NAMESPACE, '/log/skipped', [
             'methods' => 'POST',
             'callback' => [$this, 'skipped'],
-            'permission_callback' => $permission,
+            'permission_callback' => $writer,
             'args' => [
                 'batch_id' => [
                     'type' => 'string',
@@ -137,7 +139,7 @@ final class LogController
      * Why the app left an item of a batch unwritten. Each gets a log row
      * with status `skipped` so History says why an item kept its value.
      */
-    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'other'];
+    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'unchanged', 'other'];
 
     /**
      * POST /log/skipped: record the items a save left out on the client
@@ -214,6 +216,7 @@ final class LogController
             'no_sale_price' => __('Skipped: it has no sale price to adjust.', 'wp-woocommerce-products-list'),
             'below_zero' => __('Skipped: the change would have gone below zero.', 'wp-woocommerce-products-list'),
             'not_applicable' => __('Skipped: the field does not apply to this item.', 'wp-woocommerce-products-list'),
+            'unchanged' => __('Skipped: it already had this value.', 'wp-woocommerce-products-list'),
             default => __('Skipped.', 'wp-woocommerce-products-list'),
         };
     }
@@ -221,12 +224,7 @@ final class LogController
     /** Whether rows of another user already carry the batch id. */
     private function isOthers(string $batchId): bool
     {
-        global $wpdb;
-
-        $table = Table::name();
-
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE batch_id = %s AND user_id <> %d", $batchId, get_current_user_id())) > 0;
+        return Logger::isOthers($batchId);
     }
 
     /**
@@ -242,6 +240,7 @@ final class LogController
             'since' => ['type' => 'string'],
             'until' => ['type' => 'string'],
             'batch' => ['type' => 'string', 'description' => 'A batch id, or the start of one (at least 4 characters, the short id History shows).'],
+            'search' => ['type' => 'string', 'description' => 'Text in a row (field, values, message) or in the name of the product it is about; on /log/batches, the batches that touched such a product.'],
         ];
     }
 
@@ -306,6 +305,8 @@ final class LogController
                 COUNT(DISTINCT IF(object_type = 'variation' AND status <> 'skipped', parent_id, NULL)) AS parent_count,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', action, NULL) ORDER BY action SEPARATOR ',') AS actions,
                 MAX(reverts) AS reverts,
+                MIN(IF(action NOT IN ('update', 'create'), id, NULL)) AS action_row,
+                GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context), JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields
              FROM {$table} WHERE {$where}
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
@@ -316,6 +317,7 @@ final class LogController
         $rows = is_array($rows) ? $rows : [];
         $users = $this->users(array_column($rows, 'user_id'));
         $revertedBy = $this->revertedBy(array_column($rows, 'batch_id'));
+        $actionRows = $this->actionRows(array_column($rows, 'action_row'));
         $items = [];
 
         foreach ($rows as $row) {
@@ -336,13 +338,94 @@ final class LogController
                 'errors' => (int) $row['errors'],
                 // Items in the batch's scope that were left unwritten (status `skipped` rows).
                 'skipped' => (int) $row['skipped_count'],
+                // Why: the `reason` of the skipped rows (`unchanged`, `trashed`, `no_stock_management`, ...).
+                'skipped_reasons' => array_values(array_filter(explode(',', (string) $row['skipped_reasons']), static fn (string $reason): bool => $reason !== '' && $reason !== 'null')),
                 'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
                 'reverts' => (string) $row['reverts'] !== '' ? (string) $row['reverts'] : null,
                 'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
             ];
+
+            $actionRow = $actionRows[(int) ($row['action_row'] ?? 0)] ?? null;
+            $index = array_key_last($items);
+            $items[$index]['summary'] = self::batchSummary(
+                $actionRow !== null ? (string) $actionRow['action'] : null,
+                $actionRow !== null ? $actionRow['context'] : [],
+                $items[$index]
+            );
         }
 
         return $this->paged($items, $total, $perPage);
+    }
+
+    public const FILTER_BATCH_SUMMARY = 'wc_products_list/log_batch_summary';
+
+    /**
+     * The action and decoded context of log rows by id.
+     *
+     * @param  array<int, mixed>  $ids
+     * @return array<int, array{action: string, context: array<string, mixed>}>
+     */
+    private function actionRows(array $ids): array
+    {
+        global $wpdb;
+
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $table = Table::name();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, action, context FROM {$table} WHERE id IN ({$placeholders})", $ids), ARRAY_A);
+        $byId = [];
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            $context = json_decode((string) ($row['context'] ?? ''), true);
+            $byId[(int) $row['id']] = ['action' => (string) $row['action'], 'context' => is_array($context) ? $context : []];
+        }
+
+        return $byId;
+    }
+
+    /**
+     * A batch's one-line description for a person: what an action batch
+     * did ("Move to Trash", "Duplicate"), null for a batch of field edits
+     * (History lists its fields). Integrations name their own actions
+     * through `wc_products_list/log_batch_summary`, from the action's
+     * args in the row's context (languages, fields, the operation).
+     *
+     * @param  array<string, mixed>  $context  the context of the batch's first action row (`args` holds the action's args)
+     * @param  array<string, mixed>  $batch  the batch as GET /log/batches returns it
+     */
+    public static function batchSummary(?string $action, array $context, array $batch): ?string
+    {
+        $summary = match ($action) {
+            null => null,
+            'trash' => __('Move to Trash', 'wp-woocommerce-products-list'),
+            'restore' => __('Restore from Trash', 'wp-woocommerce-products-list'),
+            'delete' => __('Delete permanently', 'wp-woocommerce-products-list'),
+            'duplicate' => __('Duplicate', 'wp-woocommerce-products-list'),
+            'publish' => __('Publish', 'wp-woocommerce-products-list'),
+            'draft' => __('Set to draft', 'wp-woocommerce-products-list'),
+            'feature' => ($context['args']['featured'] ?? true) ? __('Mark as featured', 'wp-woocommerce-products-list') : __('Remove from featured', 'wp-woocommerce-products-list'),
+            default => null,
+        };
+
+        /**
+         * Filters the one-line description of a batch in History. Return
+         * a translated string for your own action ids; null leaves the
+         * app to describe the batch by its fields.
+         *
+         * @param  ?string  $summary
+         * @param  ?string  $action  the batch's action id (null for a batch of field edits)
+         * @param  array<string, mixed>  $args  the action's sanitized args, from the row's context
+         * @param  array<string, mixed>  $batch  the batch row (fields, actions, products, variations, ...)
+         */
+        $summary = apply_filters(self::FILTER_BATCH_SUMMARY, $summary, $action, is_array($context['args'] ?? null) ? $context['args'] : [], $batch);
+
+        return is_string($summary) && $summary !== '' ? $summary : null;
     }
 
     /**
@@ -358,7 +441,7 @@ final class LogController
         $table = Table::name();
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id, IF(status = 'skipped', context, NULL) AS skip_context FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
 
         if (! is_array($rows) || $rows === []) {
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
@@ -382,9 +465,34 @@ final class LogController
             'failed' => count(array_filter($rows, static fn (array $row): bool => $row['status'] === 'error')),
             // Items the batch left unwritten (status `skipped`): nothing to put back.
             'left_out' => count(array_unique(array_column(array_filter($rows, static fn (array $row): bool => $row['status'] === Logger::STATUS_SKIPPED), 'object_id'))),
+            // Why they were left out: reason => items (`unchanged`: it already had the value).
+            'left_out_reasons' => self::leftOutReasons($rows),
             'revertable' => $ids !== [] && $users <= 1,
             'reverted_by' => $this->revertedBy([$batchId])[$batchId] ?? null,
         ]);
+    }
+
+    /**
+     * Items per skip reason among a batch's `skipped` rows.
+     *
+     * @param  array<int, array<string, mixed>>  $rows  with `skip_context` (the context of a skipped row)
+     * @return array<string, int>
+     */
+    public static function leftOutReasons(array $rows): array
+    {
+        $objects = [];
+
+        foreach ($rows as $row) {
+            if (($row['status'] ?? '') !== Logger::STATUS_SKIPPED) {
+                continue;
+            }
+
+            $context = json_decode((string) ($row['skip_context'] ?? ''), true);
+            $reason = is_array($context) && is_string($context['reason'] ?? null) && $context['reason'] !== '' ? $context['reason'] : 'other';
+            $objects[$reason][(int) $row['object_id']] = true;
+        }
+
+        return array_map('count', $objects);
     }
 
     /**
@@ -444,6 +552,10 @@ final class LogController
 
         $fields = $request->get_param('fields');
         $revertBatchId = $request->get_param('revert_batch_id');
+
+        if (is_string($revertBatchId) && $revertBatchId !== '' && $this->isOthers($revertBatchId)) {
+            return new WP_Error('wc_products_list_batch_shared', __('This batch id belongs to another user.', 'wp-woocommerce-products-list'), ['status' => 409]);
+        }
 
         return rest_ensure_response(Revert::apply(
             $rows,
@@ -506,6 +618,15 @@ final class LogController
         }
 
         if (! $rowFilters) {
+            // Batches that touched a product whose name matches: the whole
+            // batch, so its counts stay those of the batch.
+            if (is_string($request['search']) && trim($request['search']) !== '') {
+                [$named, $namedValues] = self::productNameCondition('%'.$this->escapeLike(trim($request['search'])).'%');
+                $table = Table::name();
+                $where[] = "batch_id IN (SELECT batch_id FROM {$table} WHERE {$named})";
+                array_push($values, ...$namedValues);
+            }
+
             return [implode(' AND ', $where), $values];
         }
 
@@ -534,11 +655,31 @@ final class LogController
 
         if (is_string($request['search']) && trim($request['search']) !== '') {
             $like = '%'.$this->escapeLike(trim($request['search'])).'%';
-            $where[] = '(field LIKE %s OR old_value LIKE %s OR new_value LIKE %s OR message LIKE %s)';
-            array_push($values, $like, $like, $like, $like);
+            [$named, $namedValues] = self::productNameCondition($like);
+            $where[] = '(field LIKE %s OR old_value LIKE %s OR new_value LIKE %s OR message LIKE %s OR '.$named.')';
+            array_push($values, $like, $like, $like, $like, ...$namedValues);
         }
 
         return [implode(' AND ', $where), $values];
+    }
+
+    /**
+     * Rows about a product (or a variation of one) whose name matches a
+     * LIKE pattern. Titles of products and variations: a variation's
+     * title carries its parent's name.
+     *
+     * @return array{0: string, 1: array<int, string>}
+     */
+    public static function productNameCondition(string $like): array
+    {
+        global $wpdb;
+
+        $posts = $wpdb->posts;
+
+        return [
+            "(object_id IN (SELECT ID FROM {$posts} WHERE post_type IN ('product', 'product_variation') AND post_title LIKE %s) OR parent_id IN (SELECT ID FROM {$posts} WHERE post_type = 'product' AND post_title LIKE %s))",
+            [$like, $like],
+        ];
     }
 
     /**

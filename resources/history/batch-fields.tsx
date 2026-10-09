@@ -9,7 +9,8 @@ import type { Field } from '../dataviews';
 import { logFieldLabel } from '../fields/log-labels';
 import type { LogFieldOption } from '../fields/log-labels';
 import type { Settings } from '../types';
-import { ACTION_OPTIONS, SOURCE_OPTIONS } from './log-fields';
+import { actionLabel, SOURCE_OPTIONS } from './log-fields';
+import { skipReasonLabel } from './batch-scope';
 import type { BatchQuery, LogBatch } from './use-log';
 
 /** How many field names a batch row lists before "+N more". */
@@ -51,9 +52,14 @@ export function describeBatchObjects( batch: Pick< LogBatch, 'objects' | 'produc
 }
 
 /** The batch's field labels ("Regular price, Svenska: Name +3 more"), or its actions when it changed no field. */
-export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions' >, fieldOptions: LogFieldOption[] ): string {
+export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions' > & Partial< Pick< LogBatch, 'summary' > >, fieldOptions: LogFieldOption[], settings?: Pick< Settings, 'actions' > | null ): string {
+	// The server's (or an integration's) name for an action batch: "Moved to trash", "Copy translations (Suomi → Svenska): Name".
+	if ( typeof batch.summary === 'string' && batch.summary.trim() !== '' ) {
+		return batch.summary;
+	}
+
 	const labels = Array.from( new Set( batch.fields.map( ( key ) => logFieldLabel( key, fieldOptions ) ) ) );
-	const actions = ( batch.actions ?? [] ).filter( ( action ) => action !== 'update' ).map( ( action ) => ACTION_OPTIONS.find( ( option ) => option.value === action )?.label ?? action );
+	const actions = ( batch.actions ?? [] ).filter( ( action ) => action !== 'update' ).map( ( action ) => actionLabel( action, settings ) );
 	const named = [ ...actions, ...labels ];
 
 	if ( ! named.length ) {
@@ -65,6 +71,25 @@ export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions
 
 	/* translators: 1: the first names, 2: how many more */
 	return rest > 0 ? sprintf( __( '%1$s +%2$d more', 'wp-woocommerce-products-list' ), shown, rest ) : shown;
+}
+
+/** "5 skipped (already had the value)": the batch's left-out items with why. */
+export function describeSkipped( batch: Pick< LogBatch, 'skipped' | 'skipped_reasons' > ): string {
+	const count = batch.skipped ?? 0;
+	const reasons = Array.from( new Set( ( batch.skipped_reasons ?? [] ).map( skipReasonLabel ) ) );
+
+	return reasons.length
+		? sprintf(
+				/* translators: 1: number of items the batch left out, 2: why ("already had the value") */
+				_n( '%1$d skipped (%2$s)', '%1$d skipped (%2$s)', count, 'wp-woocommerce-products-list' ),
+				count,
+				reasons.join( ', ' )
+		  )
+		: sprintf(
+				/* translators: %d: number of items the batch left out */
+				_n( '%d skipped', '%d skipped', count, 'wp-woocommerce-products-list' ),
+				count
+		  );
 }
 
 export interface BatchFieldOptions {
@@ -116,9 +141,9 @@ export function createBatchFields( settings: Settings, options: BatchFieldOption
 			enableSorting: false,
 			enableHiding: false,
 			filterBy: false,
-			getValue: ( { item } ) => describeBatchChanges( item, fieldOptions ),
+			getValue: ( { item } ) => describeBatchChanges( item, fieldOptions, settings ),
 			render: ( { item } ) => {
-				const changes = describeBatchChanges( item, fieldOptions );
+				const changes = describeBatchChanges( item, fieldOptions, settings );
 				const all = item.fields.map( ( key ) => logFieldLabel( key, fieldOptions ) ).join( ', ' );
 
 				return (
@@ -162,11 +187,7 @@ export function createBatchFields( settings: Settings, options: BatchFieldOption
 					{ item.skipped ? (
 						<span className="wc-pl-history__skipped">
 							{ ', ' }
-							{ sprintf(
-								/* translators: %d: number of items the batch left out */
-								_n( '%d skipped', '%d skipped', item.skipped, 'wp-woocommerce-products-list' ),
-								item.skipped
-							) }
+							{ describeSkipped( item ) }
 						</span>
 					) : null }
 				</>
@@ -222,8 +243,15 @@ export function createBatchFields( settings: Settings, options: BatchFieldOption
 }
 
 /** The batches view's filters as `GET /log/batches` params. */
-export function batchQueryFromView( view: { page?: number; perPage?: number; filters?: Array< { field: string; operator: string; value: unknown } > } ): NonNullable< BatchQuery > {
-	const query: NonNullable< BatchQuery > = { page: view.page ?? 1, perPage: view.perPage ?? 25 };
+export function batchQueryFromView(
+	view: { page?: number; perPage?: number; search?: string; filters?: Array< { field: string; operator: string; value: unknown } > }
+): NonNullable< BatchQuery > & { search?: string } {
+	const query: NonNullable< BatchQuery > & { search?: string } = { page: view.page ?? 1, perPage: view.perPage ?? 25 };
+
+	// The batches that touched a product of that name (the server's `search`).
+	if ( view.search && view.search.trim() !== '' ) {
+		query.search = view.search.trim();
+	}
 
 	for ( const filter of view.filters ?? [] ) {
 		const value = Array.isArray( filter.value ) ? filter.value[ 0 ] : filter.value;

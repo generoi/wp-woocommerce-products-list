@@ -282,6 +282,19 @@ class ListTest extends RestTestCase
         $this->assertContains($variationId, $this->ids(['search_name_or_sku' => 'TOKEN-VAR'], [ListMode::HEADER => '']));
     }
 
+    public function test_search_finds_a_parent_by_a_variation_attribute_value(): void
+    {
+        $variable = $this->variableProduct(['38', '39']);
+        $variationId = $variable->get_children()[0];
+        // WooCommerce titles a variation "Parent - Attribute values".
+        wp_update_post(['ID' => $variationId, 'post_title' => $variable->get_name().' - Black with wool, 38']);
+        $this->simpleProduct(['name' => 'Plain loafer']);
+
+        $this->assertSame([$variable->get_id()], $this->ids(['search_name_or_sku' => 'Black with wool']));
+        $this->assertSame([$variable->get_id()], $this->ids(['search_name_or_sku' => 'wool']));
+        $this->assertSame([], $this->ids(['search_name_or_sku' => 'wool loafer']));
+    }
+
     public function test_list_mode_reads_skip_the_gallery(): void
     {
         // Attachment posts with a file path and mime type are all

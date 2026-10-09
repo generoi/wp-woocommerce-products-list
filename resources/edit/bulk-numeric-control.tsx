@@ -12,7 +12,8 @@ import type { ComponentType } from 'react';
 import type { DataFormControlProps } from '../dataviews';
 import type { Settings } from '../types';
 import type { FieldCurrency } from '../extensions/declarative';
-import { DONT_CHANGE, isNumericOp, ROUNDING_ENDINGS, validateNumericOp } from './bulk-numeric';
+import { DONT_CHANGE, isNumericOp, ROUNDING_ENDINGS, validateNumericOp, WHOLE_UNIT_ENDINGS } from './bulk-numeric';
+import type { RoundMode } from './bulk-numeric';
 import type { NumericKind, NumericOp } from './bulk-numeric';
 
 export type FormData = Record< string, unknown >;
@@ -100,26 +101,62 @@ export interface BulkNumericControlOptions {
 	currency?: FieldCurrency;
 }
 
-/** The rounding choices next to a relative money op: none, or a price ending. */
-export function roundingChoices( settings: Pick< Settings, 'currency' >, decimals: number ): Array< { value: string; label: string } > {
-	if ( decimals !== 2 ) {
+/**
+ * Currencies whose shop prices end in whole units (2 149 kr, 499 kr), not
+ * in cents: their rounding offers whole-unit price points first, and no
+ * öre endings.
+ */
+export const WHOLE_UNIT_CURRENCIES: ReadonlySet< string > = new Set( [ 'SEK', 'NOK', 'DKK', 'ISK', 'CZK', 'HUF', 'PLN', 'JPY', 'KRW', 'CLP', 'COP', 'IDR', 'HKD', 'TWD', 'CNY' ] );
+
+function wholeLabel( ending: string ): string {
+	switch ( ending ) {
+		case 'w9':
+			return __( 'Round to …9 (2 149, 499)', 'wp-woocommerce-products-list' );
+		case 'w49':
+			return __( 'Round to …49 or …99', 'wp-woocommerce-products-list' );
+		case 'w99':
+			return __( 'Round to …99', 'wp-woocommerce-products-list' );
+		default:
+			return __( 'Round to the nearest 10', 'wp-woocommerce-products-list' );
+	}
+}
+
+/**
+ * The rounding choices next to a relative money op: none, or a price point.
+ * A cents currency (€) gets whole units and the ,90 / ,95 / ,99 endings, then
+ * the whole-unit points; a kronor currency (SEK, NOK, DKK) whole units and the
+ * whole-unit points (…9, …49/…99, …99, nearest 10) only.
+ */
+export function roundingChoices( settings: Pick< Settings, 'currency' >, decimals: number, currencyCode: string = settings.currency.code ): Array< { value: string; label: string } > {
+	if ( decimals !== 2 && decimals !== 0 ) {
 		return [];
 	}
 
 	const mark = settings.currency.decimalSeparator || '.';
+	const whole = WHOLE_UNIT_CURRENCIES.has( currencyCode.toUpperCase() ) || decimals === 0;
+	const cents = whole ? [] : ROUNDING_ENDINGS.filter( ( ending ) => ending !== '00' );
 
 	return [
 		{ value: '', label: __( 'No rounding', 'wp-woocommerce-products-list' ) },
-		...ROUNDING_ENDINGS.map( ( ending ) => ( {
-			value: ending,
-			label: ending === '00' ? __( 'Round to whole units', 'wp-woocommerce-products-list' ) : `${ __( 'Round to', 'wp-woocommerce-products-list' ) } …${ mark }${ ending }`,
-		} ) ),
+		...( decimals === 2 ? [ { value: '00', label: __( 'Round to whole units', 'wp-woocommerce-products-list' ) } ] : [] ),
+		...cents.map( ( ending ) => ( { value: ending, label: `${ __( 'Round to', 'wp-woocommerce-products-list' ) } …${ mark }${ ending }` } ) ),
+		...WHOLE_UNIT_ENDINGS.map( ( ending ) => ( { value: ending, label: wholeLabel( ending ) } ) ),
+	];
+}
+
+/** Which way the rounding goes. */
+export function roundModeChoices(): Array< { value: RoundMode; label: string } > {
+	return [
+		{ value: 'nearest', label: __( 'Nearest (half up)', 'wp-woocommerce-products-list' ) },
+		{ value: 'up', label: __( 'Always up', 'wp-woocommerce-products-list' ) },
+		{ value: 'down', label: __( 'Always down', 'wp-woocommerce-products-list' ) },
 	];
 }
 
 export function createBulkNumericControl( options: BulkNumericControlOptions ): ComponentType< DataFormControlProps< FormData > > {
 	const { kind, settings, salePrice = false, currency } = options;
-	const rounding = kind === 'money' ? roundingChoices( settings, currency?.decimals ?? settings.currency.decimals ) : [];
+	const rounding = kind === 'money' ? roundingChoices( settings, currency?.decimals ?? settings.currency.decimals, currency?.code ?? settings.currency.code ) : [];
+	const modes = roundModeChoices();
 
 	function BulkNumericControl( { data, field, onChange, hideLabelFromVision }: DataFormControlProps< FormData > ) {
 		const raw = data[ field.id ];
@@ -155,7 +192,12 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						onChange={ ( value: string ) => {
 							const choice = list.find( ( entry ) => entry.value === value ) ?? list[ 0 ]!;
 
-							update( { operation: choice.operation, value: op.value, percent: choice.percent, ...( op.round && choice.operation !== 'set' ? { round: op.round } : {} ) } );
+							update( {
+								operation: choice.operation,
+								value: op.value,
+								percent: choice.percent,
+								...( op.round && choice.operation !== 'set' ? { round: op.round, ...( op.roundMode ? { roundMode: op.roundMode } : {} ) } : {} ),
+							} );
 						} }
 					/>
 					<TextControl
@@ -182,6 +224,22 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						value={ op.round ?? '' }
 						options={ rounding }
 						onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
+					/>
+				) : null }
+				{ rounding.length > 0 && ! idle && op.operation !== 'set' && op.round ? (
+					<SelectControl
+						__nextHasNoMarginBottom
+						__next40pxDefaultSize
+						id={ `${ baseId }-round-mode` }
+						className="wc-pl-bulk-numeric__round"
+						aria-label={ `${ field.label }: ${ __( 'rounding direction', 'wp-woocommerce-products-list' ) }` }
+						value={ op.roundMode ?? 'nearest' }
+						options={ modes }
+						onChange={ ( value: string ) => {
+							const { roundMode: _previous, ...rest } = op;
+
+							update( value === 'nearest' ? rest : { ...rest, roundMode: value as RoundMode } );
+						} }
 					/>
 				) : null }
 				{ note ? <Text variant="muted">{ note }</Text> : null }

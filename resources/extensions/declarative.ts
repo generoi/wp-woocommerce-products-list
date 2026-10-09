@@ -362,17 +362,19 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 	// The object holding the value (`i18n.se.name` for `i18n.se.name.value`) may say more about this row:
 	// a row-level `referenceLabel`, and `untranslated` terms (a variation name built from attribute values without a translation).
 	const containerPath = def.path.includes( '.' ) ? def.path.slice( 0, def.path.lastIndexOf( '.' ) ) : '';
-	const rowNotes = ( item: ProductListItem ): { label?: string; untranslated: UntranslatedTerm[] } => {
+	const rowNotes = ( item: ProductListItem ): { label?: string; same?: boolean; untranslated: UntranslatedTerm[] } => {
 		const container = containerPath ? getPath( item, containerPath ) : null;
 
 		if ( ! container || typeof container !== 'object' ) {
 			return { untranslated: [] };
 		}
 
-		const { referenceLabel, untranslated } = container as { referenceLabel?: unknown; untranslated?: unknown };
+		const { referenceLabel, untranslated, same } = container as { referenceLabel?: unknown; untranslated?: unknown; same?: unknown };
 
 		return {
 			label: typeof referenceLabel === 'string' && referenceLabel ? referenceLabel : undefined,
+			// A stored value equal to the reference (copied, not translated yet).
+			same: same === true,
 			untranslated: Array.isArray( untranslated ) ? ( untranslated as UntranslatedTerm[] ).filter( ( term ) => term && typeof term === 'object' ) : [],
 		};
 	};
@@ -400,6 +402,18 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 		const value = field.getValue( { item } );
 		const notes = rowNotes( item );
 		const marker = untranslatedMarker( notes.untranslated, notes.label );
+
+		if ( ! isEmptyValue( value ) && notes.same ) {
+			return createElement(
+				'span',
+				{ className: 'wc-products-list-field wc-products-list-field--same', title: notes.label },
+				displayValue( value, def, currency, settings ),
+				' ',
+				createElement( 'span', { className: 'wc-products-list-field__copied' }, __( 'copied', 'wp-woocommerce-products-list' ) ),
+				marker ? ' ' : null,
+				marker
+			);
+		}
 
 		if ( ! isEmptyValue( value ) ) {
 			return createElement( 'span', { className: 'wc-products-list-field', title: marker ? notes.label : undefined }, displayValue( value, def, currency, settings ), marker ? ' ' : null, marker );

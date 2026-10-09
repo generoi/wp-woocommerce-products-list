@@ -19,6 +19,18 @@ import { leafOf } from './visibility';
 /** The virtual "schedule sale" toggle: not a wc/v3 key, it only clears the dates when turned off. */
 export const SCHEDULE_SALE_FIELD_ID = 'schedule_sale';
 
+/**
+ * WooCommerce's own relative stock key: wc/v3 products and variations add
+ * `inventory_delta` to the stock as stored at write time when the request has
+ * no `stock_quantity`, so an order placed while the editor was open is not
+ * overwritten (classic bulk edit behaves the same). A relative stock op
+ * (+N, -N, ±%) is sent this way instead of the projected absolute value;
+ * the change log records it as a stock_quantity row, old to new. A decrease
+ * the editor clamped at zero stays absolute (0), so the write never leaves
+ * negative stock. See docs/contracts.md.
+ */
+export const STOCK_DELTA_KEY = 'inventory_delta';
+
 const ZONED_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /**
@@ -106,6 +118,13 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 			next = next === '' ? null : Number( next );
 		}
 
+		const delta = stockDeltaOf( field, item, own[ id ], next );
+
+		if ( delta !== null ) {
+			payload = mergeFragments( payload, { [ STOCK_DELTA_KEY ]: delta } );
+			continue;
+		}
+
 		const fragment = field.rest?.write ? field.rest.write( next, item ) : { [ id ]: next };
 
 		if ( isPlainObject( fragment ) ) {
@@ -116,6 +135,31 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 	const filtered = applyFilters( FILTERS.savePayload, payload, item, own );
 
 	return isPlainObject( filtered ) ? filtered : payload;
+}
+
+/**
+ * A relative op on the core stock quantity, as the signed delta the server
+ * adds at write time; null for anything else (a "Change to", another field,
+ * a row whose stock is not a number yet, a no-op, or a decrease the
+ * projection clamped at zero, which is written as the absolute 0).
+ */
+export function stockDeltaOf( field: ProductField, item: ProductListItem, op: unknown, next: unknown ): number | null {
+	if ( field.id !== 'stock_quantity' || field.rest?.write || ! isNumericOp( op ) || ( op.operation !== 'increase' && op.operation !== 'decrease' ) ) {
+		return null;
+	}
+
+	const raw = readFieldValue( field, item );
+	const expected = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number( raw ) : NaN;
+
+	if ( ! Number.isInteger( expected ) || typeof next !== 'number' || ! Number.isInteger( next ) || next === expected ) {
+		return null;
+	}
+
+	if ( op.operation === 'decrease' && next <= 0 ) {
+		return null;
+	}
+
+	return next - expected;
 }
 
 /** Whether a payload carries anything to send. */

@@ -18,11 +18,12 @@ import { invalidateProducts, patchItems } from '../store/products';
 import { isVariation, parentIdOf } from '../edit/field-value';
 import { saveFields } from '../edit/save';
 import { undoBatch } from '../edit/undo';
+import { canUndo } from '../edit/log-access';
 import { withoutUntouchedImages } from '../edit/save-runner';
 import { isBatchItemError } from '../types';
 import type { BatchResponse, ProductAction, ProductField, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
-import { canEdit, dropFromSelection, errorMessage, isRealRow, realRows } from './context';
+import { canEdit, errorMessage, isRealRow, realRows } from './context';
 import { notify } from './notices';
 
 type Patch = Partial< ProductListItem > & { id: number };
@@ -178,7 +179,7 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 
 		notify.success( options.success( ok ), {
 			id: noticeId,
-			actions: [
+			actions: ! canUndo() ? [] : [
 				{
 					label: __( 'Undo', 'wp-woocommerce-products-list' ),
 					onClick: () => {
@@ -214,8 +215,7 @@ function statusAction( context: ProductActionsContext, id: string, label: string
 				success,
 				fields: context.fields,
 				eligible: isEligible,
-			} ).then( ( okIds ) => {
-				dropFromSelection( context, okIds );
+			} ).then( () => {
 				onActionPerformed?.( items );
 			} );
 		},

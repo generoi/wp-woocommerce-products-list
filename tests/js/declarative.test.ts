@@ -297,6 +297,17 @@ describe( 'fieldFromDeclarative', () => {
 		expect( container.textContent ).toBe( 'Omaking, Black with wool untranslated term' );
 	} );
 
+	it( 'marks a stored value equal to the default (copied, not translated) with a muted "copied" tag', () => {
+		const field = fieldFromDeclarative( makeField( { referenceLabel: 'Suomi' } as Partial< DeclarativeFieldInput > ), settings );
+		const Render = field.render as ( props: { item: ProductListItem; field: NormalizedField< ProductListItem > } ) => JSX.Element;
+		const name = { value: 'Villasukat', source: 'Villasukat', same: true, referenceLabel: 'Same as the Suomi value: copied, not translated to Svenska yet' };
+		const { container } = render( createElement( Render, { item: product( { i18n: { se: { name } } } ), field: normalized( field ) } ) );
+		const cell = container.querySelector( '.wc-products-list-field--same' );
+
+		expect( cell?.getAttribute( 'title' ) ).toBe( name.referenceLabel );
+		expect( container.textContent ).toBe( 'Villasukat copied' );
+	} );
+
 	it( 'renders booleans, select labels and html as text', () => {
 		const settingsWithOptions = settings;
 		const bool = fieldFromDeclarative( makeField( { id: 'acme:flag', type: 'boolean', path: 'acme.flag', reference: null } ), settingsWithOptions );

@@ -22,8 +22,8 @@ import { resolveSaveTargets, resolveSaveTargetsWith } from './apply-to-variation
 import type { SaveTarget } from './apply-to-variations';
 import { humanizeError } from './errors';
 import { isVariation, parentIdOf } from './field-value';
-import { buildPayload, hasPayload } from './payload';
-import { hasSale, hasSaleEdit, hasStockGatedEdit, resolveRowEdits } from './row-rules';
+import { buildPayload, hasPayload, STOCK_DELTA_KEY } from './payload';
+import { hasSale, hasSaleEdit, hasStockGatedEdit, resolveRowEdits, saleIsActive } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 
 export interface SaveRequestOptions {
@@ -75,6 +75,8 @@ export interface SaveOptions extends RowEditOptions {
 	onProgress?( done: number, total: number ): void;
 	/** Variations already fetched by the modal (keyed by parent id), so the save does not fetch them again. */
 	prefetchedVariations?: ReadonlyMap< number, ProductListItem[] >;
+	/** Variable parents that only carry their variations (a retry): their own edits are not sent again. */
+	carriersOnly?: ReadonlySet< number >;
 }
 
 export interface Prepared {
@@ -101,6 +103,8 @@ export interface SavePlan {
 	notLowerSkipped: ProductListItem[];
 	/** Rows written whose existing sale the edits replace. */
 	replacedSales: number;
+	/** Of those, the rows on sale right now: the sales Update ends (after every skip rule, so the button counts what really ends). */
+	endedRunningSales?: number;
 	/** Every row the plan left out, with why and the edit keys it would have changed (for the audit log). */
 	skippedItems: PlanSkip[];
 }
@@ -216,6 +220,17 @@ function optimisticPatch( target: SaveTarget, payload: Record< string, unknown >
 	for ( const [ key, value ] of Object.entries( payload ) ) {
 		const current = row[ key ];
 
+		// A relative stock edit is an instruction to the server: show the projected quantity.
+		if ( key === STOCK_DELTA_KEY ) {
+			const stock = Number( row.stock_quantity );
+
+			if ( Number.isFinite( stock ) && typeof value === 'number' ) {
+				patch.stock_quantity = stock + value;
+			}
+
+			continue;
+		}
+
 		if ( typeof current === 'object' && current !== null ) {
 			continue;
 		}
@@ -239,7 +254,8 @@ function snapshotOf( target: SaveTarget, patch: Record< string, unknown > ): Rec
 
 /** Turn resolved targets into the plan: payloads for the rows that change, counts for the rest. */
 export function planTargets( targets: SaveTarget[], fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): SavePlan {
-	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], notLowerSkipped: [], replacedSales: 0, skippedItems: [] };
+	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], notLowerSkipped: [], replacedSales: 0, endedRunningSales: 0, skippedItems: [] };
+	const now = Date.now();
 
 	for ( const target of targets ) {
 		const own = resolveRowEdits( target.item, target.edits, options );
@@ -284,6 +300,10 @@ export function planTargets( targets: SaveTarget[], fields: ProductField[], sett
 
 		if ( hasSale( target.item ) && hasSaleEdit( own ) ) {
 			plan.replacedSales += 1;
+
+			if ( saleIsActive( target.item, now ) ) {
+				plan.endedRunningSales = ( plan.endedRunningSales ?? 0 ) + 1;
+			}
 		}
 	}
 
@@ -299,26 +319,26 @@ export function planSave(
 	edits: Record< string, unknown >,
 	fields: ProductField[],
 	settings: Settings,
-	options: RowEditOptions & { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] > }
+	options: RowEditOptions & { applyToVariations: boolean; variationsByParent?: ReadonlyMap< number, ProductListItem[] >; carriersOnly?: ReadonlySet< number > }
 ): SavePlan {
-	const targets = resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: options.variationsByParent } );
+	const targets = resolveSaveTargetsWith( items, edits, fields, { applyToVariations: options.applyToVariations, variationsByParent: options.variationsByParent, carriersOnly: options.carriersOnly } );
 
 	return planTargets( targets, fields, settings, options );
 }
 
 /** Prepare the per-row payloads; rows with nothing to send are left out. */
-export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' > ): Promise< Prepared[] > {
+export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' | 'carriersOnly' > ): Promise< Prepared[] > {
 	return ( await preparePlan( deps, items, edits, fields, settings, options ) ).writes;
 }
 
-async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' > ): Promise< SavePlan > {
+async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' | 'carriersOnly' > ): Promise< SavePlan > {
 	const prefetched = options.prefetchedVariations;
 	const fetchVariations: FetchVariations = ( parentId, fieldList ) => {
 		const rows = prefetched?.get( parentId );
 
 		return rows ? Promise.resolve( rows ) : deps.fetchVariations( parentId, fieldList );
 	};
-	const targets = await resolveSaveTargets( items, edits, fields, { applyToVariations: options.applyToVariations, fetchVariations } );
+	const targets = await resolveSaveTargets( items, edits, fields, { applyToVariations: options.applyToVariations, fetchVariations, carriersOnly: options.carriersOnly } );
 
 	return planTargets( targets, fields, settings, { enableManageStock: options.enableManageStock, skipExistingSales: options.skipExistingSales, keepSale: options.keepSale } );
 }

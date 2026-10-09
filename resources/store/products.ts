@@ -31,14 +31,30 @@ export function variationsKey( parentId: number, page: number ): string {
 const EMPTY: ProductListItem[] = [];
 
 /**
- * Rows patched (saved, or changed by an action) since the list query last
- * changed. A refetch of the same query keeps those that no longer match it
+ * Rows the user wrote (a save or a server action went through for them)
+ * since the list query last changed. Only writes count: a cache merge
+ * (an editor hydrating its rows, a rollback, a parent's refreshed price
+ * range) leaves a row free to leave the filtered list. A refetch of the same query keeps those that no longer match it
  * (a "Missing in Svenska" row just translated) on screen, marked
  * `_noLongerMatches`, like a quick edit that does not refetch: the rows the
  * user just worked on do not vanish under the open editor. Changing the
  * filter, search, page or tab drops them.
  */
 const editedIds = new Set< number >();
+
+/** Remember rows the user just wrote, so a refetch of the same view keeps them (marked "no longer matches"). */
+export function markEdited( ids: Iterable< number > ): void {
+	for ( const id of ids ) {
+		if ( Number.isInteger( id ) && id > 0 ) {
+			editedIds.add( id );
+		}
+	}
+}
+
+/** Whether a row counts as written in this view (tests). */
+export function isEdited( id: number ): boolean {
+	return editedIds.has( id );
+}
 
 /** Forget the edited rows (the list query changed). */
 export function resetEditedRows(): void {
@@ -173,7 +189,12 @@ function patchList( key: string, byId: Map< number, Partial< ProductListItem > >
 	} );
 }
 
-/** Merge partial rows by id into every cached product page and variations page. */
+/**
+ * Merge partial rows by id into every cached product page and variations
+ * page. A pure cache merge: it does not mark the rows edited (`markEdited`
+ * does, on a successful write), so hydrating an editor or rolling back a
+ * failed save never pins a row in a filter it no longer matches.
+ */
 export function patchItems( items: Array< Partial< ProductListItem > & { id: number } > ): void {
 	if ( ! items.length ) {
 		return;
@@ -183,7 +204,6 @@ export function patchItems( items: Array< Partial< ProductListItem > & { id: num
 
 	for ( const item of items ) {
 		byId.set( item.id, { ...( byId.get( item.id ) ?? {} ), ...item } );
-		editedIds.add( item.id );
 	}
 
 	for ( const key of [ ...cache.keys( PRODUCTS_PREFIX ), ...cache.keys( VARIATIONS_PREFIX ) ] ) {
@@ -310,6 +330,19 @@ export async function refreshParentsOf( rows: ProductListItem[], fetchList: type
 
 	return refreshed;
 }
+
+// The write path: rows a save or a server action actually changed.
+addAction( ACTIONS.saved, 'wcProductsList/products/edited', ( result: BatchResult ) => {
+	if ( Array.isArray( result?.updated ) ) {
+		markEdited( result.updated.map( ( row ) => row.id ) );
+	}
+} );
+
+addAction( ACTIONS.actionPerformed, 'wcProductsList/products/edited', ( result: { ids?: number[] } ) => {
+	if ( Array.isArray( result?.ids ) ) {
+		markEdited( result.ids );
+	}
+} );
 
 addAction( ACTIONS.saved, 'wcProductsList/products/parents', ( result: BatchResult ) => {
 	if ( Array.isArray( result?.updated ) && result.updated.length ) {

@@ -11,6 +11,7 @@ import { fieldsFromSettings } from '../extensions/declarative';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { guardCell } from '../ui/error-boundary';
+import { createAttributeFilters } from './attributes';
 import { createBackordersField } from './backorders';
 import { createCatalogVisibilityField } from './catalog-visibility';
 import { createCostOfGoodsField } from './cost-of-goods';
@@ -83,6 +84,9 @@ export const CORE_FIELD_IDS: readonly string[] = [
 	'cost_of_goods_sold',
 ];
 
+/** Core ids generated per store: one attribute filter per `pa_*` taxonomy (fields/attributes.tsx). */
+export const CORE_FIELD_ID_PREFIXES: readonly string[] = [ 'attribute:' ];
+
 /** Fields that bulk edit never offers (Woo: a SKU is unique per product). */
 export const BULK_EXCLUDED_IDS: readonly string[] = [ 'sku', 'slug' ];
 
@@ -99,6 +103,7 @@ export function createCoreFields( settings: Settings ): ProductField[] {
 		...createSaleScheduleFields( settings ),
 		createStockStatusField( settings ),
 		createVariationStockFilter( settings ),
+		...createAttributeFilters( settings ),
 		createManageStockField( settings ),
 		createStockQuantityField( settings ),
 		createBackordersField( settings ),

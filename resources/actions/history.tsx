@@ -5,8 +5,13 @@ import { RowHistoryModal } from '../history/row-history-modal';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
 import { isRealRow, nameOf } from './context';
+import { canUndo } from '../edit/log-access';
 
 export const createHistoryAction: ActionFactory = ( { fields } ) => {
+	if ( ! canUndo() ) {
+		return null;
+	}
+
 	const action: ProductAction = {
 		id: 'history',
 		label: __( 'History', 'wp-woocommerce-products-list' ),

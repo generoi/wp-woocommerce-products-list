@@ -84,6 +84,7 @@ final class Logger
         self::flush();
         self::$stack[] = [self::$source, self::$generatedBatchId];
         self::$generatedBatchId = null;
+        self::$others = [];
         self::$source = self::normaliseSource($request->get_header(self::SOURCE_HEADER));
 
         return $response;
@@ -111,7 +112,43 @@ final class Logger
      */
     public static function batchId(): string
     {
-        return ListMode::batchId() ?? (self::$generatedBatchId ??= wp_generate_uuid4());
+        $header = ListMode::batchId();
+
+        if ($header !== null && self::isOthers($header)) {
+            // A replayed id: the rows go under one of this request's own,
+            // so nobody can add rows to (and so block the revert of)
+            // another user's batch.
+            $header = null;
+        }
+
+        return $header ?? (self::$generatedBatchId ??= wp_generate_uuid4());
+    }
+
+    /** @var array<string, bool> batch id|user id => whether another user has rows under the id; per request */
+    private static array $others = [];
+
+    /**
+     * Whether rows of a user other than the current one already carry
+     * the batch id. One indexed lookup per batch id and request.
+     */
+    public static function isOthers(string $batchId): bool
+    {
+        $key = $batchId.'|'.get_current_user_id();
+
+        if (isset(self::$others[$key])) {
+            return self::$others[$key];
+        }
+
+        global $wpdb;
+
+        $table = Table::name();
+        // The table may not exist yet: insert() creates it on the first write.
+        $suppress = $wpdb->suppress_errors(true);
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $found = $wpdb->get_var($wpdb->prepare("SELECT 1 FROM {$table} WHERE batch_id = %s AND user_id <> %d LIMIT 1", $batchId, get_current_user_id()));
+        $wpdb->suppress_errors($suppress);
+
+        return self::$others[$key] = $found !== null;
     }
 
     public static function source(): string
@@ -158,7 +195,7 @@ final class Logger
 
         $now = current_time('mysql', true);
         $userId = get_current_user_id();
-        $batchId = self::batchId();
+        $batchId = null;
         $source = self::source();
 
         foreach ($rows as $row) {
@@ -166,7 +203,7 @@ final class Logger
             $context = $row['context'] ?? null;
 
             $full = [
-                'batch_id' => substr((string) ($row['batch_id'] ?? $batchId), 0, 64),
+                'batch_id' => substr((string) ($row['batch_id'] ?? ($batchId ??= self::batchId())), 0, 64),
                 'created_at' => (string) ($row['created_at'] ?? $now),
                 'user_id' => (int) ($row['user_id'] ?? $userId),
                 'source' => self::normaliseSource($row['source'] ?? $source),

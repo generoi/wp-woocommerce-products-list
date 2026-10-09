@@ -53,7 +53,7 @@ function money( value: unknown, settings: Settings, currency?: FieldCurrency ): 
 }
 
 function roundingNote( op: NumericOp, settings: Settings ): string {
-	return op.round ? ` (${ describeRounding( op.round, settings ) })` : '';
+	return op.round ? ` (${ describeRounding( op.round, settings, op.roundMode ?? 'nearest' ) })` : '';
 }
 
 function amount( op: NumericOp, kind: 'money' | 'integer', settings: Settings, currency?: FieldCurrency ): string {

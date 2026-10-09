@@ -11,6 +11,12 @@
  * - `rows` are the selected rows, the page's fresh objects where present
  *   and the stored ones otherwise, so a bulk edit can act on rows the user
  *   selected on another page;
+ * - `addRows` adds rows the caller already holds (variations just loaded
+ *   by "Select matching variations", before DataViews has rendered them);
+ * - the selection survives a save or an action (status → price → tags on
+ *   the same set, as in Shopify's bulk editor); only rows that no longer
+ *   exist leave it. `selectRows( ids )` narrows it from outside the screen
+ *   ("Select the 15 skipped" in a save's notice);
  * - `selectAllMatching` resolves every product of the current list query
  *   (pages of `limits.perPageMax`, trimmed `_fields`) into the selection,
  *   with progress and a cancel.
@@ -48,6 +54,8 @@ export interface SelectionApi {
 	onPageSelectionChange( ids: string[] ): void;
 	/** Replace the whole selection; unknown ids (no row on the page nor stored) are dropped. */
 	set( ids: string[] ): void;
+	/** Add these rows (kept as given when they are not on the page). */
+	addRows( rows: ProductListItem[] ): void;
 	clear(): void;
 	/** Add every product matching `query` (the current list request); resolves to the number selected. */
 	selectAllMatching( query: QueryParams, total: number ): Promise< number >;
@@ -62,6 +70,25 @@ export interface UseSelectionOptions {
 }
 
 type Stored = Map< string, ProductListItem >;
+
+/** The mounted selection's `set`, for `selectRows`. */
+let mountedSet: ( ( ids: string[] ) => void ) | null = null;
+
+/**
+ * Make the selection exactly these post ids (those the screen knows: on
+ * the page or selected before). For notices and extensions outside the
+ * screen's tree, e.g. "Select the 15 skipped" after a bulk save. False when
+ * no list is mounted.
+ */
+export function selectRows( ids: number[] ): boolean {
+	if ( ! mountedSet ) {
+		return false;
+	}
+
+	mountedSet( ids.map( String ) );
+
+	return true;
+}
 
 function sameKeys( a: Stored, b: Stored ): boolean {
 	if ( a.size !== b.size ) {
@@ -124,9 +151,10 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 
 	useEffect( () => () => cancelSelectAll(), [ cancelSelectAll ] );
 
-	// Rows that were saved or deleted leave the selection, so the next bulk
-	// action cannot silently target what the last one already changed; rows
-	// that failed stay selected for a retry.
+	// Rows that no longer exist (trashed, deleted, or gone by the time a save
+	// reached them) leave the selection. Saved rows and the rows an action
+	// processed stay: the next bulk step works on the same set, and rows that
+	// failed are still there for a retry.
 	useEffect( () => {
 		const namespace = 'wcProductsList/selection';
 		const drop = ( ids: Iterable< number > ) => {
@@ -143,31 +171,14 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 			} );
 		};
 
-		addAction( ACTIONS.saved, namespace, ( result: BatchResult, context?: { source?: string } ) => {
-			// A bulk edit that went through is done with its selection, whichever
-			// rows it wrote (with "apply to variations" the parents are not in `updated`).
-			if ( context?.source === 'bulk' && ( result?.errors ?? [] ).length === 0 ) {
-				setStored( ( current ) => ( current.size ? new Map() : current ) );
-
-				return;
-			}
-
-			drop( [
-				...( result?.updated ?? [] ).map( ( row ) => row.id ),
-				// Rows the server no longer has leave too; the rest stay for a retry.
-				...( result?.errors ?? [] ).filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id ),
-			] );
+		addAction( ACTIONS.saved, namespace, ( result: BatchResult ) => {
+			drop( ( result?.errors ?? [] ).filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id ) );
 		} );
 		addAction( ACTIONS.deleted, namespace, ( ids: number[] ) => drop( Array.isArray( ids ) ? ids : [] ) );
-		// A server action (Copy translations, an extension's) is done with the
-		// rows it processed: they may have just left the filtered list, and a
-		// selection of rows on no page would still offer "Bulk edit".
-		addAction( ACTIONS.actionPerformed, namespace, ( result: { ids?: number[] } ) => drop( Array.isArray( result?.ids ) ? result.ids : [] ) );
 
 		return () => {
 			removeAction( ACTIONS.saved, namespace );
 			removeAction( ACTIONS.deleted, namespace );
-			removeAction( ACTIONS.actionPerformed, namespace );
 		};
 	}, [] );
 
@@ -212,6 +223,37 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 			return sameKeys( current, next ) ? current : next;
 		} );
 	}, [] );
+
+	const addRows = useCallback( ( rows: ProductListItem[] ) => {
+		const page = pageByIdRef.current;
+
+		setStored( ( current ) => {
+			let next: Stored | null = null;
+
+			for ( const row of rows ) {
+				const id = getItemId( row );
+
+				if ( row._placeholder || current.has( id ) ) {
+					continue;
+				}
+
+				next = next ?? new Map( current );
+				next.set( id, page.get( id ) ?? row );
+			}
+
+			return next ?? current;
+		} );
+	}, [] );
+
+	useEffect( () => {
+		mountedSet = set;
+
+		return () => {
+			if ( mountedSet === set ) {
+				mountedSet = null;
+			}
+		};
+	}, [ set ] );
 
 	const clear = useCallback( () => {
 		cancelSelectAll();
@@ -317,5 +359,5 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 		return { selection: all.map( getItemId ), rows: all, offPageCount: elsewhere.length };
 	}, [ stored, pageById ] );
 
-	return { selection, rows, offPageCount, onPageSelectionChange, set, clear, selectAllMatching, cancelSelectAll, selectAllProgress, selectAllError };
+	return { selection, rows, offPageCount, onPageSelectionChange, set, addRows, clear, selectAllMatching, cancelSelectAll, selectAllProgress, selectAllError };
 }

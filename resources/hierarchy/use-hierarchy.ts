@@ -34,7 +34,7 @@ import { getSettings } from '../settings';
 import { notify } from '../actions/notices';
 import { ACTIONS } from '../extensions/hooks';
 import { getItemId } from '../types/product';
-import type { BatchResult, ProductField } from '../types/extension';
+import type { BatchResult, ProductField, QueryParams } from '../types/extension';
 import type { ProductListItem, ProductRow, RawImage, RawVariation, VariationRow } from '../types/product';
 import { flattenHierarchy } from './flatten';
 import type { ChildrenState } from './flatten';
@@ -96,8 +96,14 @@ export type VariationsResult = { items: RawVariation[]; total: number; totalPage
 export type FetchVariations = (
 	parentId: number,
 	page: number,
-	options: { perPage: number; fields: string[]; signal?: AbortSignal }
+	options: { perPage: number; fields: string[]; signal?: AbortSignal; params?: QueryParams }
 ) => Promise< VariationsResult >;
+
+/** The variations-endpoint params of the list's variation-level filters (api/query.ts `variationFilterParams`). */
+export interface VariationFilterSpec {
+	key: string;
+	params: QueryParams;
+}
 
 export interface ExpandAllLimit {
 	/** Parents expanded by this call. */
@@ -119,6 +125,12 @@ export interface HierarchyOptions {
 	onExpandAllLimit?: ( limit: ExpandAllLimit ) => void;
 	/** Defaults to window.sessionStorage. */
 	storage?: Pick< Storage, 'getItem' | 'setItem' > | null;
+	/**
+	 * Narrow every expanded parent to the variations the list is filtered
+	 * for ("Colour: Black", "Any variation: Out of stock"). A new key reloads
+	 * the expanded parents; `showAllVariations` lifts it for one parent.
+	 */
+	variationFilter?: VariationFilterSpec;
 }
 
 export interface Hierarchy {
@@ -156,6 +168,12 @@ export interface Hierarchy {
 	 * out-of-stock ones).
 	 */
 	selectVariations( parentId: number, current?: string[], where?: ( item: VariationRow ) => boolean ): Promise< string[] >;
+	/** Whether a variation-level filter narrows the expanded parents. (Optional: facades over the hierarchy may leave it out.) */
+	variationFilterActive?: boolean;
+	/** List every variation of one parent despite the variation-level filter ("Show all"). */
+	showAllVariations?( parentId: number ): void;
+	/** Narrow one parent again after `showAllVariations` ("Only matching"). */
+	showMatchingVariations?( parentId: number ): void;
 }
 
 export const getItemParentId = ( item: ProductListItem ): number | null => item._parentId;
@@ -174,6 +192,9 @@ interface Inflight {
 }
 
 let children: Map< number, ChildrenState > = new Map();
+/** The variation-level filter every load applies, and the parents the user asked to see whole. */
+let narrowing: VariationFilterSpec = { key: '', params: {} };
+const showAllParents = new Set< number >();
 const listeners = new Set< Listener >();
 const inflight = new Map< number, Inflight >();
 const idCache = new Map< number, number[] >();
@@ -447,6 +468,30 @@ export function invalidateVariations( parentIds?: number[] ): void {
 	emit();
 }
 
+/**
+ * Apply a variation-level filter to every load from now on. A different
+ * filter makes the loaded variations stale (the expanded parents refetch,
+ * their old rows stay until the new ones arrive) and forgets the parents
+ * the user opened up with "Show all".
+ */
+export function setVariationFilter( spec: VariationFilterSpec ): void {
+	if ( spec.key === narrowing.key ) {
+		return;
+	}
+
+	narrowing = { key: spec.key, params: spec.key ? spec.params : {} };
+	showAllParents.clear();
+
+	if ( children.size ) {
+		invalidateVariations();
+	}
+}
+
+/** The variation-level filter in force (tests, the toolbar). */
+export function getVariationFilter(): VariationFilterSpec {
+	return narrowing;
+}
+
 /** Loaded parents that are neither expanded nor on the page, oldest first, beyond the cap. */
 function evict(): void {
 	if ( children.size <= MAX_CACHED_PARENTS ) {
@@ -661,10 +706,13 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 	const perPage = VARIATIONS_PER_PAGE;
 	const cap = maxChildren > 0 ? maxChildren : Infinity;
 	const normalize = ( rows: RawVariation[] ) => rows.map( ( row ) => normalizeVariation( row, parent ) );
+	const params = narrowing.key && ! showAllParents.has( parentId ) ? narrowing.params : undefined;
+	const filtered = params !== undefined;
+	const request = ( page: number ) => fetch( parentId, page, params ? { perPage, fields, signal, params } : { perPage, fields, signal } );
 
 	entry.promise = ( async () => {
 		try {
-			const first = await limit( () => fetch( parentId, 1, { perPage, fields, signal } ), { isCancelled } );
+			const first = await limit( () => request( 1 ), { isCancelled } );
 			const pages: VariationRow[][] = [ normalize( first.items ) ];
 			const total = first.total || first.items.length;
 			const wanted = Math.min( total, cap );
@@ -679,7 +727,7 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 
 				await Promise.all(
 					Array.from( { length: lastPage - 1 }, ( _, index ) => index + 2 ).map( async ( page ) => {
-						const result = await limit( () => fetch( parentId, page, { perPage, fields, signal } ), { isCancelled } );
+						const result = await limit( () => request( page ), { isCancelled } );
 						pages[ page - 1 ] = normalize( result.items );
 					} )
 				);
@@ -691,7 +739,7 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 
 			evict();
 			const items = pages.flat();
-			await setChildren( parentId, { status: 'loaded', items, total }, false );
+			await setChildren( parentId, filtered ? { status: 'loaded', items, total, filtered } : { status: 'loaded', items, total }, false );
 
 			if ( inBulkLoad() ) {
 				noteBulkRows( items.length );
@@ -727,7 +775,8 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 async function loadVariationIds( parentId: number, fetch: FetchVariations ): Promise< number[] > {
 	const loaded = children.get( parentId );
 
-	if ( loaded?.status === 'loaded' && loaded.items.length >= loaded.total ) {
+	// Filtered rows are some of the variations; "every variation" asks the server.
+	if ( loaded?.status === 'loaded' && ! loaded.filtered && loaded.items.length >= loaded.total ) {
 		return loaded.items.map( ( item ) => item.id );
 	}
 
@@ -891,6 +940,15 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 	const confirmExpandAll = options.confirmExpandAll ?? defaultConfirm;
 	const onExpandAllLimit = options.onExpandAllLimit ?? defaultOnExpandAllLimit;
 	const storage = options.storage === undefined ? defaultStorage() : options.storage;
+	const filterKey = options.variationFilter?.key ?? '';
+	const filterParams = options.variationFilter?.params;
+
+	// Before the load effect below: an expanded parent fetches with the filter in force.
+	useLayoutEffect( () => {
+		setVariationFilter( { key: filterKey, params: filterParams ?? {} } );
+		// filterKey stands for filterParams.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [ filterKey ] );
 
 	const [ expandedItemIds, setExpandedState ] = useState< number[] >( () => readExpanded( storage ) );
 	// Ids read from storage are bounded harder (EXPAND_ALL_WARN_ROWS) when the first page arrives: a reload must not rebuild a table nobody asked for.
@@ -1129,6 +1187,23 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 		[ expand ]
 	);
 
+	const showAllVariations = useCallback( ( parentId: number ) => {
+		if ( showAllParents.has( parentId ) ) {
+			return;
+		}
+
+		showAllParents.add( parentId );
+		invalidateVariations( [ parentId ] );
+	}, [] );
+
+	const showMatchingVariations = useCallback( ( parentId: number ) => {
+		if ( ! showAllParents.delete( parentId ) ) {
+			return;
+		}
+
+		invalidateVariations( [ parentId ] );
+	}, [] );
+
 	return {
 		rows,
 		expandedItemIds,
@@ -1147,6 +1222,9 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 		childrenState,
 		variationIdsOf,
 		selectVariations,
+		variationFilterActive: filterKey !== '',
+		showAllVariations,
+		showMatchingVariations,
 	};
 }
 
@@ -1159,6 +1237,8 @@ export function resetHierarchyStore(): void {
 	bulkCommitScheduled = false;
 	expandAllProgress = null;
 	children = new Map();
+	narrowing = { key: '', params: {} };
+	showAllParents.clear();
 	inflight.clear();
 	idCache.clear();
 	parentImages.clear();

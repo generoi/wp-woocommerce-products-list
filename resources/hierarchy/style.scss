@@ -35,6 +35,28 @@ tr:has(> td .wc-pl-name.is-search-match) {
 	box-shadow: inset 3px 0 0 var(--wp-admin-theme-color, #3858e9);
 }
 
+.wc-pl-name__filtered {
+	flex: none;
+	display: inline-flex;
+	gap: 6px;
+	align-items: center;
+	margin-inline-start: 8px;
+	color: #757575;
+	font-size: 12px;
+	line-height: 20px;
+	white-space: nowrap;
+}
+
+.wc-pl-name__filtered-toggle {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--wp-admin-theme-color, #3858e9);
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
 .wc-pl-name__stale {
 	flex: none;
 	margin-inline-start: 8px;

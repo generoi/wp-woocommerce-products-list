@@ -34,6 +34,9 @@ final class Recorder
 
     public const FILTER_VALUE = 'wc_products_list/log_value';
 
+    /** wc/v3's relative stock key: the quantity is changed by this much. */
+    public const INVENTORY_DELTA = 'inventory_delta';
+
     /** Request keys that are addressing, not data. */
     public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id'];
 
@@ -110,6 +113,15 @@ final class Recorder
             $key = (string) $key;
 
             if ($key === '' || in_array($key, self::IGNORED_KEYS, true)) {
+                continue;
+            }
+
+            // WooCommerce's relative stock write (`inventory_delta`: add to the
+            // stored quantity, in the same save, so an order placed since the
+            // editor opened is not overwritten): what changes is the quantity.
+            if ($key === self::INVENTORY_DELTA) {
+                $paths[] = 'stock_quantity';
+
                 continue;
             }
 
@@ -418,6 +430,13 @@ final class Recorder
 
         foreach ($paths as $path) {
             $value = self::serialize(self::valueAt($body, $path));
+
+            if ($path === 'stock_quantity' && ! array_key_exists('stock_quantity', $body) && is_numeric($body[self::INVENTORY_DELTA] ?? null)) {
+                // A relative write: the change asked for, signed.
+                $delta = (float) $body[self::INVENTORY_DELTA];
+                $value = ($delta >= 0 ? '+' : '').self::serialize(floor($delta) === $delta ? (int) $delta : $delta);
+            }
+
             $values[$path] = self::isMasked($path) ? self::mask($value) : $value;
         }
 
@@ -491,6 +510,32 @@ final class Recorder
         }
 
         return $bodies;
+    }
+
+    /**
+     * Drop the snapshots of a request that is over without logging them:
+     * it was refused before anything was attempted.
+     */
+    public static function discard(): void
+    {
+        self::$pending = [];
+    }
+
+    /**
+     * Whether an error is a refusal (not logged in, not allowed) rather
+     * than a failed save: a refused item was never attempted, so it gets
+     * no log row. By code (`rest_forbidden`, `rest_cannot_*`,
+     * `woocommerce_rest_cannot_*`, ...) or by a 401/403 status.
+     */
+    public static function isRefusal(string $code, mixed $data = null): bool
+    {
+        if (preg_match('/^(rest_forbidden|rest_cannot_|rest_not_logged_in|woocommerce_rest_cannot_|woocommerce_rest_authentication_)/', $code) === 1) {
+            return true;
+        }
+
+        $status = is_array($data) ? (int) ($data['status'] ?? 0) : 0;
+
+        return $status === 401 || $status === 403;
     }
 
     public static function hasPending(): bool
@@ -721,14 +766,16 @@ final class Recorder
      */
     private static function errorsFromResponse($response): array
     {
-        if (is_wp_error($response)) {
-            return [0 => ['code' => (string) $response->get_error_code(), 'message' => $response->get_error_message()]];
-        }
+        $error = is_wp_error($response) ? $response : ($response instanceof \WP_REST_Response ? $response->as_error() : null);
 
-        if ($response instanceof \WP_REST_Response && is_wp_error($response->as_error())) {
-            $error = $response->as_error();
+        if (is_wp_error($error)) {
+            $code = (string) $error->get_error_code();
 
-            return [0 => ['code' => (string) $error->get_error_code(), 'message' => $error->get_error_message()]];
+            if (self::isRefusal($code, $error->get_error_data()) || ($response instanceof \WP_REST_Response && in_array($response->get_status(), [401, 403], true))) {
+                return [];
+            }
+
+            return [0 => ['code' => $code, 'message' => $error->get_error_message()]];
         }
 
         // `rest_request_after_callbacks` sees what the handler returned: a
@@ -742,6 +789,10 @@ final class Recorder
 
             foreach (is_array($list) ? $list : [] as $item) {
                 if (is_array($item) && isset($item['error']) && is_array($item['error'])) {
+                    if (self::isRefusal((string) ($item['error']['code'] ?? ''), $item['error']['data'] ?? null)) {
+                        continue;
+                    }
+
                     $errors[(int) ($item['id'] ?? 0)] = [
                         'code' => (string) ($item['error']['code'] ?? ''),
                         'message' => (string) ($item['error']['message'] ?? ''),

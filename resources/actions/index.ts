@@ -12,6 +12,7 @@ import { runAction } from '../api/client';
 import type { ActionResponse, ActionResult } from '../api/client';
 import { isEditorHostedAction } from '../edit/hosted-actions';
 import { undoBatch } from '../edit/undo';
+import { canUndo } from '../edit/log-access';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
 import { actionsFromSettings } from '../extensions/declarative';
@@ -196,7 +197,7 @@ function notifyDeclarativeSuccess( response: ActionResponse, label: string ): vo
 
 	notify.success(
 		declarativeSummary( label, changed, ok.length - changed ),
-		changed > 0
+		changed > 0 && canUndo()
 			? {
 					id,
 					actions: [
@@ -271,6 +272,11 @@ function useStableHierarchy( hierarchy: Hierarchy ): Hierarchy {
 			childrenOf: ( parentId ) => ref.current.childrenOf( parentId ),
 			variationIdsOf: ( ids ) => ref.current.variationIdsOf( ids ),
 			selectVariations: ( parentId, current, where ) => ref.current.selectVariations( parentId, current, where ),
+			get variationFilterActive() {
+				return ref.current.variationFilterActive;
+			},
+			showAllVariations: ( id ) => ref.current.showAllVariations?.( id ),
+			showMatchingVariations: ( id ) => ref.current.showMatchingVariations?.( id ),
 		} ),
 		[]
 	);

@@ -270,12 +270,15 @@ class RevertTest extends RestTestCase
         $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
         $this->assertTrue($plan['revertable']);
         $this->assertSame([$product->get_id()], array_merge(...$plan['chunks']));
-        $this->assertSame(['tint', 'trash'], array_column($plan['skipped'], 'action'));
+        // The id that already had the value is left out as `unchanged`, not reported as a skipped action.
+        $this->assertSame(['trash'], array_column($plan['skipped'], 'action'));
+        $this->assertSame(1, $plan['left_out']);
+        $this->assertSame(['unchanged' => 1], $plan['left_out_reasons']);
 
         $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
         $results = array_column($data['results'], null, 'id');
         $this->assertTrue($results[$product->get_id()]['ok']);
-        $this->assertSame('skipped', $results[$same->get_id()]['code']);
+        $this->assertArrayNotHasKey($same->get_id(), $results);
         $this->assertSame('skipped', $results[$trashed->get_id()]['code']);
 
         $this->assertFalse(metadata_exists('post', $product->get_id(), '_tint'));
@@ -617,9 +620,9 @@ class RevertTest extends RestTestCase
     }
 
     /**
-     * The revert goes through wc/v3's batch routes, so it needs what a
-     * bulk edit needs (`edit_others_products`): a user without it gets
-     * every object reported, nothing written.
+     * The log and its reverts need the log capability (by default
+     * `edit_others_products`, which the revert's wc/v3 batch writes need
+     * anyway): a user without it is refused and nothing is written.
      */
     public function test_revert_by_a_user_without_batch_rights_changes_nothing(): void
     {
@@ -629,6 +632,7 @@ class RevertTest extends RestTestCase
 
         $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'regular_price' => '150']]]));
         $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', ['update' => [['id' => $variation, 'regular_price' => '150']]]));
+        $rows = count($this->rows($this->batchId()));
 
         add_role(CapabilitiesTest::ROLE, 'Catalog editor', ['read' => true, 'edit_products' => true, 'edit_published_products' => true, 'publish_products' => true, 'read_private_products' => true]);
 
@@ -636,19 +640,85 @@ class RevertTest extends RestTestCase
             $this->actAs(CapabilitiesTest::ROLE);
 
             $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert');
-            $this->assertStatus(200, $response);
-            $data = $this->data($response);
-
-            $this->assertCount(2, $data['results']);
-            $this->assertSame([false, false], array_column($data['results'], 'ok'));
-            $this->assertSame(['woocommerce_rest_cannot_batch'], array_unique(array_column($data['results'], 'code')));
-            $this->assertSame([], $data['items']);
+            $this->assertSame(403, $response->get_status());
 
             $this->assertSame('150', wc_get_product($product->get_id())->get_regular_price());
             $this->assertSame('150', wc_get_product($variation)->get_regular_price());
-            $this->assertSame([], $this->rows($data['batch_id']));
+            $this->assertCount($rows, $this->rows($this->batchId()));
         } finally {
             remove_role(CapabilitiesTest::ROLE);
         }
+    }
+
+    public function test_reverting_a_low_stock_threshold_that_was_unset_clears_it(): void
+    {
+        global $wpdb;
+
+        $parent = $this->variableProduct(['38', '39']);
+        $children = $parent->get_children();
+
+        foreach ($children as $id) {
+            $variation = wc_get_product($id);
+            $variation->set_manage_stock(true);
+            $variation->set_stock_quantity(4);
+            $variation->save();
+            $this->assertFalse(metadata_exists('post', $id, '_low_stock_amount') && get_post_meta($id, '_low_stock_amount', true) !== '');
+        }
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', [
+            'update' => array_map(static fn (int $id): array => ['id' => $id, 'low_stock_amount' => 3], $children),
+        ]));
+        $this->assertSame(3, wc_get_product($children[0])->get_low_stock_amount());
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertSame([true, true], array_column($data['results'], 'ok'));
+
+        foreach ($children as $id) {
+            $this->assertSame('', wc_get_product($id)->get_low_stock_amount(), 'Reverted to 0 instead of unset.');
+            $this->assertSame('', (string) $wpdb->get_var($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_low_stock_amount'", $id)));
+        }
+
+        // Undo of the same kind on a simple product.
+        $simple = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 2]);
+        $batch = wp_generate_uuid4();
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $simple->get_id(), 'low_stock_amount' => 7]]], [ListMode::BATCH_HEADER => $batch]));
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$batch.'/revert'));
+        $this->assertSame('', wc_get_product($simple->get_id())->get_low_stock_amount());
+    }
+
+    public function test_reverting_stock_management_turned_on_clears_the_quantity(): void
+    {
+        $product = $this->simpleProduct();
+        $this->assertNull($product->get_stock_quantity());
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'manage_stock' => true, 'stock_quantity' => 8]]]));
+        $this->assertSame(8, wc_get_product($product->get_id())->get_stock_quantity());
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+
+        $product = wc_get_product($product->get_id());
+        $this->assertFalse($product->get_manage_stock());
+        $this->assertNull($product->get_stock_quantity());
+    }
+
+    public function test_a_relative_stock_write_keeps_a_sale_made_meanwhile_and_is_logged(): void
+    {
+        $product = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 10]);
+
+        // An order took 2 after the editor opened at 10; the editor asks for -3.
+        wc_update_product_stock($product->get_id(), 2, 'decrease');
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'inventory_delta' => -3]]]));
+        $this->assertSame(5, wc_get_product($product->get_id())->get_stock_quantity());
+
+        $rows = $this->rows($this->batchId());
+        $this->assertCount(1, $rows);
+        $this->assertSame('stock_quantity', $rows[0]['field']);
+        $this->assertSame('8', $rows[0]['old_value']);
+        $this->assertSame('5', $rows[0]['new_value']);
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertSame(8, wc_get_product($product->get_id())->get_stock_quantity());
     }
 }

@@ -26,6 +26,48 @@ final class Bootstrap
 
     public const ACTION_BATCH_SIZE = 100;
 
+    public const FILTER_ACTION_BATCH_SIZE = 'wc_products_list/action_batch_size';
+
+    /**
+     * Ids per request of the heavy built-in actions: a duplicate copies a
+     * product with all its variations (seconds and thousands of queries
+     * for a large variable product), a trash or delete of a variable
+     * product takes its variations along. Everything else gets
+     * ACTION_BATCH_SIZE.
+     */
+    public const ACTION_BATCH_SIZES = ['duplicate' => 5, 'trash' => 20, 'delete' => 20];
+
+    /**
+     * How many ids one POST /actions/{id} takes at most. The app chunks
+     * to it (`limits.actionBatchSizes`), the route refuses more.
+     */
+    public static function actionBatchSize(string $action): int
+    {
+        /**
+         * Filters how many ids one request of an action takes.
+         *
+         * @param  int  $size
+         * @param  string  $action  the action id
+         */
+        $size = (int) apply_filters(self::FILTER_ACTION_BATCH_SIZE, self::ACTION_BATCH_SIZES[$action] ?? self::ACTION_BATCH_SIZE, $action);
+
+        return max(1, min(self::ACTION_BATCH_SIZE, $size));
+    }
+
+    /**
+     * @return array<string, int> action id => ids per request, for every registered action handler
+     */
+    private static function actionBatchSizes(): array
+    {
+        $sizes = [];
+
+        foreach (array_keys(Rest\ActionsController::handlers()) as $id) {
+            $sizes[(string) $id] = self::actionBatchSize((string) $id);
+        }
+
+        return $sizes;
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -83,6 +125,7 @@ final class Bootstrap
                 'maxChildrenPerParent' => self::MAX_CHILDREN_PER_PARENT,
                 'batchSize' => self::BATCH_SIZE,
                 'actionBatchSize' => self::ACTION_BATCH_SIZE,
+                'actionBatchSizes' => self::actionBatchSizes(),
             ],
             'links' => self::links(),
             'fields' => Registry::fields(),
@@ -131,6 +174,8 @@ final class Bootstrap
             'deleteOthers' => current_user_can('delete_others_products'),
             'manageWoocommerce' => current_user_can('manage_woocommerce'),
             'manageTerms' => current_user_can('manage_product_terms'),
+            // History and Undo/Revert (GET /log*, POST /log/batch/{id}/revert).
+            'viewLog' => current_user_can(Plugin::logCapability()),
         ];
     }
 
@@ -221,7 +266,8 @@ final class Bootstrap
             'admin' => admin_url(),
             'rest' => rest_url(),
             'page' => admin_url('edit.php?post_type=product&page='.Plugin::PAGE),
-            'history' => admin_url('edit.php?post_type=product&page='.Plugin::PAGE.'&screen=history'),
+            // Empty for users without the log capability: no History link or tab.
+            'history' => current_user_can(Plugin::logCapability()) ? admin_url('edit.php?post_type=product&page='.Plugin::PAGE.'&screen=history') : '',
             'legacyList' => admin_url('edit.php?post_type=product&legacy=1'),
             'newProduct' => admin_url('post-new.php?post_type=product'),
             // sprintf-style: %d is the product id.

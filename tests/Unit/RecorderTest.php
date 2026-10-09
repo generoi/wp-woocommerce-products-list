@@ -202,6 +202,27 @@ class RecorderTest extends TestCase
         $this->assertSame('', Revert::body(10, ['sale_price' => null])['sale_price']);
     }
 
+    public function test_a_relative_stock_write_is_logged_as_the_stock_quantity(): void
+    {
+        $this->assertSame(['stock_quantity'], Recorder::paths(['id' => 3, 'inventory_delta' => -2]));
+        $this->assertSame(['stock_quantity' => '-2'], Recorder::attempted(['inventory_delta' => -2], ['stock_quantity']));
+        $this->assertSame(['stock_quantity' => '+5'], Recorder::attempted(['inventory_delta' => '5'], ['stock_quantity']));
+    }
+
+    public function test_revert_body_clears_integer_or_null_fields_with_null(): void
+    {
+        // wc/v3 stores '' as 0 for these (wc_stock_amount); only null clears them.
+        $body = Revert::body(10, ['low_stock_amount' => null, 'stock_quantity' => '', 'sale_price' => null, 'menu_order' => '3']);
+
+        $this->assertArrayHasKey('low_stock_amount', $body);
+        $this->assertNull($body['low_stock_amount']);
+        $this->assertNull($body['stock_quantity']);
+        $this->assertSame('', $body['sale_price']);
+        $this->assertSame('3', $body['menu_order']);
+        // A value is still put back as it was.
+        $this->assertSame('5', Revert::body(10, ['low_stock_amount' => '5'])['low_stock_amount']);
+    }
+
     public function test_revert_decode_leaves_non_json_strings_alone(): void
     {
         $this->assertSame('[not json', Revert::decode('[not json'));

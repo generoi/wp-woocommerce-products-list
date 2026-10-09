@@ -3,7 +3,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { starEmpty, starFilled } from '@wordpress/icons';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
-import { canEdit, dropFromSelection, isRealRow } from './context';
+import { canEdit, isRealRow } from './context';
 import { optimisticBatch } from './status';
 
 function featureAction( context: ProductActionsContext, id: string, label: string, featured: boolean, icon: unknown ): ProductAction {
@@ -29,8 +29,7 @@ function featureAction( context: ProductActionsContext, id: string, label: strin
 						  sprintf( _n( '%d product marked as featured.', '%d products marked as featured.', count, 'wp-woocommerce-products-list' ), count )
 						: /* translators: %d: number of products */
 						  sprintf( _n( '%d product is no longer featured.', '%d products are no longer featured.', count, 'wp-woocommerce-products-list' ), count ),
-			} ).then( ( okIds ) => {
-				dropFromSelection( context, okIds );
+			} ).then( () => {
 				onActionPerformed?.( items );
 			} );
 		},

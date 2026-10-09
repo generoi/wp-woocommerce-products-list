@@ -66,7 +66,7 @@ describe( 'editorRow / withEditorRow', () => {
 describe( 'viewChangesRows', () => {
 	const base = { page: 1, perPage: 20, search: '', sort: { field: 'name', direction: 'asc' }, filters: [] };
 
-	it( 'is true for page, page size, search, sort and filters; false for column or layout changes', () => {
+	it( 'is true for page, page size, search, sort, filters and the layout type; false for column or density changes', () => {
 		expect( viewChangesRows( base, { ...base, page: 2 } ) ).toBe( true );
 		expect( viewChangesRows( base, { ...base, perPage: 50 } ) ).toBe( true );
 		expect( viewChangesRows( base, { ...base, search: 'boot' } ) ).toBe( true );
@@ -75,6 +75,10 @@ describe( 'viewChangesRows', () => {
 		expect( viewChangesRows( base, { ...base, filters: [ { field: 'status', value: 'draft' } ] } ) ).toBe( true );
 		expect( viewChangesRows( base, { ...base, fields: [ 'sku' ], layout: { density: 'compact' } } as typeof base ) ).toBe( false );
 		expect( viewChangesRows( { ...base, search: undefined }, { ...base, search: '' } ) ).toBe( false );
+		// A layout switch takes the table (and its editor row) away: it goes through the leave guard.
+		expect( viewChangesRows( { ...base, type: 'table' }, { ...base, type: 'grid' } ) ).toBe( true );
+		expect( viewChangesRows( { ...base, type: 'table' }, { ...base, type: 'list' } ) ).toBe( true );
+		expect( viewChangesRows( { ...base, type: undefined }, { ...base, type: 'table' } ) ).toBe( false );
 	} );
 } );
 

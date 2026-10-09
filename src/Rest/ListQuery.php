@@ -289,11 +289,20 @@ final class ListQuery
         foreach ($search as $token) {
             $like = '%'.$wpdb->esc_like((string) $token).'%';
             $parts = [$wpdb->prepare("{$posts}.post_title LIKE %s", $like)];
+            // A variation's title is the parent's title plus its attribute
+            // values ("Socks - Black with wool, 38"): a token naming an
+            // attribute value finds the parent through it.
+            $parts[] = $wpdb->prepare(
+                "EXISTS (SELECT 1 FROM {$posts} wc_products_list_named"
+                ." WHERE wc_products_list_named.post_parent = {$posts}.ID"
+                ." AND wc_products_list_named.post_type = 'product_variation'"
+                .' AND wc_products_list_named.post_title LIKE %s)',
+                $like
+            );
 
             if ($sku) {
                 $parts[] = $wpdb->prepare("{$alias}.sku LIKE %s", $like);
-                // A variation's SKU finds its parent. Variation titles are
-                // the parent's title plus attributes, so names need no subquery.
+                // A variation's SKU finds its parent.
                 $parts[] = $wpdb->prepare(
                     "EXISTS (SELECT 1 FROM {$posts} wc_products_list_child"
                     ." INNER JOIN {$wpdb->wc_product_meta_lookup} wc_products_list_child_lookup ON wc_products_list_child_lookup.product_id = wc_products_list_child.ID"

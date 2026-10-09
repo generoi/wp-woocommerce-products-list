@@ -508,4 +508,95 @@ class ActionsTest extends RestTestCase
         $this->assertSame(['/wc-products-list/v1/actions/publish', 'POST', $this->batchId()], $seen['/wc-products-list/v1/actions/publish']);
         $this->assertNull(ListMode::request());
     }
+
+    public function test_heavy_actions_take_fewer_ids_per_request(): void
+    {
+        $this->assertSame(5, Bootstrap::actionBatchSize('duplicate'));
+        $this->assertSame(20, Bootstrap::actionBatchSize('trash'));
+        $this->assertSame(Bootstrap::ACTION_BATCH_SIZE, Bootstrap::actionBatchSize('publish'));
+
+        $sizes = Bootstrap::settings()['limits']['actionBatchSizes'];
+        $this->assertSame(5, $sizes['duplicate']);
+        $this->assertSame(Bootstrap::ACTION_BATCH_SIZE, $sizes['feature']);
+
+        $response = $this->request('POST', '/wc-products-list/v1/actions/duplicate', ['ids' => range(1, 6)]);
+        $this->assertStatus(400, $response);
+        $data = $this->data($response);
+        $this->assertSame('wc_products_list_too_many_ids', $data['code']);
+        $this->assertSame(5, $data['data']['max']);
+
+        add_filter(Bootstrap::FILTER_ACTION_BATCH_SIZE, static fn (int $size, string $action): int => $action === 'duplicate' ? 2 : $size, 10, 2);
+        $this->assertSame(2, Bootstrap::actionBatchSize('duplicate'));
+        $this->assertSame(400, $this->request('POST', '/wc-products-list/v1/actions/duplicate', ['ids' => [1, 2, 3]])->get_status());
+    }
+
+    public function test_trashing_a_variation_updates_the_parent_price_range(): void
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        [$cheap, $dear] = $parent->get_children();
+
+        $variation = wc_get_product($cheap);
+        $variation->set_regular_price('5');
+        $variation->save();
+        $variation = wc_get_product($dear);
+        $variation->set_regular_price('50');
+        $variation->save();
+
+        $parent = wc_get_product($parent->get_id());
+        $this->assertEquals(5, (float) $parent->get_variation_price('min'));
+        $this->assertCount(2, $parent->get_children());
+
+        $this->act('trash', [$cheap]);
+
+        $parent = wc_get_product($parent->get_id());
+        $this->assertSame([$dear], array_map('intval', $parent->get_children()));
+        $this->assertEquals(50, (float) $parent->get_variation_price('min'));
+        $this->assertEquals(50, (float) $parent->get_variation_price('max'));
+        $this->assertEquals(50, (float) get_post_meta($parent->get_id(), '_price', true));
+
+        $this->act('restore', [$cheap]);
+
+        $parent = wc_get_product($parent->get_id());
+        $this->assertCount(2, $parent->get_children());
+        $this->assertEquals(5, (float) $parent->get_variation_price('min'));
+    }
+
+    public function test_an_action_that_changes_nothing_logs_a_skipped_row(): void
+    {
+        $featured = $this->simpleProduct(['featured' => true]);
+        $plain = $this->simpleProduct();
+
+        $data = $this->act('feature', [$featured->get_id(), $plain->get_id()], ['featured' => true]);
+        $this->assertSame([0, 1], array_column($data['results'], 'changed'));
+
+        $rows = array_column($this->rows(), null, 'object_id');
+        $this->assertSame('skipped', $rows[$featured->get_id()]['status']);
+        $this->assertSame('unchanged', json_decode($rows[$featured->get_id()]['context'], true)['reason']);
+        $this->assertSame('ok', $rows[$plain->get_id()]['status']);
+
+        $batch = $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0];
+        $this->assertSame(1, $batch['rows']);
+        $this->assertSame(1, $batch['skipped']);
+        $this->assertSame(['unchanged'], $batch['skipped_reasons']);
+        $this->assertSame('Mark as featured', $batch['summary']);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $this->assertSame([], $plan['skipped']);
+        $this->assertSame(['unchanged' => 1], $plan['left_out_reasons']);
+    }
+
+    public function test_batch_summaries_can_be_named_by_integrations(): void
+    {
+        $product = $this->simpleProduct();
+        $this->act('trash', [$product->get_id()]);
+
+        $this->assertSame('Move to Trash', $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0]['summary']);
+
+        add_filter('wc_products_list/log_batch_summary', static fn (?string $summary, ?string $action, array $args): ?string => $action === 'trash' ? 'Binned' : $summary, 10, 3);
+        $this->assertSame('Binned', $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0]['summary']);
+
+        // A batch of field edits has none: History lists its fields.
+        $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['regular_price' => '1'], [ListMode::BATCH_HEADER => wp_generate_uuid4()]);
+        $this->assertNull($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0]['summary']);
+    }
 }
