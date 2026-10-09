@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6 - 2026-10-09
+
+- The toolbar group with the layout/settings buttons and the list header always takes the full width under the search box, so selecting a row no longer wraps it and shifts the table.
+
 ## 0.1.5 - 2026-10-09
 
 - The list header (counts, selection, Columns, Expand all, History, Add new) always takes its own line, so ticking the first row no longer wraps it and pushes the table down under the pointer.

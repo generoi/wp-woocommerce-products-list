@@ -132,6 +132,13 @@ $link: #2271b1;
 	flex-basis: 100%;
 }
 
+// The toolbar group that holds the header (layout and settings buttons + header) always takes the
+// full width under the search box. Otherwise it sits beside the search box until a selection makes
+// it wider, then wraps below it and pushes the table down under the pointer.
+.dataviews__view-actions > :has( > .wc-products-list__header ) {
+	flex-basis: 100%;
+}
+
 // The toolbar wraps onto a second line when the list is narrow (beside the
 // editor panel, on a small screen) instead of running under the panel.
 .wc-products-list .dataviews__view-actions {
