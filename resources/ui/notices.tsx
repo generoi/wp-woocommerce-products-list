@@ -189,24 +189,30 @@ interface NoticeAction {
 	label: string;
 	onClick?: () => void;
 	url?: string;
+	/** Clicking it leaves the notice up (core's Snackbar removes it on a click of its own action). */
+	keepsNotice?: boolean;
 }
 
 /**
- * Core's Snackbar renders only its first action. The rest (Undo plus "View
- * in History") go into the content as link buttons, so no action is lost.
+ * Core's Snackbar renders only its first action, and removes the notice
+ * when it is clicked. The rest (Undo plus "View in History") go into the
+ * content as link buttons, so no action is lost; so does an action that
+ * keeps the notice (`keepsNotice`: "Select the 2 failed", whose message the
+ * user still needs after selecting).
  */
 export function withExtraActions< N extends { content?: unknown; actions?: unknown[] } >( notice: N ): N {
 	const actions = ( Array.isArray( notice.actions ) ? notice.actions : [] ) as NoticeAction[];
+	const first = actions.find( ( action ) => ! action.keepsNotice );
 
-	if ( actions.length < 2 ) {
+	if ( actions.length < 2 && ! actions.some( ( action ) => action.keepsNotice ) ) {
 		return notice;
 	}
 
-	const [ first, ...rest ] = actions;
+	const rest = actions.filter( ( action ) => action !== first );
 
 	return {
 		...notice,
-		actions: [ first ],
+		actions: first ? [ first ] : [],
 		content: (
 			<>
 				{ notice.content as string }

@@ -225,4 +225,28 @@ describe( 'withExtraActions', () => {
 		expect( screen.getByText( 'View in History' ).closest( 'a' ) ).toHaveAttribute( 'href', 'https://example.test/history?batch=b' );
 		expect( withExtraActions( { id: 'm', content: 'x', actions: [ { label: 'Undo' } ] } ).content ).toBe( 'x' );
 	} );
+
+	it( 'renders an action that keeps the notice as a link in the content, so clicking it does not remove the notice', async () => {
+		const { withExtraActions } = await import( '../../resources/ui/notices' );
+		const { fireEvent, render, screen } = await import( '@testing-library/react' );
+		const select = vi.fn();
+		const notice = withExtraActions( {
+			id: 'f',
+			content: '1 item could not be updated: Pelsi Black: Locked.',
+			actions: [
+				{ label: 'Select the 1 failed', onClick: select, keepsNotice: true },
+				{ label: 'View in History', url: 'https://example.test/history?batch=b' },
+			],
+		} );
+
+		// The core action (which removes the notice on click) is History; Select is in the content.
+		expect( notice.actions ).toEqual( [ expect.objectContaining( { label: 'View in History' } ) ] );
+		render( <div>{ notice.content as never }</div> );
+		fireEvent.click( screen.getByText( 'Select the 1 failed' ) );
+		expect( select ).toHaveBeenCalled();
+
+		// Alone, it still goes into the content: no core action to remove the notice.
+		const alone = withExtraActions( { id: 'g', content: 'x', actions: [ { label: 'Select the 1 failed', onClick: select, keepsNotice: true } ] } );
+		expect( alone.actions ).toEqual( [] );
+	} );
 } );

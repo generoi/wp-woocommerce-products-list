@@ -44,7 +44,7 @@ import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { carriesViewText, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
 import { getVariationsOfParents } from './variations-read';
 import { hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary, describeSiteDateTime } from './change-summary';
@@ -1763,7 +1763,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 							for ( const row of result.updated ) {
 								const known = next.get( row.id );
 
-								if ( known ) {
+								// A saved description comes back rendered (view context): the row is loaded again, raw.
+								if ( known && carriesViewText( row as Record< string, unknown > ) ) {
+									next.delete( row.id );
+								} else if ( known ) {
 									next.set( row.id, mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem );
 								}
 							}
@@ -1901,7 +1904,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					for ( const row of result.updated ) {
 						const known = next.get( row.id );
 
-						if ( known ) {
+						// A saved description comes back rendered (view context): the row is loaded again, raw.
+						if ( known && carriesViewText( row as Record< string, unknown > ) ) {
+							next.delete( row.id );
+						} else if ( known ) {
 							next.set( row.id, mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem );
 						}
 					}

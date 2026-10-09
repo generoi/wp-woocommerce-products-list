@@ -243,7 +243,8 @@ export interface NoticeOptions {
 	/** Default 'snackbar'. */
 	type?: 'snackbar' | 'default';
 	isDismissible?: boolean;
-	actions?: Array< { label: string; onClick?: () => void; url?: string } >;
+	/** `keepsNotice`: clicking the action leaves the notice up (by default a snackbar's action click removes it). */
+	actions?: Array< { label: string; onClick?: () => void; url?: string; keepsNotice?: boolean } >;
 	/** Stay until dismissed. By default a snackbar hides after 6 s, or 10 s with `actions` (an Undo), paused while hovered or focused; errors always stay. */
 	explicitDismiss?: boolean;
 }

@@ -34,6 +34,14 @@ final class Saves
     /** After WooCommerce's own insert listeners (Brands at 10). */
     public const INSERTED_PRIORITY = 20;
 
+    /**
+     * The concurrency guard's `pre_insert` priority: before every other
+     * filter, so an extension filter that resolves a relative write from
+     * the object (gds-woo-i18n's staged ops at 4) reads the stored state,
+     * under the object lock (docs/contracts.md §3.6).
+     */
+    public const GUARD_PRIORITY = PHP_INT_MIN;
+
     /** @var array<int, string>|null */
     private static ?array $writeKeys = null;
 
@@ -50,6 +58,10 @@ final class Saves
         Logger::register();
         Concurrency::registerCoreChanges();
 
+        // The guard (lock, fresh load, refusals, expected values) first, the recorder and
+        // `wc_products_list/save` at 10: extension filters in between see the guarded object.
+        add_filter('woocommerce_rest_pre_insert_product_object', [self::class, 'guardInsert'], self::GUARD_PRIORITY, 3);
+        add_filter('woocommerce_rest_pre_insert_product_variation_object', [self::class, 'guardInsert'], self::GUARD_PRIORITY, 3);
         add_filter('woocommerce_rest_pre_insert_product_object', [self::class, 'preInsert'], 10, 3);
         add_filter('woocommerce_rest_pre_insert_product_variation_object', [self::class, 'preInsert'], 10, 3);
         // 20: after WooCommerce Brands writes `brands` (`rest_api_add_brands_to_product`, 10),
@@ -387,7 +399,34 @@ final class Saves
     }
 
     /**
-     * `woocommerce_rest_pre_insert_{product,product_variation}_object`.
+     * `woocommerce_rest_pre_insert_{product,product_variation}_object` at
+     * GUARD_PRIORITY: the concurrency guard of an update (`guard()`), before
+     * any other filter. Extension filters after it get the object loaded
+     * from the stored state under its lock, or the refusal (a WP_Error, so
+     * they leave it alone, as WooCommerce's own callers expect).
+     *
+     * @param  mixed  $product
+     * @return mixed
+     */
+    public static function guardInsert($product, WP_REST_Request $request, bool $creating = false)
+    {
+        if (! $product instanceof WC_Product || ! ListMode::active() || $creating || $product->get_id() <= 0) {
+            return $product;
+        }
+
+        $guarded = self::guard($product, $request);
+
+        if (is_wp_error($guarded)) {
+            Concurrency::unlockObject($product->get_id());
+        }
+
+        return $guarded;
+    }
+
+    /**
+     * `woocommerce_rest_pre_insert_{product,product_variation}_object` at
+     * 10, after the guard (`guardInsert()`) and the extensions' own
+     * filters: the recorder's snapshot and `wc_products_list/save`.
      *
      * @param  mixed  $product
      * @return mixed
@@ -399,18 +438,6 @@ final class Saves
         }
 
         self::forwardFields($request);
-
-        if (! $creating && $product->get_id() > 0) {
-            $guarded = self::guard($product, $request);
-
-            if (is_wp_error($guarded)) {
-                Concurrency::unlockObject($product->get_id());
-
-                return $guarded;
-            }
-
-            $product = $guarded;
-        }
 
         // WooCommerce's variations controller skips a falsy `menu_order`
         // (`if ( $request['menu_order'] )`), so a bulk "change to 0" or the

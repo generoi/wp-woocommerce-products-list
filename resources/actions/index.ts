@@ -11,14 +11,14 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { actionRequestCount, closeBatch, newBatchId, runAction } from '../api/client';
 import type { ActionResponse, ActionResult } from '../api/client';
 import { isEditorHostedAction } from '../edit/hosted-actions';
-import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
+import { allFailed, describeFailedRows, failureMessage, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { undoBatch } from '../edit/undo';
 import { canUndo } from '../edit/log-access';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
 import { actionsFromSettings } from '../extensions/declarative';
 import { FILTERS } from '../extensions/hooks';
-import { invalidateProducts, patchItems } from '../store/products';
+import { findCachedRow, invalidateProducts, patchItems } from '../store/products';
 import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import type { ProductAction, Settings } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
@@ -125,6 +125,21 @@ export interface RunDeclarativeOptions {
 	silent?: boolean;
 }
 
+/** Id => name of the rows the list has loaded, for a failure notice (a tool may run on rows not on the page: those show as #id). */
+function rowNames( ids: ReadonlyArray< number > ): Map< number, string > {
+	const names = new Map< number, string >();
+
+	for ( const id of ids ) {
+		const name = findCachedRow( id )?.name;
+
+		if ( typeof name === 'string' && name ) {
+			names.set( id, name );
+		}
+	}
+
+	return names;
+}
+
 export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[], options: RunDeclarativeOptions = {} ): Promise< ActionResponse > {
 	let response: ActionResponse;
 	// A run of its own (not part of the editor's Update, which plans and closes its batch itself) that takes several
@@ -152,6 +167,7 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 		recordFailedRows( batchId, 'action', failedAll, { action } );
 
 		if ( ! options.inlineErrors ) {
+			// The tool's own error (a validation message, offline): it is about the run, not one row.
 			notify.error( errorMessage( error ), own ? { actions: failureNoticeActions( batchId, failedAll ) } : undefined );
 		}
 
@@ -211,16 +227,19 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 			notifyDeclarativeSuccess( response, label );
 		}
 
+		// Each failed row by name, with why ("Pelsi Black: Anna is editing this product…").
+		const names = rowNames( failed.map( ( failure ) => failure.id ) );
+
 		notify.error(
 			ok.length
 				? sprintf(
-						/* translators: 1: items updated, 2: items that failed, 3: the first failure's message */
+						/* translators: 1: items updated, 2: items that failed, 3: the failed items and why */
 						__( '%1$d updated, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
 						ok.length,
 						failed.length,
-						failed[ 0 ]?.message ?? ''
+						describeFailedRows( failed, names )
 				  )
-				: failed[ 0 ]?.message ?? '',
+				: failureMessage( 'update', failed, names ),
 			{ actions: failureNoticeActions( batchId, failed ) }
 		);
 

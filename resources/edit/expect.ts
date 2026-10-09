@@ -16,10 +16,13 @@
  *   row carries the stored meta `_i18n_{field}_{lang}` as
  *   `i18n.{lang}.{field}.value`, which the server's default reader reads).
  *
+ * - `description` / `short_description` as loaded: the editor loads them
+ *   in wc/v3's edit context (`readContextOf()` in hydrate.ts), raw as
+ *   stored, so they compare in stored form; a row loaded in view context
+ *   sends the rendered form, which the server also accepts
+ *   (`Concurrency::matches()`).
  * - the fields wc/v3 shows in another form than it stores, as loaded (the
- *   server also accepts the rendered form, `Concurrency::matches()`):
- *   `description` / `short_description` (view context runs wpautop and the
- *   shortcodes on them), a variation's `name` (the attribute summary; the
+ *   server also accepts the rendered form): a variation's `name` (the attribute summary; the
  *   stored title has the parent's name in front), `cost_of_goods_sold`
  *   (wc/v3's `{values, total_value}` object or a number, compared by
  *   number) and `images` (the row's list, which holds only the featured
@@ -38,8 +41,9 @@
  * fields other than `i18n.*` without `rest.expect` (no stored form the
  * client knows). Those stay "last write wins" behind the server's
  * lock and fresh-state checks; the log's old value shows what was overwritten.
- * A description whose shortcode output changes between two renders is a
- * false conflict (409, nothing written; reload and apply again).
+ * A description loaded rendered (view context) whose shortcode output
+ * changes between two renders is a false conflict (409, nothing written);
+ * the editor's raw load avoids it.
  */
 import type { ProductListItem } from '../types';
 import { isPlainObject } from './field-value';
@@ -120,7 +124,7 @@ function providedValues( item: ProductListItem, payload: Record< string, unknown
 /** The request key of gds-woo-i18n's translations and market prices (`i18n: {se: {name}}`). */
 const I18N_KEY = 'i18n';
 
-/** Texts wc/v3 view context renders (wpautop, shortcodes): sent as loaded, the server accepts both forms. */
+/** Texts the editor loads raw (edit context): sent as loaded; the server also accepts the rendered (view) form. */
 const RENDERED_TEXT_KEYS: ReadonlySet< string > = new Set( [ 'description', 'short_description' ] );
 
 const TERM_KEYS: ReadonlySet< string > = new Set( [ 'categories', 'tags', 'brands' ] );

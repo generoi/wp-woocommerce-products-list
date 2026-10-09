@@ -82,19 +82,35 @@ type Stored = Map< string, ProductListItem >;
 
 /** The mounted selection's `set`, for `selectRows`. */
 let mountedSet: ( ( ids: string[] ) => void ) | null = null;
+/** Whether the mounted list knows a row of this id (on the page, selected, or a loaded variation), for `selectRows`. */
+let mountedKnows: ( ( id: string ) => boolean ) | null = null;
+
+/** Of these ids, the rows the mounted list knows (on the page, selected, or a loaded variation); none when no list is mounted. */
+export function knownRowIds( ids: ReadonlyArray< number > ): number[] {
+	const knows = mountedKnows;
+
+	return knows ? ids.filter( ( id ) => knows( String( id ) ) ) : [];
+}
 
 /**
  * Make the selection exactly these post ids (those the screen knows: on
  * the page or selected before). For notices and extensions outside the
  * screen's tree, e.g. "Select the 15 skipped" after a bulk save. False when
- * no list is mounted.
+ * no list is mounted or it knows none of the ids (another status tab, rows
+ * now in the Trash): the selection is then left as it is, not cleared.
  */
 export function selectRows( ids: number[] ): boolean {
 	if ( ! mountedSet ) {
 		return false;
 	}
 
-	mountedSet( ids.map( String ) );
+	const known = knownRowIds( ids );
+
+	if ( ! known.length ) {
+		return false;
+	}
+
+	mountedSet( known.map( String ) );
 
 	return true;
 }
@@ -126,6 +142,10 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 		lookupRef.current = lookupRow;
 	} );
 	const [ stored, setStored ] = useState< Stored >( () => new Map() );
+	const storedRef = useRef( stored );
+	useLayoutEffect( () => {
+		storedRef.current = stored;
+	} );
 	const [ selectAllProgress, setSelectAllProgress ] = useState< SelectAllProgress | null >( null );
 	const [ selectAllError, setSelectAllError ] = useState< string | null >( null );
 	const selectAllRef = useRef< AbortController | null >( null );
@@ -264,11 +284,18 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 	}, [] );
 
 	useEffect( () => {
+		const knows = ( id: string ) => pageByIdRef.current.has( id ) || storedRef.current.has( id ) || lookupRef.current( id ) !== undefined;
+
 		mountedSet = set;
+		mountedKnows = knows;
 
 		return () => {
 			if ( mountedSet === set ) {
 				mountedSet = null;
+			}
+
+			if ( mountedKnows === knows ) {
+				mountedKnows = null;
 			}
 		};
 	}, [ set ] );

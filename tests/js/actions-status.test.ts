@@ -159,6 +159,18 @@ describe( 'optimisticBatch', () => {
 		expect( logSkipped ).toHaveBeenCalledWith( 'batch-x', 'action', [ { id: 2, reason: 'failed', fields: [ 'featured' ], message: 'You are not allowed to edit this item.' } ] );
 	} );
 
+	it( 'names the rows that failed with why (a product another user has open in the product editor)', async () => {
+		const locked = 'FE6Auditor is editing this product in the product editor. Nothing was saved for this item; try again when they are done.';
+
+		vi.mocked( batchProducts ).mockImplementationOnce( ( async ( update: Array< Record< string, unknown > > ) => ( {
+			update: [ { id: 1, error: { code: 'wc_products_list_editing', message: locked, data: { status: 409 } } }, echo( update[ 1 ]! ) ],
+		} ) ) as never );
+
+		await optimisticBatch( [ simple( 1, { name: 'FE6AUDIT A Wally' } ), simple( 2 ) ], { patch: ( item ) => ( { id: item.id, featured: true } ), refetch: false, success: () => '' } );
+
+		expect( vi.mocked( notify.error ).mock.calls[ 0 ]?.[ 0 ] ).toBe( `1 item could not be updated: FE6AUDIT A Wally: ${ locked }` );
+	} );
+
 	it( 'keeps the requests that went through when one among several fails offline: only its rows are settled, the rest keep Undo', async () => {
 		const rows = Array.from( { length: 250 }, ( _, index ) => variation( 1001 + index, 7 ) );
 		const pendingDuring: boolean[] = [];

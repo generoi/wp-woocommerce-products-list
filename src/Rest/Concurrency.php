@@ -12,8 +12,10 @@ use WP_REST_Request;
 /**
  * Server-side protection of list-mode writes against concurrent edits
  * (docs/contracts.md §3.6). Three small checks, each run in
- * `Saves::preInsert()`, right before WooCommerce saves one product or
- * variation:
+ * `Saves::guardInsert()` (the first `pre_insert` filter,
+ * `Saves::GUARD_PRIORITY`, so extension filters after it read the
+ * stored state under the lock), right before WooCommerce saves one
+ * product or variation:
  *
  * 1. A short MySQL named lock per object (`GET_LOCK`), held from the
  *    check until the save's insert hooks are done. Every write the app

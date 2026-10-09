@@ -17,7 +17,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	actionRequestCount: ( _action: string, count: number ) => Math.ceil( count / 100 ),
 } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() } } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), invalidateProducts: vi.fn() } ) );
+vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), invalidateProducts: vi.fn(), findCachedRow: vi.fn( ( id: number ) => ( id === 2 ? { id, name: 'Pelsi Black' } : undefined ) ) } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn( async () => undefined ) } ) );
 vi.mock( '../../resources/extensions/api', () => ( { getRegisteredActions: () => [], useRegistryVersion: () => 0 } ) );
 
@@ -70,20 +70,24 @@ describe( 'runDeclarativeAction', () => {
 		expect( options.actions ).toHaveLength( 1 );
 	} );
 
-	it( 'reports the first failure, with the count of items that did update, and keeps Undo for those', async () => {
+	it( 'names each failed row with why, with the count of items that did update, and keeps Undo for those', async () => {
 		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 1, ok: true, changed: 1 }, { id: 2, ok: false, code: 'not_found', message: 'The product no longer exists.' } ] ) );
 
 		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 1, 2 ], {}, [ 'id' ] );
 
 		// The failed row is offered for another try (the server logged it, so nothing is posted for it).
-		expect( notify.error ).toHaveBeenCalledWith( '1 updated, 1 failed: The product no longer exists.', { actions: [ expect.objectContaining( { label: 'Select the 1 failed' } ) ] } );
+		expect( notify.error ).toHaveBeenCalledWith( '1 updated, 1 failed: Pelsi Black: The product no longer exists.', { actions: [ expect.objectContaining( { label: 'Select the 1 failed' } ) ] } );
 		expect( logSkipped ).not.toHaveBeenCalled();
 		expect( notify.success ).toHaveBeenCalledWith( 'Clear translations: 1 item updated.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
 		expect( invalidateProducts ).toHaveBeenCalledWith( { counts: true } );
 
 		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 2, ok: false, code: 'forbidden', message: 'Not allowed.' } ] ) );
 		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 2 ], {}, [ 'id' ] );
-		expect( notify.error ).toHaveBeenLastCalledWith( 'Not allowed.', expect.anything() );
+		expect( notify.error ).toHaveBeenLastCalledWith( '1 item could not be updated: Pelsi Black: Not allowed.', expect.anything() );
+		// A row the list has not loaded is named by its id.
+		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 7, ok: false, code: 'forbidden', message: 'Not allowed.' } ] ) );
+		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 7 ], {}, [ 'id' ] );
+		expect( notify.error ).toHaveBeenLastCalledWith( '1 item could not be updated: #7: Not allowed.', expect.anything() );
 	} );
 
 	it( 'shows a request error and rejects so the modal stays open', async () => {

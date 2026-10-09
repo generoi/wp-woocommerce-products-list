@@ -6,7 +6,9 @@
  * - Visual (the default): the text as it reads, with Bold, Italic,
  *   bulleted and numbered lists and links; Cmd/Ctrl+B and +I work too.
  *   Pasting brings plain text, never another page's styles.
- * - Code: the stored HTML in a textarea, as before.
+ * - Code: the HTML in a textarea, as before: the stored text for core's
+ *   descriptions (the editor loads them in edit context, raw, shortcodes
+ *   and all; `readContextOf()` in hydrate.ts).
  *
  * Round trip: nothing is written until the text is edited, so opening and
  * closing the editor never rewrites a description. Text stored without

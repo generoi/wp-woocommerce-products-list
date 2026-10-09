@@ -106,6 +106,19 @@ describe( 'variations-read', () => {
 		expect( acrossSupported() ).toBe( true );
 	} );
 
+	it( 'passes the edit context on to every chunk, and none by default', async () => {
+		const fetcher = vi.fn( async ( query: Record< string, string | number > ) => ( { items: String( query.include ).split( ',' ).map( ( id ) => raw( Number( id ), 9 ) ), totalPages: 1 } ) );
+
+		setAcrossFetch( fetcher );
+
+		const ids = Array.from( { length: 150 }, ( _, index ) => 1000 + index );
+
+		await getVariationsByIds( ids, new Map(), { fields: [ 'description' ], context: 'edit' } );
+		await getVariationsByIds( [ 1 ], new Map(), { fields: [ 'regular_price' ] } );
+
+		expect( fetcher.mock.calls.map( ( call ) => call[ 0 ].context ) ).toEqual( [ 'edit', 'edit', undefined ] );
+	} );
+
 	it( 'remembers a server without the route and answers null from then on', async () => {
 		const fetcher = vi.fn( async () => {
 			throw Object.assign( new Error( 'No route' ), { code: 'rest_no_route', status: 404 } );

@@ -2,7 +2,7 @@
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { backup } from '@wordpress/icons';
 import { newBatchId, runAction } from '../api/client';
-import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
+import { allFailed, failureMessage, failureNoticeActions, namesById, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { invalidateProducts, removeItems } from '../store/products';
 import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
@@ -26,6 +26,8 @@ export const createRestoreAction: ActionFactory = ( { settings } ) => {
 			const ids = idsOf( items );
 
 			const batchId = newBatchId();
+			// The rows leave the cache now: their names are kept for a failure notice.
+			const names = namesById( items );
 
 			removeItems( ids );
 
@@ -47,7 +49,8 @@ export const createRestoreAction: ActionFactory = ( { settings } ) => {
 
 					if ( failed.length ) {
 						recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action: 'restore' } );
-						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be restored.', 'wp-woocommerce-products-list' ), { actions: failureNoticeActions( batchId, failed ) } );
+						// Restored from the Trash tab: the refused rows come back to it, "Select" finds them there.
+						notify.error( failureMessage( 'restore', failed, names ), { actions: failureNoticeActions( batchId, failed ) } );
 					}
 
 					onActionPerformed?.( items );
@@ -57,7 +60,7 @@ export const createRestoreAction: ActionFactory = ( { settings } ) => {
 
 					invalidateProducts( { counts: true } );
 					recordFailedRows( batchId, 'action', failed, { action: 'restore' } );
-					notify.error( errorMessage( error ), { actions: failureNoticeActions( batchId, failed ) } );
+					notify.error( failureMessage( 'restore', failed, names ), { actions: failureNoticeActions( batchId, failed ) } );
 				} );
 		},
 	};

@@ -3,7 +3,7 @@ import { doAction } from '@wordpress/hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
-import { MAX_SELECT_ALL, SELECT_ALL_FIELDS, selectRows, useSelection } from '../../resources/list/selection';
+import { knownRowIds, MAX_SELECT_ALL, SELECT_ALL_FIELDS, selectRows, useSelection } from '../../resources/list/selection';
 import type { FetchPage } from '../../resources/list/selection';
 import { setSettings } from '../../resources/settings';
 import { removeItems } from '../../resources/store/products';
@@ -115,6 +115,23 @@ describe( 'useSelection', () => {
 
 		unmount();
 		expect( selectRows( [ 1 ] ) ).toBe( false );
+	} );
+
+	it( 'selectRows leaves the selection alone when the list shows none of the ids (they are on another tab, or in the Trash)', () => {
+		const { result } = renderHook( () => useSelection( page1, 'all' ) );
+
+		act( () => result.current.onPageSelectionChange( [ '1', '2' ] ) );
+		act( () => {
+			expect( selectRows( [ 9001 ] ) ).toBe( false );
+		} );
+		expect( result.current.selection ).toEqual( [ '1', '2' ] );
+		expect( knownRowIds( [ 3, 9001 ] ) ).toEqual( [ 3 ] );
+
+		// Some known: only those are selected.
+		act( () => {
+			expect( selectRows( [ 3, 9001 ] ) ).toBe( true );
+		} );
+		expect( result.current.selection ).toEqual( [ '3' ] );
 	} );
 
 	it( 'addRows keeps rows that are not on the page yet', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { editFetchFields, hydrateItems, hydrateSelection, tabFetchFields } from '../../resources/edit/hydrate';
+import { carriesViewText, editFetchFields, hydrateItems, hydrateSelection, readContextOf, tabFetchFields } from '../../resources/edit/hydrate';
 import type { HydrateDeps } from '../../resources/edit/hydrate';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { createCoreFields } from '../../resources/fields/registry';
@@ -72,6 +72,29 @@ describe( 'hydrateItems', () => {
 		expect( ( result[ 0 ] as { regular_price?: string } ).regular_price ).toBe( '50' );
 		expect( result[ 0 ]!._level ).toBe( rows[ 0 ]!._level );
 		expect( result[ 0 ]!._kind ).toBe( 'variation' );
+	} );
+
+	it( 'loads the descriptions in edit context (raw, as stored), and nothing else', async () => {
+		const d = deps();
+		const across = vi.fn( async ( ids: number[], parentOf: ReadonlyMap< number, number >, _options: { context?: string } ) => ids.map( ( id ) => variation( { id, parent_id: parentOf.get( id ) ?? 0 } ) ) );
+		const rows: ProductListItem[] = [ product( { id: 2 } ), variation( { id: 11, parent_id: 1 } ) ];
+
+		await hydrateSelection( rows, [ 'id', 'description' ], { ...d, getVariationsByIds: across } as HydrateDeps );
+		await hydrateSelection( rows, [ 'id', 'regular_price' ], { ...d, getVariationsByIds: across } as HydrateDeps );
+		await hydrateSelection( [ variation( { id: 11, parent_id: 1 } ) ], [ 'id', 'short_description' ], d );
+
+		expect( d.listProducts.mock.calls[ 0 ]![ 0 ] ).toMatchObject( { context: 'edit' } );
+		expect( across.mock.calls[ 0 ]![ 2 ] ).toMatchObject( { context: 'edit' } );
+		expect( d.listProducts.mock.calls[ 1 ]![ 0 ] ).not.toHaveProperty( 'context' );
+		expect( across.mock.calls[ 1 ]![ 2 ]!.context ).toBeUndefined();
+		expect( d.getVariations.mock.calls[ 0 ]![ 2 ].params ).toMatchObject( { include: '11', context: 'edit' } );
+	} );
+
+	it( 'tells which reads and which saved rows concern the raw texts', () => {
+		expect( readContextOf( [ 'id', 'description' ] ) ).toBe( 'edit' );
+		expect( readContextOf( [ 'id', 'name', 'i18n.se.short_description' ] ) ).toBeUndefined();
+		expect( carriesViewText( { id: 1, short_description: '<p>x</p>' } ) ).toBe( true );
+		expect( carriesViewText( { id: 1, regular_price: '5' } ) ).toBe( false );
 	} );
 
 	it( 'chunks products by a hundred and keeps rows the server did not return', async () => {

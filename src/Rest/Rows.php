@@ -897,6 +897,14 @@ final class Rows
             if (! array_key_exists('parent_id', $data) && self::includes('parent_id', $request)) {
                 $data['parent_id'] = $product->get_parent_id();
             }
+
+            // wc/v3 answers a product's description raw in edit context, a
+            // variation's always through wc_format_content(): the editor
+            // loads it in edit context to edit and compare the stored text
+            // (docs/contracts.md §3.6).
+            if (array_key_exists('description', $data) && $request->get_param('context') === 'edit') {
+                $data['description'] = $product->get_description('edit');
+            }
         }
 
         if (self::includes(self::KEY, $request)) {

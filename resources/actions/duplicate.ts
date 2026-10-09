@@ -2,7 +2,7 @@
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { copy } from '@wordpress/icons';
 import { newBatchId, runAction } from '../api/client';
-import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
+import { allFailed, failureMessage, failureNoticeActions, namesById, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { invalidateProducts } from '../store/products';
 import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
@@ -50,7 +50,7 @@ export const createDuplicateAction: ActionFactory = ( context ) => {
 					if ( failed.length ) {
 						// The ids whose request failed have no row on the server: recorded as failed (the others it logged).
 						recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action: 'duplicate' } );
-						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be duplicated.', 'wp-woocommerce-products-list' ), { actions: failureNoticeActions( batchId, failed ) } );
+						notify.error( failureMessage( 'duplicate', failed, namesById( items ) ), { actions: failureNoticeActions( batchId, failed ) } );
 					}
 
 						onActionPerformed?.( items );
@@ -59,7 +59,7 @@ export const createDuplicateAction: ActionFactory = ( context ) => {
 					const failed = allFailed( ids, errorMessage( error ) );
 
 					recordFailedRows( batchId, 'action', failed, { action: 'duplicate' } );
-					notify.error( errorMessage( error ), { actions: failureNoticeActions( batchId, failed ) } );
+					notify.error( failureMessage( 'duplicate', failed, namesById( items ) ), { actions: failureNoticeActions( batchId, failed ) } );
 				} );
 		},
 	};

@@ -129,6 +129,8 @@ async function inParallel< T >( tasks: Array< () => Promise< T > >, limit: numbe
 
 export interface AcrossOptions {
 	fields: string[];
+	/** `edit`: texts as stored (the route passes it on to wc/v3); view, the default, when missing. */
+	context?: 'view' | 'edit';
 	signal?: AbortSignal;
 	/** Requests in flight at once. */
 	concurrency?: number;
@@ -148,16 +150,17 @@ export async function getVariationsByIds( ids: number[], parentOf: ReadonlyMap< 
 	}
 
 	const _fields = Array.from( new Set( [ ...options.fields, 'id', 'parent_id' ] ) ).join( ',' );
+	const context: Record< string, string > = options.context === 'edit' ? { context: 'edit' } : {};
 	const parts = chunks( ids, ACROSS_CHUNK );
 	// The first request tells whether the route exists; the rest follow side by side.
-	const first = await attempt( { include: parts[ 0 ]!.join( ',' ), per_page: parts[ 0 ]!.length, _fields }, options.signal );
+	const first = await attempt( { include: parts[ 0 ]!.join( ',' ), per_page: parts[ 0 ]!.length, _fields, ...context }, options.signal );
 
 	if ( first === null ) {
 		return null;
 	}
 
 	const rest = await inParallel(
-		parts.slice( 1 ).map( ( part ) => async () => ( await attempt( { include: part.join( ',' ), per_page: part.length, _fields }, options.signal ) )?.items ?? [] ),
+		parts.slice( 1 ).map( ( part ) => async () => ( await attempt( { include: part.join( ',' ), per_page: part.length, _fields, ...context }, options.signal ) )?.items ?? [] ),
 		options.concurrency ?? 4
 	);
 

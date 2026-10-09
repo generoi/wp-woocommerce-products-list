@@ -11,6 +11,14 @@
  * products with six languages of descriptions is over a megabyte; the
  * General tab alone is a few hundred kilobytes).
  *
+ * A load that asks for `description` or `short_description` is made in
+ * wc/v3's edit context (`context=edit`, `EDIT_CONTEXT_KEYS`): the texts
+ * come back raw, as stored (view context runs wpautop and the shortcodes),
+ * so the form edits the stored text and the save sends it as the expected
+ * value (docs/contracts.md §3.6). The other fields of that request come in
+ * edit context too, which is the stored form `_wcpl_expect` compares. The
+ * list's own reads stay in view context.
+ *
  * The fetched values are merged *into* the cached row, object by object:
  * a request for `i18n.se.meta_title` answers with `i18n: {se: {meta_title}}`
  * and must not replace the `i18n.se.name` the list shows.
@@ -23,6 +31,23 @@ import { fieldsOfTab, GENERAL_TAB_ID, tabOf } from './form-layouts';
 import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
 import { getVariationsByIds } from './variations-read';
+
+/** Texts wc/v3 answers rendered in view context and raw in edit context: a load that asks for one is made in edit context. */
+export const EDIT_CONTEXT_KEYS: ReadonlySet< string > = new Set( [ 'description', 'short_description' ] );
+
+/** `edit` when these `_fields` ask for a text the editor must load raw, else undefined (view, the default). */
+export function readContextOf( fields: string[] ): 'edit' | undefined {
+	return fields.some( ( field ) => EDIT_CONTEXT_KEYS.has( field.split( '.' )[ 0 ] ?? field ) ) ? 'edit' : undefined;
+}
+
+/**
+ * Whether a row a save answered with (view context) carries one of the
+ * texts the editor loads raw: the editor drops such a row from its loaded
+ * set and loads it again, rather than taking the rendered text as the base.
+ */
+export function carriesViewText( row: Record< string, unknown > ): boolean {
+	return Array.from( EDIT_CONTEXT_KEYS ).some( ( key ) => row[ key ] !== undefined );
+}
 
 /** Always fetched: what the row identity, the actions and the summary need. */
 /** `date_modified_gmt` is the baseline a save compares against: a row saved by someone else meanwhile has a newer one. */
@@ -195,13 +220,15 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	const _fields = wanted.join( ',' );
 	const parentStamps = new Map< number, string >();
 	const wantsStamps = wanted.includes( 'date_modified_gmt' );
+	const context = readContextOf( wanted );
+	const contextParam = context ? { context } : {};
 
 	for ( let i = 0; i < products.length; i += chunk ) {
 		const ids = products.slice( i, i + chunk );
 
 		jobs.push(
 			limit( async () => {
-				const result = await deps.listProducts( { include: ids.join( ',' ), per_page: ids.length, include_status: ANY_STATUS, _fields } );
+				const result = await deps.listProducts( { include: ids.join( ',' ), per_page: ids.length, include_status: ANY_STATUS, _fields, ...contextParam } );
 
 				result.items.forEach( ( row ) => byId.set( row.id, row ) );
 			} )
@@ -237,7 +264,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 
 				jobs.push(
 					limit( async () => {
-						const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ) } } );
+						const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ), ...contextParam } } );
 
 						result.items.forEach( ( row ) => byId.set( row.id, row ) );
 					} )
@@ -259,7 +286,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 		jobs.push(
 			( async () => {
 				// A failed cross-parent read falls back to the per-parent one (an older server, a proxy that blocks the route).
-				const rows = await across( Array.from( parentOf.keys() ), parentOf, { fields: wanted } ).catch( () => null );
+				const rows = await across( Array.from( parentOf.keys() ), parentOf, { fields: wanted, context } ).catch( () => null );
 
 				if ( rows === null ) {
 					// No cross-parent route on this server: one read per parent, as before.

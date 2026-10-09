@@ -48,6 +48,9 @@ final class VariationsReadController
                 'parent' => $ids('Every variation of these parents, grouped by parent in this order.'),
                 'per_page' => ['type' => 'integer', 'default' => self::LIMIT, 'minimum' => 1, 'maximum' => self::LIMIT],
                 'page' => ['type' => 'integer', 'default' => 1, 'minimum' => 1],
+                // wc/v3's own, passed on: `edit` answers `description` raw, as stored, for an editor
+                // (docs/contracts.md §3.6). Same permissions as wc/v3's per-parent read.
+                'context' => ['type' => 'string', 'enum' => ['view', 'edit'], 'default' => 'view'],
             ],
         ]);
     }
@@ -79,6 +82,10 @@ final class VariationsReadController
             $query['include'] = $include;
         } else {
             $query['parent'] = $parents;
+        }
+
+        if ($request->get_param('context') === 'edit') {
+            $query['context'] = 'edit';
         }
 
         $fields = $request->get_param('_fields');

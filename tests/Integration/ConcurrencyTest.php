@@ -10,6 +10,7 @@ use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Rest\Concurrency;
 use GeneroWP\ProductsList\Rest\LogController;
+use GeneroWP\ProductsList\Rest\Saves;
 
 /**
  * Server-side protection against concurrent edits (docs/contracts.md §3.6):
@@ -50,6 +51,18 @@ class ConcurrencyTest extends RestTestCase
         global $wpdb;
 
         $wpdb->update($wpdb->postmeta, ['meta_value' => $value], ['post_id' => $id, 'meta_key' => $key]);
+    }
+
+    /**
+     * Add a `pre_insert` filter that runs before the guard: a write it makes
+     * to the item being saved is one another process made just before
+     * this save took the object's lock.
+     */
+    private function beforeTheGuard(string $hook, callable $callback): void
+    {
+        remove_filter($hook, [Saves::class, 'guardInsert'], Saves::GUARD_PRIORITY);
+        add_filter($hook, $callback, Saves::GUARD_PRIORITY);
+        add_filter($hook, [Saves::class, 'guardInsert'], Saves::GUARD_PRIORITY, 3);
     }
 
     /**
@@ -223,6 +236,124 @@ class ConcurrencyTest extends RestTestCase
 
         $this->assertContains('manage_stock', $fields[$flag->get_id()] ?? [], 'the overwrite is logged');
         $this->assertContains('regular_price', $fields[$price->get_id()] ?? [], 'the overwrite is logged');
+    }
+
+    /**
+     * An extension that resolves a relative write from the object on
+     * `pre_insert` (gds-woo-i18n's staged ops, at 4) gets the stored
+     * object under its lock: the guard runs first. A value another
+     * process saved while the batch was busy is built on, not replaced.
+     */
+    public function test_an_extension_resolving_a_relative_write_on_pre_insert_reads_the_stored_value_under_the_lock(): void
+    {
+        $first = $this->simpleProduct();
+        $target = $this->simpleProduct();
+        update_post_meta($target->get_id(), '_wcpl_test_name_se', 'Original');
+
+        // Another tab saves a translation of the target while the batch writes the first item.
+        add_filter('woocommerce_rest_pre_insert_product_object', function ($object) use ($first, $target) {
+            static $done = false;
+
+            if (! $done && $object instanceof \WC_Product && $object->get_id() === $first->get_id()) {
+                $done = true;
+                $this->writeBehindTheCache($target->get_id(), '_wcpl_test_name_se', 'Set by A');
+            }
+
+            return $object;
+        }, 1);
+
+        $locked = null;
+        $resolver = function ($object, \WP_REST_Request $request) use ($target, &$locked) {
+            if ($object instanceof \WC_Product && $object->get_id() === $target->get_id() && $request->get_param('wcpl_test_suffix') !== null) {
+                $locked = in_array($target->get_id(), Concurrency::heldObjects(), true);
+                $object->update_meta_data('_wcpl_test_name_se', $object->get_meta('_wcpl_test_name_se', true, 'edit').$request->get_param('wcpl_test_suffix'));
+            }
+
+            return $object;
+        };
+        add_filter('woocommerce_rest_pre_insert_product_object', $resolver, 4, 2);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $first->get_id(), 'menu_order' => 3],
+            ['id' => $target->get_id(), 'wcpl_test_suffix' => ' +B'],
+        ]], [Logger::SOURCE_HEADER => 'bulk']);
+
+        $this->assertStatus(200, $response);
+        $this->assertTrue($locked, 'the resolver ran under the object lock');
+        Concurrency::forget($target->get_id());
+        $this->assertSame('Set by A +B', get_post_meta($target->get_id(), '_wcpl_test_name_se', true), 'the op is applied to the value saved meanwhile');
+    }
+
+    public function test_the_guard_runs_before_any_other_pre_insert_filter_and_hands_them_a_refusal(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        $id = $product->get_id();
+        update_post_meta($id, '_regular_price', '20');
+        clean_post_cache($id);
+
+        $seen = [];
+        $spy = function ($object) use (&$seen) {
+            $seen[] = $object;
+
+            return $object;
+        };
+        add_filter('woocommerce_rest_pre_insert_product_object', $spy, -1000);
+
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '10', Concurrency::EXPECT_KEY => ['regular_price' => '15']]);
+
+        $this->assertStatus(409, $response);
+        $this->assertCount(1, $seen);
+        $this->assertInstanceOf(\WP_Error::class, $seen[0], 'a filter at -1000 already sees the conflict');
+        $this->assertSame([], Concurrency::heldObjects(), 'a refused item lets its lock go');
+    }
+
+    /**
+     * The editor loads its text fields in edit context (raw, as stored)
+     * and sends that as the expected value: the shortcode stays a
+     * shortcode and a shortcode whose output changes is no conflict.
+     */
+    public function test_a_description_loaded_in_edit_context_keeps_its_shortcode_and_is_no_false_conflict(): void
+    {
+        add_shortcode('wcpl_test_rand', static fn (): string => '<span>'.wp_generate_password(8, false).'</span>');
+        $raw = "Line one\n\nSee also: [wcpl_test_rand]";
+        $product = $this->simpleProduct(['description' => $raw]);
+        $id = $product->get_id();
+
+        $view = $this->data($this->request('GET', '/wc/v3/products/'.$id, ['_fields' => 'id,description']));
+        $this->assertStringNotContainsString('[wcpl_test_rand]', $view['description'], 'the list (view context) shows it rendered');
+
+        $edit = $this->data($this->request('GET', '/wc/v3/products/'.$id, ['_fields' => 'id,description', 'context' => 'edit']));
+        $this->assertSame($raw, $edit['description']);
+
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['description' => $edit['description']."\n\nEdited.", Concurrency::EXPECT_KEY => ['description' => $edit['description']]]);
+        $this->assertStatus(200, $response);
+        clean_post_cache($id);
+        $this->assertSame($raw."\n\nEdited.", get_post($id)->post_content, 'the shortcode is stored, not its output');
+
+        // The rendered form of a changing shortcode never matches: why the editor loads raw.
+        $this->assertArrayHasKey('description', Concurrency::conflicts(wc_get_product($id), ['description' => wpautop(do_shortcode($raw."\n\nEdited."))]));
+
+        remove_shortcode('wcpl_test_rand');
+    }
+
+    public function test_the_cross_parent_variations_route_answers_raw_descriptions_in_edit_context(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $variation = wc_get_product($v38);
+        $variation->set_description("It's \"quoted\"\nand broken");
+        $variation->save();
+        $route = '/wc-products-list/v1/variations';
+
+        $response = $this->request('GET', $route, ['include' => (string) $v38, 'context' => 'edit', '_fields' => 'id,description']);
+        $this->assertStatus(200, $response);
+        $edit = $this->data($response);
+        $this->assertSame("It's \"quoted\"\nand broken", $edit[0]['description']);
+
+        $view = $this->data($this->request('GET', $route, ['include' => (string) $v38, '_fields' => 'id,description']));
+        $this->assertSame(trim(wc_format_content("It's \"quoted\"\nand broken")), trim($view[0]['description']));
+
+        $this->assertStatus(400, $this->request('GET', $route, ['include' => (string) $v38, 'context' => 'embed']));
     }
 
     public function test_a_trashed_product_is_not_written_unless_the_request_restores_it(): void
@@ -560,7 +691,7 @@ class ConcurrencyTest extends RestTestCase
 
             return $object;
         };
-        add_filter('woocommerce_rest_pre_insert_product_object', $hook, 1);
+        $this->beforeTheGuard('woocommerce_rest_pre_insert_product_object', $hook);
 
         $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', [], [ListMode::BATCH_HEADER => wp_generate_uuid4()]);
         $this->assertStatus(200, $response);

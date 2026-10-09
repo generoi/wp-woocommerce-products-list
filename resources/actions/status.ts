@@ -23,7 +23,7 @@ import { canUndo } from '../edit/log-access';
 import { outcomeUnknown, UNCERTAIN_CODE, uncertainMessage, withoutUntouchedImages } from '../edit/save-runner';
 import { humanizeError, isConflictCode, isGoneCode } from '../edit/errors';
 import { writeItem } from '../edit/expect';
-import { failureNoticeActions, recordFailedRows } from '../edit/failed-rows';
+import { failureMessage, failureNoticeActions, namesById, recordFailedRows } from '../edit/failed-rows';
 import { hydrateSelection } from '../edit/hydrate';
 import { getSettings } from '../settings';
 import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
@@ -327,16 +327,11 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		// so History shows the attempt and which rows of it did not change (its own refusals it logged itself).
 		recordFailedRows( batchId, source, failed, { fields: Object.keys( sample ) } );
 
-		// A clash with another tab or user says so first: those rows now show the other change.
-		const first = failed.find( ( failure ) => isConflictCode( failure.code ) ) ?? failed[ 0 ];
+		// Each failed row by name, with why (a clash with another tab or user first: those rows now show the other change).
+		const ordered = [ ...failed.filter( ( failure ) => isConflictCode( failure.code ) ), ...failed.filter( ( failure ) => ! isConflictCode( failure.code ) ) ];
 
 		notify.error(
-			sprintf(
-				/* translators: 1: number of rows that failed, 2: the first error message */
-				_n( '%1$d item could not be updated: %2$s', '%1$d items could not be updated: %2$s', failed.length, 'wp-woocommerce-products-list' ),
-				failed.length,
-				first?.message ?? ''
-			),
+			failureMessage( 'update', ordered, namesById( rows ) ),
 			// As the editor's outcome notice: select the failed rows to try again, open the batch in History.
 			{ id: `wc-pl-action-failed-${ batchId }`, actions: failureNoticeActions( batchId, failed ) }
 		);

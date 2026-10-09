@@ -12,7 +12,7 @@ import { actionRequestCount, closeBatch, newBatchId, runAction } from '../api/cl
 import type { RenderModalProps } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
 import { captureFocusOrigin, restoreFocus, useReturnFocus } from '../edit/focus';
-import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
+import { allFailed, failureMessage, failureNoticeActions, namesById, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { invalidateProducts, removeItems } from '../store/products';
 import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import type { ProductAction, ProductListItem } from '../types';
@@ -40,6 +40,8 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 	const batchId = newBatchId();
 	const planned = actionRequestCount( 'trash', ids.length ) > 1 ? ids.length : 0;
 	const jobId = beginSaveJob( realRows( rows ) );
+	// The rows leave the cache now: their names are kept for a failure notice.
+	const names = namesById( rows );
 
 	removeItems( ids );
 	updateSaveJob( jobId, 0, ids.length );
@@ -85,7 +87,8 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 
 											if ( result.failed.length ) {
 												recordFailedRows( restoreBatch, 'action', unansweredResults( restored.results ), { action: 'restore' } );
-												notify.error( result.failed[ 0 ]?.message ?? '', { actions: failureNoticeActions( restoreBatch, result.failed ) } );
+												// Still in the Trash: named, with why, and the Trash tab to find them (they are not in this list).
+												notify.error( failureMessage( 'restore', result.failed, names ), { actions: failureNoticeActions( restoreBatch, result.failed, { inTrash: true } ) } );
 											} else {
 												notify.success( __( 'Restored.', 'wp-woocommerce-products-list' ) );
 											}
@@ -94,7 +97,7 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 											const failedRestore = allFailed( ok, errorMessage( error ) );
 
 											recordFailedRows( restoreBatch, 'action', failedRestore, { action: 'restore' } );
-											notify.error( errorMessage( error ), { actions: failureNoticeActions( restoreBatch, failedRestore ) } );
+											notify.error( failureMessage( 'restore', failedRestore, names ), { actions: failureNoticeActions( restoreBatch, failedRestore, { inTrash: true } ) } );
 										} )
 										.finally( () => setTimeout( () => restoreFocus( origin ), 0 ) );
 								},
@@ -107,7 +110,7 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 			if ( failed.length ) {
 				// The ids whose request failed have no row on the server: recorded as failed in the batch (the others it logged).
 				recordFailedRows( response.batch_id, 'action', unansweredResults( response.results ), { action: 'trash' } );
-				notify.error( failed[ 0 ]?.message ?? __( 'The product could not be trashed.', 'wp-woocommerce-products-list' ), {
+				notify.error( failureMessage( 'trash', failed, names ), {
 					id: `wc-pl-trash-failed-${ response.batch_id }`,
 					actions: failureNoticeActions( response.batch_id, failed ),
 				} );
@@ -120,7 +123,7 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 			invalidateProducts( { counts: true } );
 			// Not one request answered: the attempt and its rows are still recorded, as failed.
 			recordFailedRows( batchId, 'action', failed, { action: 'trash' } );
-			notify.error( message, { id: `wc-pl-trash-failed-${ batchId }`, actions: failureNoticeActions( batchId, failed ) } );
+			notify.error( failureMessage( 'trash', failed, names ), { id: `wc-pl-trash-failed-${ batchId }`, actions: failureNoticeActions( batchId, failed ) } );
 		} );
 }
 
