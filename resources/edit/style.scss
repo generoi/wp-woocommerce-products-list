@@ -889,8 +889,28 @@ html.wc-pl-panel-resizing {
 // Split view: the list makes room for the panel where both fit.
 @media ( min-width: 960px ) {
 	html.wc-pl-panel-open .wc-products-list {
-		// The panel's width (already clamped to leave the list room) plus a 16px gap.
-		margin-inline-end: calc( var( --wc-pl-panel-inset ) + 16px );
+		// The panel's width (already clamped to leave the list room), its 15px gutter and a 16px gap.
+		margin-inline-end: calc( var( --wc-pl-panel-inset ) + 31px );
+	}
+	// Side by side the panel is a card like the list: same 8px gap under the admin bar, same border and
+	// radius, the list's 15px gutter on the right (the list sits 16px left of it).
+	.wc-pl-editor-panel {
+		top: calc( var( --wp-admin--admin-bar--height, 32px ) + 8px );
+		right: 15px;
+		bottom: 8px;
+		width: min( var( --wc-pl-panel-width ), calc( 100% - 15px ) );
+		border: 1px solid #dcdcde;
+		border-radius: 4px;
+		overflow: hidden;
+	}
+
+	// While editing, the list keeps only what the work needs: the header links (History, Add new)
+	// and the filter chips step aside so the list column does not grow and jump as they wrap.
+	html.wc-pl-panel-open .wc-products-list {
+		.wc-products-list__header,
+		.dataviews-filters__container {
+			display: none;
+		}
 	}
 }
 
