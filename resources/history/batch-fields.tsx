@@ -73,6 +73,26 @@ export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions
 	return rest > 0 ? sprintf( __( '%1$s +%2$d more', 'wp-woocommerce-products-list' ), shown, rest ) : shown;
 }
 
+/** "Still running…" / "Interrupted: 312 of 900 written": a batch a save is still writing, or stopped writing before it was done. */
+export function describeBatchState( batch: Pick< LogBatch, 'state' | 'planned' | 'objects' > ): string {
+	if ( batch.state === 'running' ) {
+		return __( 'Still running…', 'wp-woocommerce-products-list' );
+	}
+
+	if ( batch.state === 'interrupted' ) {
+		return batch.planned
+			? sprintf(
+					/* translators: 1: items written, 2: items the save planned to write */
+					__( 'Interrupted: %1$d of %2$d written', 'wp-woocommerce-products-list' ),
+					Math.min( batch.objects, batch.planned ),
+					batch.planned
+			  )
+			: __( 'Interrupted', 'wp-woocommerce-products-list' );
+	}
+
+	return '';
+}
+
 /** "5 skipped (already had the value)": the batch's left-out items with why. */
 export function describeSkipped( batch: Pick< LogBatch, 'skipped' | 'skipped_reasons' > ): string {
 	const count = batch.skipped ?? 0;
@@ -166,6 +186,12 @@ export function createBatchFields( settings: Settings, options: BatchFieldOption
 			getValue: ( { item } ) => String( item.errors ?? 0 ),
 			render: ( { item } ) => (
 				<>
+					{ item.state ? (
+						<span className={ item.state === 'running' ? 'wc-pl-history__running' : 'wc-pl-history__error' }>
+							{ describeBatchState( item ) }
+							{ ' · ' }
+						</span>
+					) : null }
 					{ item.errors ? (
 						<span className="wc-pl-history__error">
 							{ sprintf(

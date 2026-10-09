@@ -4,6 +4,7 @@ namespace GeneroWP\ProductsList\Log;
 
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Registry;
+use GeneroWP\ProductsList\Rest\Concurrency;
 use GeneroWP\ProductsList\Rest\Rows;
 use WP_REST_Request;
 
@@ -536,6 +537,8 @@ final class Revert
                 if ($adjusted !== null) {
                     foreach ($adjusted as $field => $target) {
                         self::setPlanned($plan, $id, $field, $target);
+                        // The relative write is based on the value read now.
+                        $plan['final'][$id][$field] = $current[$field];
                     }
 
                     continue;
@@ -632,14 +635,20 @@ final class Revert
             ];
         }
 
+        // Each write carries the values the check above saw (what the batch
+        // left, or the value a relative revert is based on): the save
+        // compares them again under the object's lock, right before it
+        // writes, so an edit made while the revert runs is not overwritten.
+        $expect = static fn (int $id): array => $force ? [] : [Concurrency::EXPECT_KEY => $plan['final'][$id] ?? []];
+
         foreach (array_chunk($plan['products'], self::PRODUCTS_CHUNK, true) as $chunk) {
             $update = [];
 
             foreach ($chunk as $id => $fieldsOfId) {
-                $update[] = self::body((int) $id, $fieldsOfId);
+                $update[] = self::body((int) $id, $fieldsOfId) + $expect((int) $id);
             }
 
-            self::dispatch('/wc/v3/products/batch', $update, $batchId, $fields, $results, $items);
+            self::dispatch('/wc/v3/products/batch', $update, $batchId, $fields, $results, $items, $plan);
         }
 
         foreach ($plan['variations'] as $parent => $byId) {
@@ -647,10 +656,10 @@ final class Revert
                 $update = [];
 
                 foreach ($chunk as $id => $fieldsOfId) {
-                    $update[] = self::body((int) $id, $fieldsOfId);
+                    $update[] = self::body((int) $id, $fieldsOfId) + $expect((int) $id);
                 }
 
-                self::dispatch('/wc/v3/products/'.(int) $parent.'/variations/batch', $update, $batchId, $fields, $results, $items);
+                self::dispatch('/wc/v3/products/'.(int) $parent.'/variations/batch', $update, $batchId, $fields, $results, $items, $plan);
             }
         }
 
@@ -750,13 +759,59 @@ final class Revert
     }
 
     /**
+     * The conflict result of an object whose fields changed between the
+     * revert's check and its write (`wc_products_list_conflict` from the
+     * save), in the shape of a conflict found by the check.
+     *
+     * @param  array<string, mixed>  $data  the error's data: fields, current, expected
+     * @param  Plan  $plan
+     * @return array<string, mixed>
+     */
+    private static function lateConflict(int $id, array $data, array $plan): array
+    {
+        $current = is_array($data['current'] ?? null) ? $data['current'] : [];
+        $conflicts = array_map('strval', array_keys($current));
+        $labels = array_map([self::class, 'fieldLabel'], $conflicts);
+        [$type, $parent] = self::planType($plan, $id);
+        $expected = [];
+
+        foreach ($conflicts as $field) {
+            $expected[$field] = self::plannedOld($plan, $id, $field);
+        }
+
+        $post = get_post($id);
+
+        return [
+            'id' => $id,
+            'ok' => false,
+            'code' => 'conflict',
+            'object_type' => $type,
+            'parent_id' => $parent,
+            'name' => $post !== null ? (string) $post->post_title : '',
+            'fields' => $conflicts,
+            'labels' => $labels,
+            'current' => $current,
+            'batch' => array_intersect_key($plan['final'][$id] ?? [], $current),
+            'expected' => $expected,
+            'relative' => array_diff($conflicts, self::relativeFields()) === [],
+            'already_reverted' => [],
+            'message' => sprintf(
+                /* translators: %s: comma-separated field names */
+                _n('%s was changed while this revert was running and was left as it is.', '%s were changed while this revert was running and were left as they are.', max(1, count($conflicts)), 'wp-woocommerce-products-list'),
+                implode(', ', $labels)
+            ),
+        ];
+    }
+
+    /**
      * One internal wc/v3 batch request, in list mode, under the revert batch id.
      *
      * @param  array<int, array<string, mixed>>  $update
      * @param  array<int, array<string, mixed>>  $results
      * @param  array<int, mixed>  $items
+     * @param  Plan|null  $plan
      */
-    private static function dispatch(string $route, array $update, string $batchId, ?string $fields, array &$results, array &$items): void
+    private static function dispatch(string $route, array $update, string $batchId, ?string $fields, array &$results, array &$items, ?array $plan = null): void
     {
         $request = new WP_REST_Request('POST', $route);
         $request->set_header(ListMode::HEADER, '1');
@@ -789,8 +844,17 @@ final class Revert
             }
 
             if (isset($item['error']) && is_array($item['error'])) {
+                $id = (int) ($item['id'] ?? 0);
+
+                if (($item['error']['code'] ?? '') === Concurrency::CONFLICT_ERROR && $plan !== null) {
+                    // Changed while the revert ran: the same result as a conflict found up front.
+                    $results[] = self::lateConflict($id, (array) ($item['error']['data'] ?? []), $plan);
+
+                    continue;
+                }
+
                 $results[] = [
-                    'id' => (int) ($item['id'] ?? 0),
+                    'id' => $id,
                     'ok' => false,
                     'code' => (string) ($item['error']['code'] ?? 'error'),
                     'message' => (string) ($item['error']['message'] ?? ''),

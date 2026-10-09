@@ -71,12 +71,48 @@ final class Cli
         if (isset($assoc['dry-run'])) {
             $result = Restore::undo((string) $args[0], ['limit' => PHP_INT_MAX, 'dry' => true, 'force' => isset($assoc['force'])]);
             unset($result['restored'], $result['unchanged']);
+            $total = $result['total'];
         } else {
+            $total = count(Restore::objects((string) $args[0]));
             $result = Restore::undoAll((string) $args[0], isset($assoc['force']));
+        }
+
+        if ($result['pruned'] > 0) {
+            $message = sprintf('%d revisions of this batch were pruned by retention (keep_product/keep_variation count every save of an object); those changes cannot be undone from revisions.', $result['pruned']);
+
+            if ($total === 0) {
+                // @phpstan-ignore class.notFound
+                \WP_CLI::error($message.' Nothing is left to undo.');
+            }
+
+            // @phpstan-ignore class.notFound
+            \WP_CLI::warning($message);
         }
 
         // @phpstan-ignore class.notFound
         \WP_CLI::success((string) wp_json_encode($result));
+    }
+
+    /**
+     * Delete the revisions of products and variations and the batch terms.
+     *
+     * ## OPTIONS
+     *
+     * [--keep-baselines]
+     * : Keep revisions that belong to no batch (the baselines).
+     *
+     * [--chunk=<n>]
+     * : Revisions per round. Default 500.
+     *
+     * [--yes]
+     * : Do not ask for confirmation.
+     *
+     * @param  array<int, string>  $args
+     * @param  array<string, string>  $assoc
+     */
+    public function purge(array $args, array $assoc): void
+    {
+        (new PurgeCommand)->purge($args, $assoc);
     }
 
     /**

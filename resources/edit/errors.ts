@@ -17,7 +17,23 @@ const MESSAGES: Record< string, () => string > = {
 	woocommerce_rest_product_invalid_sku: () => __( 'This SKU is already used by another product.', 'wp-woocommerce-products-list' ),
 	rest_invalid_param: () => __( 'A value was rejected by WooCommerce.', 'wp-woocommerce-products-list' ),
 	missing_result: () => __( 'WooCommerce returned no result for this item.', 'wp-woocommerce-products-list' ),
+	// The server's concurrency checks (docs/contracts.md §3.6).
+	wc_products_list_conflict: () => __( 'Changed by someone else since it was loaded, so it was not saved. It now shows the current values: check them and apply the edits again.', 'wp-woocommerce-products-list' ),
+	wc_products_list_locked: () => __( 'Another save of this item was running, so it was not saved. Try again in a moment.', 'wp-woocommerce-products-list' ),
+	wc_products_list_trashed: () => __( 'This item is in the Trash, so it was not saved.', 'wp-woocommerce-products-list' ),
 };
+
+/** Per-item refusals of the server's concurrency checks: the server logs them as skipped rows itself (not posted to /log/skipped again). */
+const SERVER_LOGGED_CODES: ReadonlySet< string > = new Set( [ 'wc_products_list_conflict', 'wc_products_list_locked', 'wc_products_list_trashed' ] );
+
+export function isServerLoggedCode( code: string | undefined ): boolean {
+	return code !== undefined && SERVER_LOGGED_CODES.has( code );
+}
+
+/** Whether a row was refused because it changed meanwhile (reload it, then apply again). */
+export function isConflictCode( code: string | undefined ): boolean {
+	return code === 'wc_products_list_conflict';
+}
 
 const SKU_CODES: ReadonlySet< string > = new Set( [ 'product_invalid_sku', 'woocommerce_rest_product_invalid_sku' ] );
 

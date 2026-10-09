@@ -27,6 +27,8 @@ export function skipReasonLabel( reason: string ): string {
 			return __( 'would go below zero', 'wp-woocommerce-products-list' );
 		case 'not_applicable':
 			return __( 'field does not apply', 'wp-woocommerce-products-list' );
+		case 'failed':
+			return __( 'failed to save', 'wp-woocommerce-products-list' );
 		default:
 			return __( 'other reasons', 'wp-woocommerce-products-list' );
 	}

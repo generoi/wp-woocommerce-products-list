@@ -46,7 +46,7 @@ final class Restore
      * Undo one chunk of a batch.
      *
      * @param  array{offset?: int, limit?: int, force?: bool, dry?: bool, batch?: string|null}  $args
-     * @return array{batch: string, total: int, next: ?int, restored: array<int, int>, unchanged: array<int, int>, conflicts: array<int, array{id: int, keys: array<int, string>}>, skipped: array<int, array{id: int, reason: string}>}
+     * @return array{batch: string, total: int, pruned: int, next: ?int, restored: array<int, int>, unchanged: array<int, int>, conflicts: array<int, array{id: int, keys: array<int, string>}>, skipped: array<int, array{id: int, reason: string}>}
      */
     public static function undo(string $uuid, array $args = []): array
     {
@@ -59,7 +59,7 @@ final class Restore
         $objects = self::objects($uuid);
         $total = count($objects);
         $chunk = array_slice($objects, $offset, $limit, true);
-        $result = ['batch' => $batch, 'total' => $total, 'next' => $offset + $limit < $total ? $offset + $limit : null, 'restored' => [], 'unchanged' => [], 'conflicts' => [], 'skipped' => []];
+        $result = ['batch' => $batch, 'total' => $total, 'pruned' => self::pruned($uuid, $objects), 'next' => $offset + $limit < $total ? $offset + $limit : null, 'restored' => [], 'unchanged' => [], 'conflicts' => [], 'skipped' => []];
 
         if ($chunk === []) {
             return $result;
@@ -144,6 +144,19 @@ final class Restore
     }
 
     /**
+     * Revisions of the batch that retention (or a purge) deleted since it
+     * was recorded: they can no longer be undone.
+     *
+     * @param  array<int, array<int, int>>  $objects  object id => the batch's revision ids still there
+     */
+    public static function pruned(string $uuid, array $objects): int
+    {
+        $left = array_sum(array_map('count', $objects));
+
+        return max(0, Batches::recorded($uuid) - $left);
+    }
+
+    /**
      * Per object: the revision before the batch's first one of it and the
      * batch's last one. Objects without a predecessor (pruned, or no
      * baseline) are left out.
@@ -173,16 +186,17 @@ final class Restore
     /**
      * Undo a whole batch, chunk by chunk.
      *
-     * @return array{batch: string, restored: int, conflicts: int, skipped: int, unchanged: int}
+     * @return array{batch: string, restored: int, conflicts: int, skipped: int, unchanged: int, pruned: int}
      */
     public static function undoAll(string $uuid, bool $force = false): array
     {
         $batch = wp_generate_uuid4();
         $offset = 0;
-        $totals = ['batch' => $batch, 'restored' => 0, 'conflicts' => 0, 'skipped' => 0, 'unchanged' => 0];
+        $totals = ['batch' => $batch, 'restored' => 0, 'conflicts' => 0, 'skipped' => 0, 'unchanged' => 0, 'pruned' => 0];
 
         do {
             $result = self::undo($uuid, ['offset' => $offset, 'limit' => self::CHUNK, 'force' => $force, 'batch' => $batch]);
+            $totals['pruned'] = $result['pruned'];
             $totals['restored'] += count($result['restored']);
             $totals['conflicts'] += count($result['conflicts']);
             $totals['skipped'] += count($result['skipped']);

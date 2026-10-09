@@ -44,23 +44,86 @@ final class Batches
 
     private static ?string $lastUuid = null;
 
+    /** @var array<string, int> uuid => revisions assigned since the last flush */
+    private static array $assigned = [];
+
     public static function register(): void
     {
-        $register = static function (): void {
-            register_taxonomy(self::TAXONOMY, 'revision', [
-                'public' => false,
-                'show_ui' => false,
-                'show_in_rest' => false,
-                'rewrite' => false,
-                'query_var' => false,
-                'hierarchical' => false,
-                'update_count_callback' => '_update_generic_term_count',
-            ]);
-        };
-
-        did_action('init') ? $register() : add_action('init', $register, 5);
+        did_action('init') ? self::registerTaxonomy() : add_action('init', [self::class, 'registerTaxonomy'], 5);
 
         self::hooks(true);
+    }
+
+    public static function registerTaxonomy(): void
+    {
+        if (taxonomy_exists(self::TAXONOMY)) {
+            return;
+        }
+
+        register_taxonomy(self::TAXONOMY, 'revision', [
+            'public' => false,
+            'show_ui' => false,
+            'show_in_rest' => false,
+            'rewrite' => false,
+            'query_var' => false,
+            'hierarchical' => false,
+            'update_count_callback' => '_update_generic_term_count',
+        ]);
+    }
+
+    /** Whether a batch was set explicitly (Restore, tests). */
+    public static function forced(): bool
+    {
+        return self::$forced !== null;
+    }
+
+    /** Whether a WooCommerce CSV import is running in this process. */
+    public static function importingNow(): bool
+    {
+        return self::$importing;
+    }
+
+    /**
+     * Revisions recorded under a batch, including those retention has
+     * pruned since (term meta `revisions`, kept per flush).
+     */
+    public static function recorded(string $uuid): int
+    {
+        $term = self::term($uuid);
+
+        return $term === null ? 0 : (int) get_term_meta($term['term_id'], 'revisions', true);
+    }
+
+    /**
+     * Delete batch terms whose revisions are all gone (pruned by
+     * retention or deleted), with their term meta. Terms younger than an
+     * hour are left alone: a batch being written may not have its first
+     * revision yet. Daily, with the log prune.
+     */
+    public static function pruneEmpty(int $limit = 1000): int
+    {
+        global $wpdb;
+
+        self::registerTaxonomy();
+
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT tt.term_id FROM {$wpdb->term_taxonomy} tt LEFT JOIN {$wpdb->termmeta} tm ON tm.term_id = tt.term_id AND tm.meta_key = 'time'
+             WHERE tt.taxonomy = %s AND tt.count = 0 AND (tm.meta_value IS NULL OR CAST(tm.meta_value AS UNSIGNED) < %d) LIMIT %d",
+            self::TAXONOMY,
+            time() - HOUR_IN_SECONDS,
+            $limit
+        ));
+        $deleted = 0;
+
+        foreach (is_array($ids) ? $ids : [] as $id) {
+            if (wp_delete_term((int) $id, self::TAXONOMY) === true) {
+                $deleted++;
+            }
+        }
+
+        self::$terms = [];
+
+        return $deleted;
     }
 
     public static function hooks(bool $on): void
@@ -145,6 +208,7 @@ final class Batches
         self::$importing = false;
         self::$terms = [];
         self::$fields = [];
+        self::$assigned = [];
         self::$lastUuid = null;
     }
 
@@ -250,6 +314,7 @@ final class Batches
         // INSERT with one count update per request is the lighter option).
         wp_set_object_terms($revisionId, [$term['term_id']], self::TAXONOMY, true);
         self::$lastUuid = $context['uuid'];
+        self::$assigned[$context['uuid']] = (self::$assigned[$context['uuid']] ?? 0) + 1;
     }
 
     /**
@@ -273,6 +338,15 @@ final class Batches
      */
     public static function flush(): void
     {
+        foreach (self::$assigned as $uuid => $count) {
+            $term = self::term((string) $uuid);
+
+            if ($term !== null) {
+                update_term_meta($term['term_id'], 'revisions', (int) get_term_meta($term['term_id'], 'revisions', true) + $count);
+            }
+        }
+
+        self::$assigned = [];
 
         foreach (self::$fields as $uuid => $fields) {
             $term = self::term($uuid);

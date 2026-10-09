@@ -15,7 +15,9 @@ import type { ProductListItem } from '../types/product';
 import { useHierarchyRowView, useHierarchyViewGetter } from './context';
 import type { HierarchyViewValue } from './context';
 import type { ChildrenState } from './flatten';
+import { useLayoutEffect, useRef } from '@wordpress/element';
 import { useRowPending } from '../store/save-activity';
+import { lockRowControls } from './row-lock';
 
 export const ROW_ID_PREFIX = 'wc-pl-row-';
 
@@ -118,12 +120,23 @@ export interface NameCellProps {
  * indentation by level, the chevron (or a spacer) for level 0, the
  * placeholder content for loading/error/"more" rows.
  */
-/** "Updating…" while a save in flight has not written this row (or its variations) yet; the row is locked meanwhile (style.scss). */
+/**
+ * "Updating…" while a save in flight has not finished this row (or its parent); the row is locked meanwhile: for the
+ * mouse by style.scss, for the keyboard by `lockRowControls`. Plain text, not a live region: the list's progress bar
+ * is the one place that announces the save (a status region per row would be dozens of them).
+ */
 function PendingMark( { item }: { item: ProductListItem } ) {
 	const pending = useRowPending( item.id, item.parent_id );
+	const ref = useRef< HTMLSpanElement >( null );
+
+	useLayoutEffect( () => {
+		const row = pending ? ref.current?.closest( 'tr' ) : null;
+
+		return row ? lockRowControls( row, ref.current ) : undefined;
+	}, [ pending ] );
 
 	return pending ? (
-		<span className="wc-pl-pending" role="status">
+		<span className="wc-pl-pending" ref={ ref }>
 			<span className="wc-pl-spinner" aria-hidden="true" />
 			{ __( 'Updating…', 'wp-woocommerce-products-list' ) }
 		</span>

@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 use GeneroWP\ProductsList\History\Batches;
 use GeneroWP\ProductsList\History\Compare;
 use GeneroWP\ProductsList\History\History;
+use GeneroWP\ProductsList\History\Purge;
 use GeneroWP\ProductsList\History\Restore;
 use GeneroWP\ProductsList\History\Revisions;
 use GeneroWP\ProductsList\ListMode;
@@ -282,6 +283,10 @@ class RevisionsSpikeTest extends RestTestCase
 
     public function test_translation_only_change_takes_a_revision(): void
     {
+        // Variation text is opt-in (docs/revisions.md, finding on storage).
+        add_filter(History::FILTER_OPTIONS, static fn (array $options): array => ['variation_text' => true] + $options);
+        History::resetOptions();
+
         $parent = $this->variableProduct(['38']);
         [$v38] = $parent->get_children();
         $this->ready();
@@ -296,6 +301,130 @@ class RevisionsSpikeTest extends RestTestCase
         $this->assertContains('meta:_i18n_description_se', Batches::meta($batch)['fields']);
 
         $this->assertUndoRedo($batch, [$v38 => ['meta:_i18n_description_se' => null]], [$v38 => ['meta:_i18n_description_se' => 'Bred tå']]);
+    }
+
+    public function test_variation_text_is_not_revisioned_by_default(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $this->ready();
+
+        $variation = wc_get_product($v38);
+        $variation->set_regular_price('150');
+        $variation->save();
+        $this->settle();
+        $count = count($this->revisions($v38));
+
+        $variation = wc_get_product($v38);
+        $variation->update_meta_data('_i18n_description_se', 'Bred tå');
+        $variation->set_description('Wide toe');
+        $variation->save();
+        $this->settle();
+
+        $this->assertCount($count, $this->revisions($v38), 'a text-only change of a variation takes no revision');
+        $meta = get_metadata('post', $this->revisions($v38)[0]);
+        $this->assertArrayNotHasKey('_variation_description', $meta);
+        $this->assertArrayNotHasKey('_i18n_description_se', $meta);
+        $this->assertArrayHasKey('_regular_price', $meta);
+    }
+
+    public function test_an_order_stock_change_takes_no_revision_and_no_batch(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $variation = wc_get_product($v38);
+        $variation->set_manage_stock(true);
+        $variation->set_stock_quantity(10);
+        $variation->save();
+        $this->ready();
+        $before = count($this->revisions($v38));
+        $terms = (int) wp_count_terms(['taxonomy' => Batches::TAXONOMY, 'hide_empty' => false]);
+
+        // What checkout does per order line, on the storefront.
+        wc_update_product_stock(wc_get_product($v38), 1, 'decrease');
+        wc_update_product_stock(wc_get_product($v38), 1, 'decrease');
+        $this->settle();
+
+        $this->assertSame(8, wc_get_product($v38)->get_stock_quantity());
+        $this->assertCount($before, $this->revisions($v38));
+        $this->assertSame($terms, (int) wp_count_terms(['taxonomy' => Batches::TAXONOMY, 'hide_empty' => false]));
+
+        // The app editing the stock is a change like any other.
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$parent->get_id().'/variations/'.$v38, ['stock_quantity' => 20]));
+        $this->settle();
+        $this->assertCount($before + 1, $this->revisions($v38));
+    }
+
+    public function test_the_revision_of_a_rest_save_holds_the_brands_written_after_the_save(): void
+    {
+        $brand = (int) wp_insert_term('Froddo', 'product_brand')['term_id'];
+        $product = $this->simpleProduct(['sku' => 'RB1']);
+        $this->ready();
+
+        // With a prop change: a brands-only change of an object that has no
+        // revision yet takes none (no baseline can be taken after the fact).
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['name' => 'Branded', 'brands' => [['id' => $brand]]]));
+        $this->settle();
+
+        $latest = $this->revisions($product->get_id())[0];
+        $this->assertSame([$brand], Revisions::revisionSnapshot($latest, $product->get_id())['terms']['product_brand'] ?? []);
+        $this->assertSame($this->batchId(), $this->batchOf($latest));
+    }
+
+    public function test_undo_reports_revisions_pruned_by_retention(): void
+    {
+        add_filter(History::FILTER_OPTIONS, static fn (array $options): array => ['keep_product' => 2] + $options);
+        History::resetOptions();
+        $id = $this->simpleProduct(['sku' => 'PR1'])->get_id();
+        $this->ready();
+
+        Batches::begin($batch = wp_generate_uuid4(), 'bulk');
+        $product = wc_get_product($id);
+        $product->set_sale_price('100');
+        $product->save();
+        Batches::end();
+        $this->settle();
+        $this->assertSame(0, Restore::undo($batch, ['dry' => true])['pruned']);
+
+        foreach (['101', '102', '103'] as $price) {
+            $product = wc_get_product($id);
+            $product->set_sale_price($price);
+            $product->save();
+            $this->settle();
+        }
+
+        $result = Restore::undo($batch, ['dry' => true]);
+        $this->assertSame(0, $result['total']);
+        $this->assertSame(1, $result['pruned']);
+
+        // The batch's term is empty now; an hour later the daily prune drops it.
+        $term = Batches::term($batch);
+        $this->assertSame(0, Batches::pruneEmpty());
+        update_term_meta($term['term_id'], 'time', time() - 2 * HOUR_IN_SECONDS);
+        $this->assertSame(1, Batches::pruneEmpty());
+        $this->assertNull(get_term($term['term_id'], Batches::TAXONOMY));
+    }
+
+    public function test_purge_deletes_revisions_and_batch_terms(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'PU1'])->get_id();
+        $this->ready();
+        Batches::begin(wp_generate_uuid4(), 'bulk');
+        $product = wc_get_product($id);
+        $product->set_sale_price('100');
+        $product->save();
+        Batches::end();
+        $this->settle();
+        $this->assertCount(2, $this->revisions($id));
+
+        $kept = Purge::run(true);
+        $this->assertSame(1, $kept['revisions']);
+        $this->assertCount(1, $this->revisions($id), 'the baseline is kept');
+
+        $all = Purge::run();
+        $this->assertSame(1, $all['revisions']);
+        $this->assertSame([], $this->revisions($id));
+        $this->assertSame(0, (int) wp_count_terms(['taxonomy' => Batches::TAXONOMY, 'hide_empty' => false]));
     }
 
     public function test_classic_admin_save(): void

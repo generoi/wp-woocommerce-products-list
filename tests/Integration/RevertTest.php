@@ -676,6 +676,46 @@ class RevertTest extends RestTestCase
         $this->assertSame([[$kept->get_id(), true]], array_map(static fn (array $result): array => [$result['id'], $result['ok']], $data['results']));
     }
 
+    public function test_items_whose_write_failed_are_logged_as_errors_and_not_reverted(): void
+    {
+        $kept = $this->simpleProduct(['sku' => 'OK1']);
+        $failed = $this->simpleProduct(['sku' => 'FA1']);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $kept->get_id(), 'sale_price' => '150']],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        $message = str_repeat('x', 500);
+        $response = $this->request('POST', '/wc-products-list/v1/log/skipped', [
+            'batch_id' => $this->batchId(),
+            'source' => 'bulk',
+            'items' => [['id' => $failed->get_id(), 'reason' => 'failed', 'fields' => ['sale_price'], 'message' => $message]],
+        ]);
+        $this->assertStatus(200, $response);
+
+        $rows = array_values(array_filter($this->rows($this->batchId()), static fn (array $row): bool => (int) $row['object_id'] === $failed->get_id()));
+        $this->assertCount(1, $rows);
+        $this->assertSame(Logger::STATUS_ERROR, $rows[0]['status']);
+        $this->assertSame(['reason' => 'failed', 'fields' => ['sale_price']], json_decode($rows[0]['context'], true));
+        $this->assertSame(500, mb_strlen($rows[0]['message']));
+
+        // Without a message: the default text.
+        $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => [['id' => $failed->get_id(), 'reason' => 'failed']]]);
+        $rows = array_values(array_filter($this->rows($this->batchId()), static fn (array $row): bool => (int) $row['object_id'] === $failed->get_id()));
+        $this->assertSame('Not saved: the request failed.', $rows[1]['message']);
+
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertSame(2, $batches[$this->batchId()]['errors']);
+
+        // The plan lists the failed item as failed; the revert writes only the saved one.
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $this->assertSame([$kept->get_id()], array_merge(...$plan['chunks']));
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertSame([[$kept->get_id(), true]], array_map(static fn (array $result): array => [$result['id'], $result['ok']], array_values(array_filter($data['results'], static fn (array $result): bool => $result['ok']))));
+        clean_post_cache($failed->get_id());
+        $this->assertSame('FA1', get_post_meta($failed->get_id(), '_sku', true));
+    }
+
     public function test_skipped_items_are_validated_and_stay_in_the_users_own_batch(): void
     {
         $product = $this->simpleProduct();

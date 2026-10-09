@@ -16,7 +16,9 @@ define('WC_PRODUCTS_LIST_HISTORY', 'both');
 | `both` | The log records as today. Revisions are also recorded for every product and variation save, from any path (the list, wc/v3, the classic editor, CSV import, WP-CLI, plain CRUD). Saves made by the app use the same batch id in both. |
 | `revisions` | Only revisions are recorded. The log recorder is quiet (`src/Rest/Saves.php`, the three `History::logs()` checks). The History screen still reads the log, so it shows nothing new; undo of a revisions batch is `wp wc-products-list history undo`. Porting the History screen is not part of the POC. |
 
-Retention is 50 revisions per product and 20 per variation. Change it with the `wc_products_list/history_options` filter (`keep_product`, `keep_variation`).
+Retention is 50 revisions per product and 20 per variation. Change it with the `wc_products_list/history_options` filter (`keep_product`, `keep_variation`). Retention is counted per object against every save of it that takes a revision, not per batch: a variation edited 20 more times after a campaign has lost the campaign's revision. Stock changes from orders take no revision (extension 9), so checkout no longer pushes campaigns out; edits still do. `history undo` says how many of a batch's revisions were pruned (extension 13).
+
+`history_options` also takes `variation_text` (default `false`): whether a variation's description and its translations are revisioned (extension 11).
 
 ## Comparing the two
 
@@ -36,6 +38,7 @@ The command prints:
 Other commands, available in `both` and `revisions` modes:
 - `wp wc-products-list history undo <uuid> [--dry-run] [--force]` undoes a batch from revisions, through WooCommerce CRUD. The undo is itself a batch, so undoing the undo redoes.
 - `wp wc-products-list history backfill` writes a baseline revision for every product and variation that has none. Run it before a campaign, so the campaign does not pay for baselines.
+- `wp wc-products-list history purge [--keep-baselines] [--chunk=<n>] [--yes]` deletes the revisions of every product and variation (through `wp_delete_post_revision()`, meta and batch relationships included) and every `wcpl_batch` term with its term meta, in chunks. It is available in every mode, `log` included, so a site switched back can clean up. `--keep-baselines` keeps the revisions that belong to no batch.
 
 ## What core does, and what we added
 
@@ -124,6 +127,32 @@ All of these are used as they are. Each extension below says what core does, why
 
 The plan calls for `_wp_post_revision_field_{key}` callbacks, so the product compare screen shows prices and terms. This is a small, separate step, and it's not needed to judge the data model.
 
+### 9. Stock and rating saves take no revision (needed for checkout)
+
+- **Core:** a revision is taken on every save that changes a revisioned key.
+- **Why that falls short:** `wc_update_product_stock()` (every order line) writes `_stock` with SQL and then calls `$product->save()`; reviews save the rating. Each would take a revision and a batch term per frontend request: about 45 extra queries per order line, and a campaign's revisions pushed out of retention by sales.
+- **Added:** `beforeSave()` skips the revision when the save changes nothing beyond `Revisions::DERIVED_ONLY` (stock quantity and status, date modified, total sales, rating counts) and is not in an explicit context (`explicitContext()`: the app, a REST write other than the Store API, a forced batch, WP-CLI, an import, the admin's screens). No revision means no batch term either.
+
+### 10. REST saves: the revision is taken after the insert listeners (needed for brands)
+
+- **Why:** WooCommerce Brands writes `brands` on `woocommerce_rest_insert_product_object` (priority 10), after the CRUD save, so a revision taken in `afterSave()` held the old brands.
+- **Added:** `restSaving()` on `woocommerce_rest_pre_insert_{product,product_variation}_object` (last) marks the id; `afterSave()` then defers the revision to `restInserted()` on `woocommerce_rest_insert_*` at 30 (after Brands at 10 and the log at 20). `restDone()` on `rest_request_after_callbacks` (998) takes any revision whose insert hooks never ran. A brands-only change of an object that has no revision yet takes none (no baseline can be taken after the fact).
+
+### 11. Variation text is not revisioned by default (storage)
+
+- **Why:** a variation's description and its five translations are about 5.7 KB of a 6 KB revision; a full campaign was 221–346 MB, about 53 MB without them.
+- **Added:** `metaKeys()` on core's `wp_post_revision_meta_keys` drops `_variation_description` and the `_i18n_*` keys for `product_variation` unless `history_options` `variation_text` is true. Product text stays revisioned.
+
+### 12. Cleanup (needed before any client)
+
+- **Empty batch terms:** `Batches::pruneEmpty()` runs with the daily log prune (`wc_products_list_prune_log`) and deletes `wcpl_batch` terms with no revisions left (pruned by retention), older than an hour, with their term meta.
+- **Purge:** `History\Purge::run()` (the `purge` command above).
+- **Uninstall:** `uninstall.php` (deleting the plugin in wp-admin, not deactivating) runs the purge, drops the change log table, deletes the running-batch markers and unschedules the prune. Composer removal on Bedrock does not run it.
+
+### 13. Undo reports pruned revisions
+
+- `Batches` keeps the number of revisions recorded under a batch in term meta `revisions` (written once per flush). `Restore::undo()` and `undoAll()` report `pruned` (recorded minus those still there); the CLI warns, and fails when nothing is left to undo, instead of "Success … total 0".
+
 ## What it costs (ddev, production copy: 865 products, 24,242 variations)
 
 These numbers come from the Phase 0 benchmark, a sale price on every variation. The full report has the method and the raw numbers.
@@ -158,6 +187,15 @@ These numbers come from the Phase 0 benchmark, a sale price on every variation. 
   Most of it is the variation description and its five translations: a revision carries about 5.7 KB of meta. Without those keys, a revision carries about 225 bytes of meta, and a campaign estimates at about 53 MB, measured on 5,000 variations.
 - **Batch page of 100:** 80–100 ms, against 67–93 ms for the log.
 - **Undo of 24,242 variations through CRUD:** 356 s, against a save of 309 s.
+
+### Side effects and cost to know about
+
+- **Yoast SEO** reacts to `wp_insert_post` for revisions too: two `wp_yoast_indexable` SELECTs per revision post, part of the extra queries per save in `both` mode. This is third-party behaviour; nothing in the POC asks for it.
+- **Cost (audit, isolated clone):** `both` roughly doubles save time (2,000 variations 14.1 s → 27.9 s; full catalogue, 3 writers, 99 s → 186 s) and adds 207–326 MB of postmeta per campaign with variation text revisioned. Keep `log` as the default; never enable `both` on a client store without extension 11, a retention plan and the purge in place.
+
+## Concurrency (all modes)
+
+The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lock per object for the duration of one item's save, a fresh load under the lock when the batch's primed caches are stale, refusal of trashed rows, optional expected values per item (`_wcpl_expect`, 409 `wc_products_list_conflict`), one revert per batch at a time, and a running-batch marker that blocks History's plan, check and revert of a batch still being written. In `both` mode the revision of a refused item is not taken (nothing is saved).
 
 ## Tests
 

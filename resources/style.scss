@@ -658,7 +658,8 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 	}
 }
 
-// Rows the save has not written yet: dimmed and locked (no checkbox, no quick edit) until their chunk is back.
+// Rows of a save in flight: dimmed and locked for the mouse (no checkbox, no quick edit) until the save ends.
+// The keyboard lock is hierarchy/row-lock.ts; the actions skip locked rows (actions/context.ts).
 .dataviews-view-table__row:has( .wc-pl-pending ) {
 	td {
 		opacity: 0.55;

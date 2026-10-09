@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Rest;
 
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Log\Revert;
@@ -114,6 +115,15 @@ final class LogController
             ],
         ]);
 
+        register_rest_route(Plugin::REST_NAMESPACE, '/log/batch/(?P<batch_id>[A-Za-z0-9_-]{1,64})/close', [
+            'methods' => 'POST',
+            'callback' => [$this, 'close'],
+            'permission_callback' => $writer,
+            'args' => [
+                'batch_id' => ['type' => 'string', 'required' => true],
+            ],
+        ]);
+
         register_rest_route(Plugin::REST_NAMESPACE, '/log/skipped', [
             'methods' => 'POST',
             'callback' => [$this, 'skipped'],
@@ -154,7 +164,7 @@ final class LogController
      * Why the app left an item of a batch unwritten. Each gets a log row
      * with status `skipped` so History says why an item kept its value.
      */
-    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'unchanged', 'other'];
+    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'locked', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'unchanged', 'failed', 'other'];
 
     /**
      * POST /log/skipped: record the items a save left out on the client
@@ -189,7 +199,7 @@ final class LogController
 
             $reason = (string) ($item['reason'] ?? 'other');
             $message = isset($item['message']) && is_string($item['message']) && trim($item['message']) !== ''
-                ? sanitize_text_field($item['message'])
+                ? mb_substr(sanitize_text_field($item['message']), 0, 500)
                 : self::skipMessage($reason);
             $fields = array_values(array_unique(array_filter(array_map(
                 static fn ($field): string => substr(preg_replace('/[^A-Za-z0-9_.:-]/', '', (string) $field) ?? '', 0, 100),
@@ -207,7 +217,9 @@ final class LogController
                 'object_id' => $id,
                 'parent_id' => $isVariation ? (int) $post->post_parent : 0,
                 'field' => count($fields) === 1 ? $fields[0] : '',
-                'status' => Logger::STATUS_SKIPPED,
+                // A write that failed is an error of the batch (History counts
+                // it as failed), not an item the save chose to leave out.
+                'status' => $reason === 'failed' ? Logger::STATUS_ERROR : Logger::STATUS_SKIPPED,
                 'message' => $message,
                 'context' => ['reason' => $reason] + ($fields !== [] ? ['fields' => $fields] : []),
             ];
@@ -221,18 +233,58 @@ final class LogController
         return rest_ensure_response(['batch_id' => $batchId, 'logged' => $logged, 'rows' => count($rows)]);
     }
 
+    /**
+     * POST /log/batch/{id}/close: the app's save of the batch is over
+     * (docs/contracts.md §3.6). Drops the batch's running marker, so
+     * History may plan, check and revert it at once. The writer of the
+     * batch closes it; a user with the log capability may also close
+     * (dismiss) one that is no longer running.
+     */
+    public function close(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        $batchId = (string) $request['batch_id'];
+        $marker = BatchState::get($batchId);
+
+        if ($marker !== null && $marker['user'] !== get_current_user_id()) {
+            if (BatchState::stateOf($marker) === BatchState::STATE_RUNNING || ! current_user_can(Plugin::logCapability())) {
+                return new WP_Error('wc_products_list_batch_shared', __('This batch belongs to another user.', 'wp-woocommerce-products-list'), ['status' => 403]);
+            }
+        }
+
+        return rest_ensure_response(['batch_id' => $batchId, 'closed' => BatchState::close($batchId)]);
+    }
+
+    /**
+     * 409 while the batch is still being written (a save in another tab
+     * or by another user), null otherwise.
+     */
+    public static function runningError(string $batchId): ?WP_Error
+    {
+        if (! BatchState::running($batchId)) {
+            return null;
+        }
+
+        return new WP_Error(
+            BatchState::RUNNING_ERROR,
+            __('This update is still running (in another tab or by another user). Revert it when it is done.', 'wp-woocommerce-products-list'),
+            ['status' => 409]
+        );
+    }
+
     public static function skipMessage(string $reason): string
     {
         return match ($reason) {
             'trashed' => __('Skipped: moved to the Trash meanwhile.', 'wp-woocommerce-products-list'),
             'deleted' => __('Skipped: deleted meanwhile.', 'wp-woocommerce-products-list'),
             'conflict' => __('Skipped: changed by someone else since the editor opened.', 'wp-woocommerce-products-list'),
+            'locked' => __('Skipped: another save of this item was running.', 'wp-woocommerce-products-list'),
             'no_stock_management' => __('Skipped: stock is not managed for this item.', 'wp-woocommerce-products-list'),
             'has_sale' => __('Skipped: it already had a sale.', 'wp-woocommerce-products-list'),
             'no_sale_price' => __('Skipped: it has no sale price to adjust.', 'wp-woocommerce-products-list'),
             'below_zero' => __('Skipped: the change would have gone below zero.', 'wp-woocommerce-products-list'),
             'not_applicable' => __('Skipped: the field does not apply to this item.', 'wp-woocommerce-products-list'),
             'unchanged' => __('Skipped: it already had this value.', 'wp-woocommerce-products-list'),
+            'failed' => __('Not saved: the request failed.', 'wp-woocommerce-products-list'),
             default => __('Skipped.', 'wp-woocommerce-products-list'),
         };
     }
@@ -344,6 +396,7 @@ final class LogController
         $rows = is_array($rows) ? $rows : [];
         $users = $this->users(array_column($rows, 'user_id'));
         $revertedBy = $this->revertedBy(array_column($rows, 'batch_id'));
+        $markers = BatchState::many(array_map('strval', array_column($rows, 'batch_id')));
         $actionRows = $this->actionRows(array_column($rows, 'action_row'));
         $items = [];
 
@@ -372,6 +425,10 @@ final class LogController
                 'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
                 'reverts' => (string) $row['reverts'] !== '' ? (string) $row['reverts'] : null,
                 'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
+                // `running` while the batch is still being written, `interrupted` when a
+                // save that registered its planned count stopped before it was closed.
+                'state' => BatchState::stateOf($markers[(string) $row['batch_id']] ?? null),
+                'planned' => isset($markers[(string) $row['batch_id']]) && $markers[(string) $row['batch_id']]['planned'] > 0 ? $markers[(string) $row['batch_id']]['planned'] : null,
             ];
 
             $actionRow = $actionRows[(int) ($row['action_row'] ?? 0)] ?? null;
@@ -509,37 +566,114 @@ final class LogController
 
         $batchId = (string) $request['batch_id'];
         $table = Table::name();
+        $running = self::runningError($batchId);
 
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id, IF(status = 'skipped', context, NULL) AS skip_context FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        if ($running !== null) {
+            return $running;
+        }
 
-        if (! is_array($rows) || $rows === []) {
+        // The plan from SQL: the counts, then the objects a revert writes
+        // (one row per object, by the rule of Revert::plan()), and full rows
+        // only for the rest (skipped and left-out reasons). A 24k-row batch
+        // no longer loads every row into PHP.
+        [$revertable, $values] = self::revertableCondition();
+        // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        $counts = $wpdb->get_row($wpdb->prepare(
+            "SELECT COUNT(*) AS n, SUM(status <> 'skipped') AS changes, SUM(status = 'error') AS failed, COUNT(DISTINCT user_id) AS users, COUNT(DISTINCT IF(status = 'skipped', object_id, NULL)) AS left_out FROM {$table} WHERE batch_id = %s",
+            $batchId
+        ), ARRAY_A);
+
+        if (! is_array($counts) || (int) $counts['n'] === 0) {
             return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
         }
 
-        $plan = Revert::objects($rows);
-        $ids = array_column($plan['objects'], 'id');
+        $objects = $wpdb->get_results($wpdb->prepare(
+            "SELECT object_id, object_type, parent_id, MIN(id) AS first_id FROM {$table} WHERE batch_id = %s AND {$revertable} GROUP BY object_id, object_type, parent_id ORDER BY first_id ASC",
+            array_merge([$batchId], $values)
+        ), ARRAY_A);
+        $others = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id, IF(status = 'skipped', context, NULL) AS skip_context FROM {$table} WHERE batch_id = %s AND NOT ({$revertable}) ORDER BY id ASC",
+            array_merge([$batchId], $values)
+        ), ARRAY_A);
+        // phpcs:enable
+
+        $ids = self::writeOrder(is_array($objects) ? $objects : []);
+        $others = is_array($others) ? $others : [];
+        $written = array_flip($ids);
+        $skipped = array_values(array_filter(Revert::objects($others)['skipped'], static fn (array $item): bool => ! isset($written[(int) $item['id']])));
         $chunk = Revert::chunk();
-        $users = count(array_unique(array_map('intval', array_column($rows, 'user_id'))));
+        $users = (int) $counts['users'];
 
         return rest_ensure_response([
             'batch_id' => $batchId,
             // Rows of changes (skipped rows say what was left out, they changed nothing).
-            'rows' => count(array_filter($rows, static fn (array $row): bool => $row['status'] !== Logger::STATUS_SKIPPED)),
+            'rows' => (int) $counts['changes'],
             'objects' => count($ids),
             'users' => $users,
             'chunk' => $chunk,
             'chunks' => array_chunk($ids, $chunk),
-            'skipped' => $plan['skipped'],
+            'skipped' => $skipped,
             // Rows of changes that failed when they were made: nothing to put back.
-            'failed' => count(array_filter($rows, static fn (array $row): bool => $row['status'] === 'error')),
+            'failed' => (int) $counts['failed'],
             // Items the batch left unwritten (status `skipped`): nothing to put back.
-            'left_out' => count(array_unique(array_column(array_filter($rows, static fn (array $row): bool => $row['status'] === Logger::STATUS_SKIPPED), 'object_id'))),
+            'left_out' => (int) $counts['left_out'],
             // Why they were left out: reason => items (`unchanged`: it already had the value).
-            'left_out_reasons' => self::leftOutReasons($rows),
+            'left_out_reasons' => self::leftOutReasons($others),
             'revertable' => $ids !== [] && $users <= 1,
             'reverted_by' => $this->revertedBy([$batchId])[$batchId] ?? null,
+            'state' => BatchState::state($batchId),
         ]);
+    }
+
+    /**
+     * The SQL form of Revert::plan()'s rule for a row a revert writes: an
+     * ok row with a field and an object, of a revertable action, not masked.
+     *
+     * @return array{0: string, 1: array<int, string>}
+     */
+    public static function revertableCondition(): array
+    {
+        $notRevertable = implode(',', array_fill(0, count(Revert::NOT_REVERTABLE), '%s'));
+        $masked = implode(',', array_fill(0, count(Recorder::MASKED_KEYS), '%s'));
+
+        return [
+            "(status = 'ok' AND field <> '' AND object_id <> 0 AND action NOT IN ({$notRevertable}) AND field NOT IN ({$masked}))",
+            array_merge(Revert::NOT_REVERTABLE, Recorder::MASKED_KEYS),
+        ];
+    }
+
+    /**
+     * Object ids in the order Revert::objects() writes them: products in
+     * order of their first row, then variations grouped by parent (parents
+     * in order of their first variation row).
+     *
+     * @param  array<int, array<string, mixed>>  $objects  object_id, object_type, parent_id, first_id; by first_id
+     * @return array<int, int>
+     */
+    public static function writeOrder(array $objects): array
+    {
+        $products = [];
+        $variations = [];
+
+        foreach ($objects as $object) {
+            $id = (int) $object['object_id'];
+
+            if ((string) $object['object_type'] === 'variation') {
+                $variations[(int) $object['parent_id']][$id] = $id;
+            } else {
+                $products[$id] = $id;
+            }
+        }
+
+        $ids = array_values($products);
+
+        foreach ($variations as $byId) {
+            foreach ($byId as $id) {
+                $ids[] = $id;
+            }
+        }
+
+        return array_values(array_unique($ids));
     }
 
     /**
@@ -607,6 +741,12 @@ final class LogController
             return new WP_Error('wc_products_list_batch_shared', __('This batch holds changes by more than one user and cannot be reverted as one.', 'wp-woocommerce-products-list'), ['status' => 409]);
         }
 
+        $running = self::runningError($batchId);
+
+        if ($running !== null) {
+            return $running;
+        }
+
         if ($ids === null) {
             $objects = array_column(Revert::objects($rows)['objects'], 'id');
 
@@ -627,14 +767,29 @@ final class LogController
             return new WP_Error('wc_products_list_batch_shared', __('This batch id belongs to another user.', 'wp-woocommerce-products-list'), ['status' => 409]);
         }
 
-        return rest_ensure_response(Revert::apply(
-            $rows,
-            is_string($fields) ? $fields : null,
-            is_string($revertBatchId) ? $revertBatchId : null,
-            (bool) $request->get_param('force'),
-            $batchId,
-            (bool) $request->get_param('relative')
-        ));
+        // One revert of a batch at a time: a second tab (or user) starting
+        // the same revert is told so instead of racing the first. The
+        // chunks of one revert (one revert batch id, posted side by side)
+        // share the claim.
+        $ownId = is_string($revertBatchId) && $revertBatchId !== '';
+        $claim = $ownId ? $revertBatchId : wp_generate_uuid4();
+
+        if (! Concurrency::claimRevert($batchId, $claim)) {
+            return Concurrency::revertRunningError();
+        }
+
+        try {
+            return rest_ensure_response(Revert::apply(
+                $rows,
+                is_string($fields) ? $fields : null,
+                is_string($revertBatchId) ? $revertBatchId : null,
+                (bool) $request->get_param('force'),
+                $batchId,
+                (bool) $request->get_param('relative')
+            ));
+        } finally {
+            Concurrency::releaseRevert($batchId, $claim, $ownId);
+        }
     }
 
     /**
@@ -660,6 +815,12 @@ final class LogController
                 __('ids must name between 1 and %d objects.', 'wp-woocommerce-products-list'),
                 $chunk
             ), ['status' => 400]);
+        }
+
+        $running = self::runningError($batchId);
+
+        if ($running !== null) {
+            return $running;
         }
 
         if ($ids !== null) {
@@ -717,12 +878,11 @@ final class LogController
         global $wpdb;
 
         $table = Table::name();
-        $notRevertable = implode(',', array_fill(0, count(Revert::NOT_REVERTABLE), '%s'));
-        $masked = implode(',', array_fill(0, count(Recorder::MASKED_KEYS), '%s'));
+        [$revertable, $values] = self::revertableCondition();
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT COUNT(*) AS n, COUNT(DISTINCT IF(status = 'ok' AND field <> '' AND object_id <> 0 AND action NOT IN ({$notRevertable}) AND field NOT IN ({$masked}), object_id, NULL)) AS objects FROM {$table} WHERE batch_id = %s",
-            array_merge(Revert::NOT_REVERTABLE, Recorder::MASKED_KEYS, [$batchId])
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT IF({$revertable}, object_id, NULL)) AS objects FROM {$table} WHERE batch_id = %s",
+            array_merge($values, [$batchId])
         ), ARRAY_A);
 
         return is_array($row) && (int) $row['n'] > 0 ? (int) $row['objects'] : null;

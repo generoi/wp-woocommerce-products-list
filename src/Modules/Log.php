@@ -2,6 +2,9 @@
 
 namespace GeneroWP\ProductsList\Modules;
 
+use GeneroWP\ProductsList\History\History;
+use GeneroWP\ProductsList\History\PurgeCommand;
+use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Prune;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Module;
@@ -31,8 +34,16 @@ class Log implements Module
 
         add_action(Prune::HOOK, static function (): void {
             Prune::run();
+            // Markers of batches nobody closed (docs/contracts.md §3.6).
+            BatchState::prune(Prune::retentionDays());
         });
         add_action('rest_api_init', [$this, 'registerRoutes']);
+
+        // The revisions POC's data can be removed in every mode; in `both`
+        // and `revisions` the command is part of History\Cli.
+        if (defined('WP_CLI') && WP_CLI && class_exists(\WP_CLI::class) && ! History::enabled()) {
+            \WP_CLI::add_command('wc-products-list history', PurgeCommand::class);
+        }
     }
 
     public function maybeUpgrade(): void

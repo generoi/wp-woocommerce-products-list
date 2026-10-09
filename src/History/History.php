@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\History;
 
+use GeneroWP\ProductsList\Log\Prune;
 use GeneroWP\ProductsList\Module;
 
 /**
@@ -23,7 +24,7 @@ final class History implements Module
 
     public const FILTER_OPTIONS = 'wc_products_list/history_options';
 
-    /** @var array{keep_product: int, keep_variation: int}|null */
+    /** @var array{keep_product: int, keep_variation: int, variation_text: bool}|null */
     private static ?array $options = null;
 
     /** For tests: the constant is process-wide, the suite is not. */
@@ -53,7 +54,12 @@ final class History implements Module
     }
 
     /**
-     * @return array{keep_product: int, keep_variation: int}
+     * `keep_product`, `keep_variation`: revisions kept per object (counted
+     * against every save of the object that takes one). `variation_text`:
+     * whether a variation's description and its translations are
+     * revisioned (off: they are most of a revision's size).
+     *
+     * @return array{keep_product: int, keep_variation: int, variation_text: bool}
      */
     public static function options(): array
     {
@@ -61,10 +67,14 @@ final class History implements Module
             return self::$options;
         }
 
-        /** @var array{keep_product: int, keep_variation: int} $options */
-        $options = apply_filters(self::FILTER_OPTIONS, ['keep_product' => 50, 'keep_variation' => 20]);
+        $defaults = ['keep_product' => 50, 'keep_variation' => 20, 'variation_text' => false];
+        $options = (array) apply_filters(self::FILTER_OPTIONS, $defaults) + $defaults;
 
-        return self::$options = $options;
+        return self::$options = [
+            'keep_product' => (int) $options['keep_product'],
+            'keep_variation' => (int) $options['keep_variation'],
+            'variation_text' => (bool) $options['variation_text'],
+        ];
     }
 
     public static function resetOptions(): void
@@ -98,6 +108,11 @@ final class History implements Module
     {
         Revisions::register();
         Batches::register();
+
+        // Batch terms left empty by retention pruning go with the daily log prune.
+        add_action(Prune::HOOK, static function (): void {
+            Batches::pruneEmpty();
+        });
 
         if (defined('WP_CLI') && WP_CLI && class_exists(\WP_CLI::class)) {
             \WP_CLI::add_command('wc-products-list history', Cli::class);

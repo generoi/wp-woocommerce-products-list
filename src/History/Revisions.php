@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\History;
 
+use GeneroWP\ProductsList\ListMode;
 use WC_Product;
 use WP_Post;
 
@@ -52,11 +53,28 @@ final class Revisions
     /** gds-woo-i18n's translated values, `_i18n_{field}_{lang}` (not its reviewed/machine markers). */
     public const I18N_PATTERN = '/^_i18n_(?!reviewed_|machine_).+_[a-z]{2}$/';
 
+    /**
+     * Props whose change alone takes no revision outside an explicit
+     * context: what an order (stock), a review (rating) or a sale count
+     * writes. Every checkout would otherwise add a revision per line and
+     * push a campaign's revisions out of the retention window.
+     */
+    public const DERIVED_ONLY = ['stock_quantity', 'stock_status', 'date_modified', 'total_sales', 'rating_counts', 'average_rating', 'review_count'];
+
     /** @var array<int, true> ids being saved through CRUD: core's own revision is suppressed */
     private static array $saving = [];
 
     /** @var array<int, array<int, string>> id => the fields the pending save changes */
     private static array $pendingFields = [];
+
+    /** @var array<int, true> ids whose pending save takes no revision (DERIVED_ONLY) */
+    private static array $skipping = [];
+
+    /** @var array<int, true> ids a REST controller is saving: the revision waits for its insert listeners */
+    private static array $rest = [];
+
+    /** @var array<int, array<int, string>> id => fields of a REST save whose revision is deferred */
+    private static array $deferred = [];
 
     /** @var array<int, true> spl_object_id of products being created */
     private static array $creating = [];
@@ -162,6 +180,107 @@ final class Revisions
 
         // 4. Restore through CRUD, before core's raw meta copy (10).
         $add('wp_restore_post_revision', [self::class, 'restored'], 5, 2);
+
+        // 5. A REST save: the revision is taken after the controller's insert
+        //    listeners (WooCommerce Brands writes `brands` at 10, the log at 20).
+        $add('woocommerce_rest_pre_insert_product_object', [self::class, 'restSaving'], PHP_INT_MAX, 1);
+        $add('woocommerce_rest_pre_insert_product_variation_object', [self::class, 'restSaving'], PHP_INT_MAX, 1);
+        $add('woocommerce_rest_insert_product_object', [self::class, 'restInserted'], 30, 1);
+        $add('woocommerce_rest_insert_product_variation_object', [self::class, 'restInserted'], 30, 1);
+        $add('rest_request_after_callbacks', [self::class, 'restDone'], 998, 1);
+
+        // 6. Variation descriptions and their translations are not revisioned by default.
+        $add('wp_post_revision_meta_keys', [self::class, 'metaKeys'], 10, 2);
+    }
+
+    /**
+     * `wp_post_revision_meta_keys`: without the `variation_text` option,
+     * a variation's revision leaves out its description and translations,
+     * most of a revision's size (about 5.7 KB of 6 per variation on the
+     * production copy; docs/revisions.md).
+     *
+     * @param  mixed  $keys
+     * @return mixed
+     */
+    public static function metaKeys($keys, $postType = '')
+    {
+        if ($postType !== 'product_variation' || ! is_array($keys) || History::options()['variation_text']) {
+            return $keys;
+        }
+
+        return array_values(array_filter($keys, static fn ($key): bool => $key !== '_variation_description' && preg_match(self::I18N_PATTERN, (string) $key) !== 1));
+    }
+
+    /**
+     * @param  mixed  $product
+     * @return mixed
+     */
+    public static function restSaving($product)
+    {
+        if ($product instanceof WC_Product && $product->get_id() > 0) {
+            self::$rest[$product->get_id()] = true;
+        }
+
+        return $product;
+    }
+
+    /**
+     * @param  mixed  $product
+     */
+    public static function restInserted($product): void
+    {
+        if (! $product instanceof WC_Product) {
+            return;
+        }
+
+        $id = $product->get_id();
+        unset(self::$rest[$id]);
+
+        if (array_key_exists($id, self::$deferred)) {
+            $fields = self::$deferred[$id];
+            unset(self::$deferred[$id]);
+            self::take($id, $fields);
+        }
+    }
+
+    /**
+     * The request is over: a REST save whose insert listeners never ran
+     * (an error after the save) still gets its revision.
+     *
+     * @param  mixed  $response
+     * @return mixed
+     */
+    public static function restDone($response)
+    {
+        $deferred = self::$deferred;
+        self::$deferred = [];
+        self::$rest = [];
+
+        foreach ($deferred as $id => $fields) {
+            self::take((int) $id, $fields);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Whether the save happens where a revision is wanted for any change:
+     * the app, a REST write other than the Store API, a forced batch
+     * (undo), WP-CLI, an import or the admin's own screens. Elsewhere
+     * (the storefront, a checkout, a cron job) only a change beyond
+     * DERIVED_ONLY takes one.
+     */
+    public static function explicitContext(): bool
+    {
+        $rest = ListMode::request();
+
+        return ListMode::active()
+            // A REST write (wc/v3 by an integration), but not the Store API's checkout.
+            || ($rest !== null && ! str_starts_with($rest->get_route(), '/wc/store'))
+            || Batches::forced()
+            || Batches::importingNow()
+            || (defined('WP_CLI') && WP_CLI)
+            || (is_admin() && ! wp_doing_ajax() && ! wp_doing_cron());
     }
 
     public static function isOurs(mixed $post): bool
@@ -337,6 +456,9 @@ final class Revisions
         self::$pendingFields = [];
         self::$coreCreated = [];
         self::$creating = [];
+        self::$skipping = [];
+        self::$rest = [];
+        self::$deferred = [];
     }
 
     /**
@@ -382,8 +504,20 @@ final class Revisions
         }
 
         $fields = self::changedFields($product);
+
+        // Nothing tracked changed or only DERIVED_ONLY: an order's stock change
+        // (written with SQL before the save), a review's rating. No revision, no batch term.
+        if (array_diff($fields, self::DERIVED_ONLY) === [] && ! self::explicitContext()) {
+            self::$skipping[$post->ID] = true;
+            self::$saving[$post->ID] = true;
+
+            return;
+        }
+
+        unset(self::$skipping[$post->ID]);
         self::$pendingFields[$post->ID] = $fields;
 
+        // Before the flag: while it is set, core reports no revisions (toKeep() is 0).
         if ($fields !== [] && $post->post_status !== 'auto-draft') {
             self::baseline($post);
         }
@@ -413,9 +547,33 @@ final class Revisions
             return;
         }
 
+        if (isset(self::$skipping[$id])) {
+            unset(self::$skipping[$id], self::$pendingFields[$id]);
+
+            return;
+        }
+
         $fields = self::$pendingFields[$id] ?? [];
         unset(self::$pendingFields[$id]);
 
+        if (isset(self::$rest[$id])) {
+            // After the REST controller's insert listeners (restInserted()).
+            unset(self::$rest[$id]);
+            self::$deferred[$id] = array_values(array_unique(array_merge(self::$deferred[$id] ?? [], $fields)));
+
+            return;
+        }
+
+        self::take($id, $fields);
+    }
+
+    /**
+     * Take the revision of a CRUD save (core's wp_save_post_revision()).
+     *
+     * @param  array<int, string>  $fields
+     */
+    public static function take(int $id, array $fields): void
+    {
         // Nothing changed and nothing recorded: core would take a first
         // revision of an unchanged object.
         if ($fields === [] && ! self::hasRevision($id)) {

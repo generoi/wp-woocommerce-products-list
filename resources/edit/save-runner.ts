@@ -20,7 +20,8 @@ import { isBatchItemError } from '../types';
 import type { FetchVariations } from './apply-to-variations';
 import { resolveSaveTargets, resolveSaveTargetsWith } from './apply-to-variations';
 import type { SaveTarget } from './apply-to-variations';
-import { humanizeError } from './errors';
+import { humanizeError, isConflictCode } from './errors';
+import { writeItem } from './expect';
 import { isVariation, parentIdOf } from './field-value';
 import { buildPayload, hasPayload, STOCK_DELTA_KEY } from './payload';
 import { hasSale, hasSaleEdit, hasStockGatedEdit, resolveRowEdits, saleIsActive } from './row-rules';
@@ -31,6 +32,8 @@ export interface SaveRequestOptions {
 	source: 'quick' | 'bulk';
 	/** The wc/v3 fields the returned rows are trimmed to (what the list shows); whole objects when missing. */
 	fields?: string[];
+	/** A save of several requests: the rows it writes in all (the batch stays `running` until `closeBatch`). */
+	planned?: number;
 }
 
 export interface SaveDeps {
@@ -60,6 +63,8 @@ export interface SaveDeps {
 	rereadRows?( items: ProductListItem[], fields: string[] ): Promise< Map< number, ProductListItem > >;
 	/** Run `task` on the next macrotask (tests pass a synchronous one). */
 	defer?( task: () => void ): void;
+	/** The save of a batch sent with `planned` is over (`POST /log/batch/{id}/close`); awaited before the result is returned. */
+	closeBatch?( batchId: string ): Promise< void >;
 }
 
 /**
@@ -503,7 +508,6 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		skippedItems: plan.skippedItems,
 	};
 	const total = prepared.length;
-	let done = 0;
 
 	options.onProgress?.( 0, total );
 
@@ -511,7 +515,22 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		return result;
 	}
 
-	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ) };
+	// A save of more than one row may take several requests: the server keeps the batch `running` (History will not revert it
+	// half-written) until it is closed below. One row is one request, done when it ends.
+	const planned = total > 1 && deps.closeBatch ? total : 0;
+	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ), ...( planned ? { planned } : {} ) };
+
+	try {
+		return await writePlan( deps, prepared, result, requestOptions, options, total );
+	} finally {
+		if ( planned ) {
+			await deps.closeBatch!( batchId );
+		}
+	}
+}
+
+async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResult, requestOptions: SaveRequestOptions, options: SaveOptions, total: number ): Promise< SaveResult > {
+	let done = 0;
 	const byId = new Map( prepared.map( ( entry ) => [ entry.target.item.id, entry ] ) );
 
 	/*
@@ -565,6 +584,8 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	};
 	/** Groups whose request failed as a whole with an outcome the client cannot know: re-read before they are reported. */
 	const uncertain: Array< { group: Prepared[]; message: string; code?: string } > = [];
+	/** Rows the server refused because they changed meanwhile: they show what is stored now, not the editor's old values. */
+	const conflicted: Prepared[] = [];
 
 	// One patch per response: every patch re-renders the list (and the
 	// expanded variations), so 100 rows go into the cache in one go, not 100.
@@ -582,6 +603,10 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 				if ( original ) {
 					patches.push( original.snapshot as Partial< ProductListItem > & { id: number } );
+
+					if ( isConflictCode( failed.error.code ) ) {
+						conflicted.push( original );
+					}
 				}
 
 				continue;
@@ -658,7 +683,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 				for ( const group of lane ) {
 					try {
 						const response = await across(
-							group.map( ( entry ) => ( { id: entry.target.item.id, parent_id: parentIdOf( entry.target.item ), ...entry.payload } ) ),
+							group.map( ( entry ) => ( { ...writeItem( entry.target.item, entry.payload ), parent_id: parentIdOf( entry.target.item ) } ) ),
 							requestOptions
 						);
 
@@ -679,7 +704,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 				patchSoon( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 				try {
-					const response = await deps.batchVariations( parentId, group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
+					const response = await deps.batchVariations( parentId, group.map( ( entry ) => writeItem( entry.target.item, entry.payload ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {
@@ -704,7 +729,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		await runConcurrently(
 			chunk( parents, size ).map( ( group ) => async () => {
 				try {
-					const response = await deps.batchProducts( group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
+					const response = await deps.batchProducts( group.map( ( entry ) => writeItem( entry.target.item, entry.payload ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {
@@ -722,9 +747,47 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		await settleUncertain( deps, uncertain, result, queuePatches );
 	}
 
+	if ( conflicted.length && deps.rereadRows ) {
+		await refreshConflicted( deps, conflicted, queuePatches );
+	}
+
 	flush();
 
 	return result;
+}
+
+/**
+ * Rows refused with `wc_products_list_conflict` (changed by someone else
+ * since they were loaded) are read again, so the list and a retry work on
+ * the stored values; when the read fails they keep their snapshots.
+ */
+async function refreshConflicted( deps: SaveDeps, entries: Prepared[], queuePatches: ( patches: Array< Partial< ProductListItem > & { id: number } > ) => void ): Promise< void > {
+	const keys = new Set< string >( [ 'id', 'date_modified_gmt', 'status' ] );
+
+	for ( const entry of entries ) {
+		for ( const key of Object.keys( entry.payload ) ) {
+			keys.add( key === STOCK_DELTA_KEY ? 'stock_quantity' : key );
+		}
+	}
+
+	try {
+		const fresh = await deps.rereadRows!( entries.map( ( entry ) => entry.target.item ), Array.from( keys ).sort() );
+		const patches: Array< Partial< ProductListItem > & { id: number } > = [];
+
+		for ( const entry of entries ) {
+			const row = fresh.get( entry.target.item.id );
+
+			if ( row ) {
+				patches.push( { ...withoutUntouchedImages( row as Record< string, unknown >, entry.payload ), id: entry.target.item.id } as Partial< ProductListItem > & { id: number } );
+			}
+		}
+
+		if ( patches.length ) {
+			queuePatches( patches );
+		}
+	} catch {
+		// The snapshots stay; the error already says to reload.
+	}
 }
 
 /**

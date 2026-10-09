@@ -35,6 +35,7 @@ import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
 import { getCurrentRows } from '../store/rows';
+import { beginSaveJob, finishSaveJob } from '../store/save-activity';
 import type { ProductListItem, QuickEditTab, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import { rowFields } from '../actions/context';
@@ -49,7 +50,7 @@ import { ChangeSummary, describeSiteDateTime } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
 import { measureEditorReady } from './editor-panel';
-import { fieldOfErrorCode, isGoneCode } from './errors';
+import { fieldOfErrorCode, isGoneCode, isServerLoggedCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
 import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
 import type { StagedTool } from './language-tools';
@@ -1506,6 +1507,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		const names = new Map( targetsForValidation.map( ( item ) => [ item.id, nameOf( item ) ] ) );
 		let failed = false;
+		// The list's indicator, row locks and leave-page guard start with the re-checks, not with the first write (finished below on every path).
+		let saveJob: number | undefined;
 
 		try {
 			// Rows trashed or deleted since the editor loaded them are left out and named, not written in the Trash as if nothing happened.
@@ -1514,6 +1517,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			const checkBases = runFields && bulk && hasLoadRelativeOps( pendingEdits );
 			// The rows this Update writes: the field edits' (all, or the failed ones on a retry), and the staged tools' (every row).
 			const checkItems = runFields ? ( stagedCount ? Array.from( new Map( [ ...retryTargets.items, ...items ].map( ( item ) => [ item.id, item ] ) ).values() ) : retryTargets.items ) : items;
+
+			saveJob = beginSaveJob( checkItems );
 			let changed: { trashed: number[]; missing: number[] } = { trashed: [], missing: [] };
 			let stale: ProductListItem[] = [];
 
@@ -1585,6 +1590,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						prefetchedVariations: retryTargets.prefetched,
 						...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
 						...( sharedBatch ? { batchId: sharedBatch } : {} ),
+						saveJob,
 						...rowOptions,
 						onProgress: ( done, total ) => {
 							if ( mountedRef.current ) {
@@ -1624,6 +1630,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				...changed.trashed.map( ( id ): SkippedItem => ( { id, reason: 'trashed', fields: editKeys } ) ),
 				...changed.missing.map( ( id ): SkippedItem => ( { id, reason: 'deleted', fields: editKeys } ) ),
 				...( result.skippedItems ?? [] ),
+				// The rows that did not save are recorded too: the batch in History then says which rows of the campaign are missing.
+				// (Conflicts, locks and the Trash are refused and logged by the server itself.)
+				...result.errors.filter( ( error ) => error.id > 0 && ! isServerLoggedCode( error.code ) ).map( ( error ): SkippedItem => ( { id: error.id, reason: isGoneCode( error.code ) ? 'deleted' : 'failed', fields: editKeys, message: error.message } ) ),
 			];
 
 			if ( leftOut.length ) {
@@ -1726,7 +1735,22 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// Who failed and why, always: the editor may be gone by now (its rows left the list mid-save), and the snackbar is then all there is.
 			const history = historyAction( result.batchId );
 
-			const partialActions = [ ...( updated > 0 && canUndo() ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ];
+			// With the panel closed the snackbar is all there is: it can select the rows that failed, to reopen the editor on them and retry.
+			const retryIds = Array.from( new Set( result.errors.filter( ( error ) => error.id > 0 && ! isGoneCode( error.code ) ).map( ( error ) => error.id ) ) );
+			const selectFailed =
+				! mountedRef.current && bulk && retryIds.length
+					? [
+							{
+								label: sprintf(
+									/* translators: %d: number of items that failed to save */
+									_n( 'Select the %d failed', 'Select the %d failed', retryIds.length, 'wp-woocommerce-products-list' ),
+									retryIds.length
+								),
+								onClick: () => void selectRows( retryIds ),
+							},
+					  ]
+					: [];
+			const partialActions = [ ...( updated > 0 && canUndo() ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ), ...selectFailed ];
 
 			if ( mountedRef.current ) {
 				// The editor lists who failed and why; the snackbar carries the counts and the Undo, and expires like any other.
@@ -1828,6 +1852,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				notify.error( error instanceof Error ? error.message : String( error ) );
 			}
 		} finally {
+			if ( saveJob !== undefined ) {
+				finishSaveJob( saveJob );
+			}
+
 			if ( mountedRef.current ) {
 				setSaving( false );
 

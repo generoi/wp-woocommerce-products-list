@@ -23,7 +23,7 @@ use WP_REST_Request;
  * dependency and are covered by the unit suite.
  *
  * @phpstan-type Pending array{
- *     paths: array<int, string>, before: array<string, ?string>, creating: bool,
+ *     paths: array<int, string>, watched: array<int, string>, before: array<string, ?string>, creating: bool,
  *     object_id: int, object_type: string, parent_id: int, context: array<string, mixed>,
  *     attempted: array<string, ?string>
  * }
@@ -38,7 +38,23 @@ final class Recorder
     public const INVENTORY_DELTA = 'inventory_delta';
 
     /** Request keys that are addressing, not data. */
-    public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id'];
+    public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id', '_wcpl_expect'];
+
+    /**
+     * Fields WooCommerce changes on its own when one of the keys is
+     * written: a regular price at or below the sale price clears the sale
+     * (`handle_updated_props`), and an ended schedule clears the sale and
+     * its dates. When a request writes any key of the group, all of the
+     * group's companions are snapshot and diffed too, so the side effect
+     * is logged in the same batch and a revert puts it back. Stock status
+     * is left out on purpose: it follows the quantity, which a revert
+     * restores, and an order changes it at any time.
+     */
+    public const SALE_KEYS = [
+        'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_from_gmt', 'date_on_sale_to', 'date_on_sale_to_gmt',
+    ];
+
+    public const SALE_COMPANIONS = ['sale_price', 'date_on_sale_from', 'date_on_sale_to'];
 
     /**
      * wc/v3 keys the product and variation controllers write. Arrays among
@@ -65,6 +81,16 @@ final class Recorder
     public const MASKED_KEYS = ['post_password'];
 
     public const MASK_PREFIX = '***';
+
+    /**
+     * Error codes of the concurrency checks (`Rest\Concurrency`) and the
+     * skip reason their rows are logged with.
+     */
+    public const SKIP_REASONS = [
+        'wc_products_list_conflict' => 'conflict',
+        'wc_products_list_locked' => 'locked',
+        'wc_products_list_trashed' => 'trashed',
+    ];
 
     /** @var array<int, Pending> keyed by spl_object_id of the request */
     private static array $pending = [];
@@ -147,6 +173,22 @@ final class Recorder
         }
 
         return array_values(array_unique($paths));
+    }
+
+    /**
+     * The paths a save is diffed on: the request's own, plus the
+     * companions of a sale key it writes (`SALE_KEYS`).
+     *
+     * @param  array<int, string>  $paths
+     * @return array<int, string>
+     */
+    public static function watched(array $paths): array
+    {
+        if (array_intersect($paths, self::SALE_KEYS) === []) {
+            return $paths;
+        }
+
+        return array_values(array_unique(array_merge($paths, self::SALE_COMPANIONS)));
     }
 
     /**
@@ -270,17 +312,19 @@ final class Recorder
         }
 
         $before = [];
+        $watched = self::watched($paths);
 
         if (! $creating && $product->get_id() > 0) {
             $stored = wc_get_product($product->get_id());
 
             if ($stored instanceof WC_Product) {
-                $before = self::snapshot($stored, $paths);
+                $before = self::snapshot($stored, $watched);
             }
         }
 
         self::$pending[spl_object_id($request)] = [
             'paths' => $paths,
+            'watched' => $watched,
             'before' => $before,
             'creating' => $creating,
             'object_id' => (int) $product->get_id(),
@@ -305,7 +349,7 @@ final class Recorder
 
         unset(self::$pending[$key]);
 
-        $after = self::snapshot($product, $pending['paths']);
+        $after = self::snapshot($product, $pending['watched']);
         $changes = self::diff($pending['before'], $after);
 
         if ($changes === []) {
@@ -402,12 +446,20 @@ final class Recorder
     private static function errorRows(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error, array $before = [], array $attempted = []): array
     {
         $context += ['code' => $error['code'] ?? '', 'fields' => $paths];
+        // Refused by the concurrency checks: nothing was attempted on a
+        // changed, locked or trashed row; the item is left out, not failed.
+        $reason = self::SKIP_REASONS[$error['code'] ?? ''] ?? null;
+
+        if ($reason !== null) {
+            $context['reason'] = $reason;
+        }
+
         $base = [
             'action' => $creating ? 'create' : 'update',
             'object_type' => $objectType,
             'object_id' => $objectId,
             'parent_id' => $parentId,
-            'status' => 'error',
+            'status' => $reason !== null ? Logger::STATUS_SKIPPED : 'error',
             'message' => $error['message'] ?? __('The save was rejected.', 'wp-woocommerce-products-list'),
             'context' => $context,
         ];

@@ -6,6 +6,7 @@
 import apiFetch from '@wordpress/api-fetch';
 import type { APIFetchOptions } from '@wordpress/api-fetch';
 import { applyFilters } from '@wordpress/hooks';
+import { __, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { FILTERS } from '../extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../hierarchy/normalize';
@@ -28,6 +29,8 @@ export { ApiError } from './errors';
 export const LIST_HEADER = 'X-WC-Products-List';
 export const BATCH_HEADER = 'X-WC-Products-List-Batch';
 export const SOURCE_HEADER = 'X-WC-Products-List-Source';
+/** The rows a save of several requests writes in all: the server keeps the batch `running` between them (docs/contracts.md §3.6). */
+export const PLANNED_HEADER = 'X-WC-Products-List-Batch-Planned';
 
 export type WriteSource = 'quick' | 'bulk' | 'action' | 'extension';
 
@@ -42,6 +45,8 @@ export interface RequestOptions {
 	/** One id per user gesture; generated per call when missing on a write. */
 	batchId?: string;
 	source?: WriteSource;
+	/** A save of several requests: the rows it writes in all (sent on each of them; close the batch when it ends). */
+	planned?: number;
 }
 
 export interface Term {
@@ -158,6 +163,10 @@ export interface LogBatch {
 	/** Distinct users with rows in the batch; a batch shared by more than one is not revertable. */
 	users?: number;
 	revertable: boolean;
+	/** `running` while a save still writes the batch (no revert yet), `interrupted` when a save of several requests stopped before it was closed (docs/contracts.md §3.6). */
+	state?: 'running' | 'interrupted' | null;
+	/** The rows the save planned to write, for a batch with a state. */
+	planned?: number | null;
 }
 
 export interface LogQuery {
@@ -177,7 +186,7 @@ export interface LogQuery {
 
 /** The extra keys the middleware reads off an apiFetch call. */
 interface ListModeOptions {
-	wcProductsList?: { batchId?: string; source?: WriteSource };
+	wcProductsList?: { batchId?: string; source?: WriteSource; planned?: number };
 }
 
 type Options< Parse extends boolean = boolean > = APIFetchOptions< Parse > & ListModeOptions;
@@ -211,6 +220,10 @@ export function withListHeaders< T extends Options >( options: T ): T {
 	if ( isWrite( options ) ) {
 		headers[ BATCH_HEADER ] = options.wcProductsList?.batchId ?? newBatchId();
 		headers[ SOURCE_HEADER ] = options.wcProductsList?.source ?? 'quick';
+
+		if ( options.wcProductsList?.planned ) {
+			headers[ PLANNED_HEADER ] = String( options.wcProductsList.planned );
+		}
 	}
 
 	return { ...options, headers };
@@ -250,7 +263,7 @@ export async function request( options: Options ): Promise< unknown > {
 function listMode( options: RequestOptions | undefined ): ListModeOptions & { signal?: AbortSignal } {
 	return {
 		signal: options?.signal,
-		wcProductsList: { batchId: options?.batchId, source: options?.source },
+		wcProductsList: { batchId: options?.batchId, source: options?.source, ...( options?.planned ? { planned: options.planned } : {} ) },
 	};
 }
 
@@ -885,8 +898,22 @@ export async function revertBatch( batchId: string, options?: RevertOptions ): P
 	return { ...response, items: ( response.items ?? [] ).map( ( raw ) => toRow( raw as RawProduct ) ) };
 }
 
+/**
+ * `POST /log/batch/{id}/close`: a save of several requests is over (sent
+ * with `planned`). Until then the server answers History's plan, check and
+ * revert of the batch with 409 `wc_products_list_batch_running`. Never
+ * throws: a marker left behind expires after the server's TTL.
+ */
+export async function closeBatch( batchId: string ): Promise< void > {
+	try {
+		await request( { path: `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }/close`, method: 'POST' } );
+	} catch ( error ) {
+		console.warn( '[wc-products-list] log/batch/close', error );
+	}
+}
+
 /** Why the app left an item out of a save (POST /log/skipped `reason`). */
-export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'unchanged' | 'other';
+export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'unchanged' | 'failed' | 'other';
 
 export interface SkippedItem {
 	id: number;
@@ -901,8 +928,12 @@ export const SKIPPED_CHUNK = 100;
 
 /**
  * `POST /log/skipped`: record the items a save left out as `skipped` rows
- * of its batch, so History says why they kept their value. Chunked by 100;
- * never throws (the audit trail must not break a save that worked).
+ * of its batch, so History says why they kept their value, and the items
+ * whose write failed (reason `failed`, with the error) so the batch shows
+ * which rows of a campaign did not save. Chunked by 100; never throws (the
+ * audit trail must not break a save that worked). A server that does not
+ * know `failed` yet (400 rest_invalid_param) gets those items again as
+ * `other`, their message saying they were not saved.
  */
 export async function logSkipped( batchId: string, source: WriteSource | 'revert', items: SkippedItem[] ): Promise< void > {
 	for ( let index = 0; index < items.length; index += SKIPPED_CHUNK ) {
@@ -912,11 +943,31 @@ export async function logSkipped( batchId: string, source: WriteSource | 'revert
 			...( item.fields?.length ? { fields: item.fields.slice( 0, 50 ) } : {} ),
 			...( item.message ? { message: item.message.slice( 0, 500 ) } : {} ),
 		} ) );
+		const post = ( data: typeof chunk ) => request( { path: `${ OWN }/log/skipped`, method: 'POST', data: { batch_id: batchId, source, items: data } } );
 
 		try {
-			await request( { path: `${ OWN }/log/skipped`, method: 'POST', data: { batch_id: batchId, source, items: chunk } } );
+			await post( chunk );
 		} catch ( error ) {
-			console.warn( '[wc-products-list] log/skipped', error );
+			let failure: unknown = error;
+
+			if ( error instanceof ApiError && error.code === 'rest_invalid_param' && chunk.some( ( item ) => item.reason === 'failed' ) ) {
+				try {
+					await post( chunk.map( ( item ) => ( item.reason === 'failed' ? { ...item, reason: 'other' as const, message: notSavedMessage( item.message ) } : item ) ) );
+					continue;
+				} catch ( retryError ) {
+					failure = retryError;
+				}
+			}
+
+			console.warn( '[wc-products-list] log/skipped', failure );
 		}
 	}
+}
+
+function notSavedMessage( message: string | undefined ): string {
+	return sprintf(
+		/* translators: %s: the error the write failed with */
+		__( 'Not saved: %s', 'wp-woocommerce-products-list' ),
+		message || __( 'the request failed.', 'wp-woocommerce-products-list' )
+	).slice( 0, 500 );
 }

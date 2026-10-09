@@ -4,11 +4,11 @@
  */
 import { doAction } from '@wordpress/hooks';
 import { rowFields } from '../actions/context';
-import { batchProducts, batchVariations, batchVariationsAcross, getVariations, newBatchId, toRow } from '../api/client';
+import { batchProducts, batchVariations, batchVariationsAcross, closeBatch, getVariations, newBatchId, toRow } from '../api/client';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
 import { invalidateProducts, patchItems } from '../store/products';
-import { finishSaveJob, markRowsSaved, startSaveJob, updateSaveJob } from '../store/save-activity';
+import { beginSaveJob, finishSaveJob, markRowsSaved, updateSaveJob } from '../store/save-activity';
 import { getVisibleFieldIds } from '../store/rows';
 import type { ProductField, ProductListItem } from '../types';
 import { fetchAllVariations } from './apply-to-variations';
@@ -29,13 +29,15 @@ function realDeps( jobId?: number ): SaveDeps {
 		fetchVariations: ( parentId, fields ) =>
 			fetchAllVariations( parentId, fields, ( id, page, fieldList ) => getVariations( id, page, { perPage: settings.limits.perPageMax, fields: fieldList } ) ),
 		patchItems,
-		// Every written row is editable again in the list as soon as its chunk is back.
+		// The written rows are released once every chunk is back (the runner reports them when the save ends).
 		rowsWritten: ( ids ) => {
 			if ( jobId !== undefined ) {
 				markRowsSaved( jobId, ids );
 			}
 		},
 		newBatchId,
+		// The batch of a save of several requests stays `running` on the server until this (before the snackbar offers Undo).
+		closeBatch,
 		batchSize: settings.limits.batchSize,
 		normalizeRow: toRow,
 		// After a request failed with an unknown outcome: what the rows hold now (by id; deleted rows absent).
@@ -77,34 +79,32 @@ export function saveFields( fields: ProductField[], edits: Record< string, unkno
 	return rowFields( fields.filter( ( field ) => wanted.has( field.id ) ) );
 }
 
-export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveOptions ): Promise< SaveResult > {
+export interface SaveEditsOptions extends SaveOptions {
+	/** A job from `beginSaveJob`: the save reports to it and leaves finishing it to the caller. */
+	saveJob?: number;
+}
+
+export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveEditsOptions ): Promise< SaveResult > {
 	// The rows a write returns are trimmed to what the list shows plus what
 	// was edited, never the full wc/v3 object (PHP Rows::trimBatchItem).
-	// The list shows this save's progress and locks the rows it has not written yet, also once the panel is closed.
-	// A variable parent stays locked until the whole save is done (its variations are written chunk by chunk).
-	const pending = new Set< number >();
-
-	items.forEach( ( item ) => {
-		pending.add( item.id );
-
-		if ( item.parent_id ) {
-			pending.add( item.parent_id );
-		}
-	} );
-	const jobId = startSaveJob( pending );
+	// The list shows this save's progress and locks its rows until the save ends, also once the panel is closed.
+	const { saveJob, ...saveOptions } = options;
+	const jobId = saveJob ?? beginSaveJob( items );
 	let result: SaveResult;
 
 	try {
 		result = await runSave( realDeps( jobId ), items, edits, fields, getSettings(), {
 			fields: saveFields( fields, edits ),
-			...options,
+			...saveOptions,
 			onProgress: ( done, total ) => {
 				updateSaveJob( jobId, done, total );
-				options.onProgress?.( done, total );
+				saveOptions.onProgress?.( done, total );
 			},
 		} );
 	} finally {
-		finishSaveJob( jobId );
+		if ( saveJob === undefined ) {
+			finishSaveJob( jobId );
+		}
 	}
 
 	if ( result.updated.length > 0 && changesStatus( edits ) ) {

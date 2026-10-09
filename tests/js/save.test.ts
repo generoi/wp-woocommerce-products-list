@@ -11,19 +11,20 @@ type Update = { id: number } & Record< string, unknown >;
 
 function deps( overrides: Partial< SaveDeps > = {} ): SaveDeps & { calls: string[] } {
 	const calls: string[] = [];
-	const echo = < T extends { id: number } >( update: T[] ) => ( { update: update.map( ( row ) => ( { ...row, echoed: true } ) ) } );
+	// The server never returns the expected values (`_wcpl_expect`) it was sent.
+	const echo = < T extends { id: number } >( update: T[] ) => ( { update: update.map( ( { _wcpl_expect: _expect, ...row }: T & { _wcpl_expect?: unknown } ) => ( { ...row, echoed: true } ) ) } );
 
 	return {
 		calls,
 		batchProducts: vi.fn( async ( update: Update[] ) => {
 			calls.push( `products:${ update.map( ( row ) => row.id ).join( ',' ) }` );
 
-			return echo( update ) as BatchResponse< RawProduct >;
+			return echo( update ) as unknown as BatchResponse< RawProduct >;
 		} ),
 		batchVariations: vi.fn( async ( parentId: number, update: Update[] ) => {
 			calls.push( `variations:${ parentId }:${ update.map( ( row ) => row.id ).join( ',' ) }` );
 
-			return echo( update ) as BatchResponse< RawVariation >;
+			return echo( update ) as unknown as BatchResponse< RawVariation >;
 		} ),
 		fetchVariations: vi.fn( async ( parentId: number ) => [ variation( parentId * 10 + 1, parentId, { regular_price: '100' } ), variation( parentId * 10 + 2, parentId, { regular_price: '50' } ) ] ),
 		patchItems: vi.fn(),
@@ -50,7 +51,7 @@ describe( 'runSave', () => {
 		const across = vi.fn( async ( update: Array< Update & { parent_id: number } > ) => {
 			d.calls.push( `across:${ update.map( ( row ) => `${ row.parent_id }/${ row.id }` ).join( ',' ) }` );
 
-			return { update: update.map( ( { parent_id: _parent, ...row } ) => ( { ...row, echoed: true } ) ) } as BatchResponse< RawVariation >;
+			return { update: update.map( ( { parent_id: _parent, _wcpl_expect: _expect, ...row } ) => ( { ...row, echoed: true } ) ) } as BatchResponse< RawVariation >;
 		} );
 		d.batchVariationsAcross = across;
 		const progress: Array< [ number, number ] > = [];
@@ -60,7 +61,7 @@ describe( 'runSave', () => {
 		// Grouped by parent, chunked by the cross-parent size, parents after.
 		expect( d.calls ).toEqual( [ 'across:4/41,4/42,5/51', 'across:6/61', 'products:1' ] );
 		expect( d.batchVariations ).not.toHaveBeenCalled();
-		expect( across ).toHaveBeenCalledWith( [ { id: 41, parent_id: 4, status: 'draft' }, { id: 42, parent_id: 4, status: 'draft' }, { id: 51, parent_id: 5, status: 'draft' } ], { batchId: 'batch-1', source: 'bulk' } );
+		expect( across ).toHaveBeenCalledWith( [ { id: 41, parent_id: 4, status: 'draft', _wcpl_expect: { status: 'publish' } }, { id: 42, parent_id: 4, status: 'draft', _wcpl_expect: { status: 'publish' } }, { id: 51, parent_id: 5, status: 'draft', _wcpl_expect: { status: 'publish' } } ], { batchId: 'batch-1', source: 'bulk' } );
 		expect( result.errors ).toEqual( [] );
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 51, 61, 1 ] );
 		expect( progress ).toEqual( [ [ 0, 5 ], [ 3, 5 ], [ 4, 5 ], [ 5, 5 ] ] );
@@ -88,7 +89,7 @@ describe( 'runSave', () => {
 		expect( result.errors ).toEqual( [] );
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 43, 51, 1, 2, 3 ] );
 		expect( progress ).toEqual( [ [ 0, 7 ], [ 2, 7 ], [ 3, 7 ], [ 4, 7 ], [ 6, 7 ], [ 7, 7 ] ] );
-		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 1, status: 'draft' }, { id: 2, status: 'draft' } ], { batchId: 'batch-1', source: 'bulk' } );
+		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 1, status: 'draft', _wcpl_expect: { status: 'publish' } }, { id: 2, status: 'draft', _wcpl_expect: { status: 'publish' } } ], { batchId: 'batch-1', source: 'bulk' } );
 	} );
 
 	it( 'sends product chunks side by side, cut so every slot has work, and shows every row at once', async () => {
@@ -231,6 +232,85 @@ describe( 'runSave', () => {
 		expect( second.errors[ 0 ]?.code ).toBe( 'rest_invalid_param' );
 	} );
 
+	it( 'a save of several rows sends its planned count and closes its batch before it returns; one row does not', async () => {
+		const closed: string[] = [];
+		const d = deps( { concurrency: 1, closeBatch: vi.fn( async ( id: string ) => void closed.push( id ) ) } );
+
+		d.batchProducts = vi.fn( async ( update: Update[], options ) => {
+			expect( closed ).toEqual( [] );
+
+			return { update: update.map( ( { _wcpl_expect: _expect, ...row } ) => ( { ...row, planned: options.planned } ) ) } as BatchResponse< RawProduct >;
+		} );
+
+		const result = await runSave( d, [ simple( 1 ), simple( 2 ), simple( 3 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( ( d.batchProducts as ReturnType< typeof vi.fn > ).mock.calls.every( ( call ) => call[ 1 ].planned === 3 ) ).toBe( true );
+		expect( closed ).toEqual( [ 'batch-1' ] );
+		expect( result.updated ).toHaveLength( 3 );
+
+		const single = deps( { closeBatch: vi.fn( async () => {} ) } );
+
+		await runSave( single, [ simple( 1 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		expect( ( single.batchProducts as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'batch-1', source: 'quick' } );
+		expect( single.closeBatch ).not.toHaveBeenCalled();
+	} );
+
+	it( 'closes the batch when a request throws too', async () => {
+		const d = deps( { closeBatch: vi.fn( async () => {} ), batchProducts: vi.fn( async () => { throw Object.assign( new Error( 'Nope' ), { code: 'rest_invalid_param', status: 400 } ); } ) } );
+		const result = await runSave( d, [ simple( 1 ), simple( 2 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.errors ).toHaveLength( 2 );
+		expect( d.closeBatch ).toHaveBeenCalledWith( 'batch-1' );
+	} );
+
+	it( 'sends the loaded values of the changed fields as _wcpl_expect (term ids, single meta), never for a stock delta', async () => {
+		const d = deps( { batchSize: 10 } );
+		const row = simple( 1, {
+			regular_price: '10',
+			stock_quantity: 5,
+			manage_stock: true,
+			categories: [ { id: 3, name: 'A', slug: 'a' } ],
+			meta_data: [ { id: 1, key: 'color', value: 'red' } ],
+		} );
+		const payloadOf = async ( edits: Record< string, unknown >, extra: Record< string, unknown > = {} ) => {
+			const prepared = await prepareSave( d, [ { ...row, ...extra } as ProductListItem ], edits, fields, settings, { applyToVariations: false } );
+
+			return prepared[ 0 ]!;
+		};
+		const { writeItem } = await import( '../../resources/edit/expect' );
+
+		const price = await payloadOf( { regular_price: '12' } );
+		expect( writeItem( price.target.item, price.payload ) ).toEqual( { id: 1, regular_price: '12', _wcpl_expect: { regular_price: '10' } } );
+
+		expect( writeItem( row, { categories: [ { id: 4 } ], meta_data: [ { key: 'color', value: 'blue' }, { key: 'unknown', value: 'x' } ] } ) ).toEqual( {
+			id: 1,
+			categories: [ { id: 4 } ],
+			meta_data: [ { key: 'color', value: 'blue' }, { key: 'unknown', value: 'x' } ],
+			_wcpl_expect: { categories: [ { id: 3 } ], 'meta_data.color': 'red' },
+		} );
+
+		// inventory_delta is applied to the stock as stored: an order meanwhile is not a conflict.
+		expect( writeItem( row, { inventory_delta: 2 } ) ).toEqual( { id: 1, inventory_delta: 2 } );
+	} );
+
+	it( 'shows the stored values of rows the server refused as changed meanwhile', async () => {
+		const d = deps( {
+			batchProducts: vi.fn( async ( update: Update[] ) => ( {
+				update: update.map( ( row ) => ( { id: row.id, error: { code: 'wc_products_list_conflict', message: 'Changed', data: { status: 409 } } } ) ),
+			} ) ) as unknown as SaveDeps[ 'batchProducts' ],
+			rereadRows: vi.fn( async () => new Map( [ [ 1, simple( 1, { regular_price: '15' } ) ] ] ) ),
+		} );
+		const result = await runSave( d, [ simple( 1, { regular_price: '10' } ) ], { regular_price: '12' }, fields, settings, { applyToVariations: false, source: 'quick' } );
+
+		expect( result.errors ).toEqual( [ expect.objectContaining( { id: 1, code: 'wc_products_list_conflict', message: expect.stringMatching( /someone else/ ) } ) ] );
+		expect( d.rereadRows ).toHaveBeenCalledTimes( 1 );
+
+		const last = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.at( -1 )?.[ 0 ] as Array< Record< string, unknown > >;
+
+		expect( last.at( -1 ) ).toMatchObject( { id: 1, regular_price: '15' } );
+	} );
+
 	it( 'patches optimistically, then with the returned rows', async () => {
 		const d = deps();
 		await runSave( d, [ simple( 1, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );
@@ -335,12 +415,18 @@ describe( 'runSave', () => {
 			4,
 			[
 				// Not on sale yet: "Decrease by 20 %" starts from their regular price (100 and 50).
-				{ id: 41, sale_price: '80.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
-				{ id: 42, sale_price: '40.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
+				{ id: 41, sale_price: '80.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', _wcpl_expect: { sale_price: '' } },
+				{ id: 42, sale_price: '40.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', _wcpl_expect: { sale_price: '' } },
 			],
 			{ batchId: 'batch-1', source: 'bulk' }
 		);
-		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 4, status: 'publish' }, { id: 1, sale_price: '8.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' } ], expect.anything() );
+		expect( d.batchProducts ).toHaveBeenCalledWith(
+			[
+				{ id: 4, status: 'publish', _wcpl_expect: { status: 'draft' } },
+				{ id: 1, sale_price: '8.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish', _wcpl_expect: { sale_price: '', status: 'draft' } },
+			],
+			expect.anything()
+		);
 		expect( result.errors ).toEqual( [] );
 	} );
 
@@ -348,7 +434,7 @@ describe( 'runSave', () => {
 		const d = deps( { batchSize: 50 } );
 		await runSave( d, [ variable( 4 ) ], { regular_price: { operation: 'decrease', value: '10', percent: true } }, fields, settings, { applyToVariations: true, source: 'bulk' } );
 
-		expect( d.batchVariations ).toHaveBeenCalledWith( 4, [ { id: 41, regular_price: '90.00' }, { id: 42, regular_price: '45.00' } ], expect.anything() );
+		expect( d.batchVariations ).toHaveBeenCalledWith( 4, [ { id: 41, regular_price: '90.00', _wcpl_expect: { regular_price: '100' } }, { id: 42, regular_price: '45.00', _wcpl_expect: { regular_price: '50' } } ], expect.anything() );
 		expect( d.batchProducts ).not.toHaveBeenCalled();
 	} );
 

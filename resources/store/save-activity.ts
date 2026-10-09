@@ -1,9 +1,12 @@
 /**
  * Saves in flight, for the list: a bulk update keeps running when its
  * editor panel is closed, so the list shows the progress itself and marks
- * the rows that are not written yet (they cannot be edited until they are).
+ * the rows of the save (they cannot be edited or acted on until it ends).
+ * These locks are a UX guard for this tab only; clashes with other tabs and
+ * users are detected server-side (docs/contracts.md).
  */
 import { useSyncExternalStore } from '@wordpress/element';
+import type { ProductListItem } from '../types';
 
 interface Job {
 	done: number;
@@ -84,17 +87,54 @@ export function startSaveJob( pendingIds: Iterable< number > ): number {
 	return id;
 }
 
+/**
+ * The rows a save of `items` locks in the list: the rows themselves and the
+ * parents of variations. A variable parent stays locked until the save ends.
+ */
+export function pendingRowIds( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > > ): Set< number > {
+	const pending = new Set< number >();
+
+	items.forEach( ( item ) => {
+		pending.add( item.id );
+
+		if ( item.parent_id ) {
+			pending.add( item.parent_id );
+		}
+	} );
+
+	return pending;
+}
+
+/**
+ * Start the list's indicator, row locks and leave-page guard for a save
+ * that is about to run (the editor calls it before its pre-save re-checks,
+ * so the rows are locked and leaving is guarded from the moment Update is
+ * pressed). The caller finishes it with `finishSaveJob` on every path.
+ */
+export function beginSaveJob( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > > ): number {
+	return startSaveJob( pendingRowIds( items ) );
+}
+
 export function updateSaveJob( id: number, done: number, total: number ): void {
 	const job = jobs.get( id );
 
 	if ( job ) {
+		// The job may start before the re-checks that precede the writes: the time estimate counts from the first write.
+		if ( job.total === 0 && total > 0 ) {
+			job.startedAt = Date.now();
+		}
+
 		job.done = done;
 		job.total = total;
 		emit();
 	}
 }
 
-/** These rows are written: they are editable again. */
+/**
+ * These rows are written: they are editable again. The save calls it once,
+ * when every chunk is back (a variable parent's pending id is the parent,
+ * the writes are its variations), so rows stay locked until the save ends.
+ */
 export function markRowsSaved( id: number, rowIds: Iterable< number > ): void {
 	const job = jobs.get( id );
 

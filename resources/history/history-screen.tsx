@@ -13,7 +13,7 @@ import { dateI18n } from '@wordpress/date';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { getQueryArg } from '@wordpress/url';
-import { getLog, getLogUsers, getRevertPlan } from '../api/client';
+import { ApiError, getLog, getLogUsers, getRevertPlan } from '../api/client';
 import type { LogRow as LogRowType, RevertedBy, RevertPlan } from '../api/client';
 import { notify } from '../actions/notices';
 import { DataViews } from '../dataviews';
@@ -163,6 +163,8 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
 	const [ plan, setPlan ] = useState< RevertPlan | null | 'loading' >( 'loading' );
+	// Why the plan could not be loaded, when the server said (a batch still being written, a revert already running).
+	const [ planError, setPlanError ] = useState< string | null >( null );
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
 	// Set when a pass left conflicts behind: the summary and "Revert anyway".
 	const [ outcome, setOutcome ] = useState< RevertOutcome | null >( null );
@@ -186,6 +188,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 		let cancelled = false;
 
 		setPlan( 'loading' );
+		setPlanError( null );
 
 		// What the revert writes, from the log itself: exact for any batch size, and the chunks to post.
 		getRevertPlan( batchId )
@@ -194,9 +197,11 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 					setPlan( loaded );
 				}
 			} )
-			.catch( () => {
+			.catch( ( caught: unknown ) => {
 				if ( ! cancelled ) {
 					setPlan( null );
+					// 409 wc_products_list_batch_running: the save is still writing this batch (another tab, another user).
+					setPlanError( caught instanceof ApiError && caught.status === 409 ? caught.message : null );
 				}
 			} );
 
@@ -355,7 +360,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 				) : plan ? (
 					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ) ) }</strong>
 				) : (
-					__( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
+					planError ?? __( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
 			</p>
 			{ ! outcome && check === 'loading' ? (

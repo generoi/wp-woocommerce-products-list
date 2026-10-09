@@ -4,6 +4,7 @@ namespace GeneroWP\ProductsList\Rest;
 
 use GeneroWP\ProductsList\History\History;
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Plugin;
@@ -30,6 +31,9 @@ final class Saves
      */
     public const FILTER_WRITE_KEYS = 'wc_products_list/write_keys';
 
+    /** After WooCommerce's own insert listeners (Brands at 10). */
+    public const INSERTED_PRIORITY = 20;
+
     /** @var array<int, string>|null */
     private static ?array $writeKeys = null;
 
@@ -47,8 +51,10 @@ final class Saves
 
         add_filter('woocommerce_rest_pre_insert_product_object', [self::class, 'preInsert'], 10, 3);
         add_filter('woocommerce_rest_pre_insert_product_variation_object', [self::class, 'preInsert'], 10, 3);
-        add_action('woocommerce_rest_insert_product_object', [self::class, 'inserted'], 10, 3);
-        add_action('woocommerce_rest_insert_product_variation_object', [self::class, 'inserted'], 10, 3);
+        // 20: after WooCommerce Brands writes `brands` (`rest_api_add_brands_to_product`, 10),
+        // so the recorder reads the saved brands. Rows::startSerialising stays at PHP_INT_MAX.
+        add_action('woocommerce_rest_insert_product_object', [self::class, 'inserted'], self::INSERTED_PRIORITY, 3);
+        add_action('woocommerce_rest_insert_product_variation_object', [self::class, 'inserted'], self::INSERTED_PRIORITY, 3);
 
         // Per request: the registered write keys may change between tests,
         // and snapshots that never completed are failed saves.
@@ -105,6 +111,10 @@ final class Saves
 
         self::primeBatch($request);
         self::deferTransients($request);
+
+        if (! ListMode::nested()) {
+            BatchState::begin($request);
+        }
 
         return $result;
     }
@@ -231,6 +241,15 @@ final class Saves
     public static function afterRequest($response, $handler, WP_REST_Request $request)
     {
         self::stopDeferringTransients($request);
+
+        if (! ListMode::nested()) {
+            // Whatever item lock a failed save left behind.
+            Concurrency::unlockObjects();
+
+            if ($request->get_method() !== 'GET' && ListMode::active()) {
+                BatchState::end($request);
+            }
+        }
 
         if ($request->get_method() !== 'GET' && ListMode::active()) {
             $response = self::nameSkuOwners($response, $request);
@@ -380,6 +399,18 @@ final class Saves
 
         self::forwardFields($request);
 
+        if (! $creating && $product->get_id() > 0) {
+            $guarded = self::guard($product, $request);
+
+            if (is_wp_error($guarded)) {
+                Concurrency::unlockObject($product->get_id());
+
+                return $guarded;
+            }
+
+            $product = $guarded;
+        }
+
         // POC: in `revisions` mode the field log stays quiet (docs/revisions.md).
         if (History::logs()) {
             Recorder::begin($product, $request, $creating);
@@ -411,6 +442,44 @@ final class Saves
              * @param  bool  $creating
              */
             do_action(self::ACTION_SAVE, $product, $request, $creating);
+        }
+
+        return $product;
+    }
+
+    /**
+     * The concurrency checks of one item, under its object lock
+     * (`Concurrency`, docs/contracts.md §3.6): wait for another save of
+     * the object to finish, make sure WooCommerce saves from the stored
+     * state rather than from caches primed earlier in the request, refuse
+     * a write to a trashed row, and refuse the item when a field it
+     * changes no longer has the value the editor based the change on.
+     *
+     * @return WC_Product|\WP_Error the product to save (a fresh load when the cached one was stale)
+     */
+    public static function guard(WC_Product $product, WP_REST_Request $request): WC_Product|\WP_Error
+    {
+        $id = $product->get_id();
+
+        if (! Concurrency::lockObject($id)) {
+            return Concurrency::lockedError($id);
+        }
+
+        $product = Concurrency::refresh($product);
+
+        if (Concurrency::trashed($product) && $request->get_param('status') === null) {
+            return Concurrency::trashedError($id);
+        }
+
+        $expected = Concurrency::expected($request->get_param(Concurrency::EXPECT_KEY));
+
+        if ($expected !== []) {
+            $stored = wc_get_product($id);
+            $conflicts = $stored instanceof WC_Product ? Concurrency::conflicts($stored, $expected) : [];
+
+            if ($conflicts !== []) {
+                return Concurrency::conflictError($id, $conflicts, $expected);
+            }
         }
 
         return $product;
@@ -492,7 +561,12 @@ final class Saves
 
         if (History::logs()) {
             Recorder::complete($product, $request);
+            // Per item, not per request: a request killed mid-batch (timeout,
+            // out of memory, a restart) leaves no saved item without its row.
+            Logger::flush();
         }
+
+        Concurrency::unlockObject($product->get_id());
     }
 
     /**

@@ -334,6 +334,55 @@ class SaveHookTest extends RestTestCase
         $this->assertSame([$termId], wc_get_product($good->get_id())->get_category_ids());
     }
 
+    public function test_setting_brands_is_logged_and_reverts(): void
+    {
+        $old = (int) wp_insert_term('Saga', 'product_brand')['term_id'];
+        $new = (int) wp_insert_term('Froddo', 'product_brand')['term_id'];
+        $product = $this->simpleProduct(['sku' => 'SETBRAND']);
+        wp_set_object_terms($product->get_id(), [$old], 'product_brand');
+
+        // WooCommerce Brands writes the list on `woocommerce_rest_insert_product_object`
+        // at 10; the recorder reads it after that (Saves::INSERTED_PRIORITY).
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['brands' => [['id' => $new]]]));
+        $this->assertSame([$new], array_map('intval', wp_get_object_terms($product->get_id(), 'product_brand', ['fields' => 'ids'])));
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame('brands', $rows[0]['field']);
+        $this->assertSame([['id' => $old]], json_decode((string) $rows[0]['old_value'], true));
+        $this->assertSame([['id' => $new]], json_decode((string) $rows[0]['new_value'], true));
+
+        // The same through a products batch (a bulk edit).
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'brands' => [['id' => $old]]]]], [ListMode::BATCH_HEADER => $bulk = wp_generate_uuid4()]));
+        $this->assertSame(['brands'], array_column($this->rows($bulk), 'field'));
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$bulk.'/revert', [], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $this->assertSame([$new], array_map('intval', wp_get_object_terms($product->get_id(), 'product_brand', ['fields' => 'ids'])));
+    }
+
+    public function test_a_sale_cleared_by_woocommerce_is_logged_and_put_back_by_the_revert(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '15', 'sale_price' => '12']);
+
+        // 12 >= 10: WooCommerce clears the sale in the same save.
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['regular_price' => '10']));
+        $this->assertSame('', get_post_meta($product->get_id(), '_sale_price', true));
+
+        $rows = array_column($this->rows(), null, 'field');
+        $this->assertEqualsCanonicalizing(['regular_price', 'sale_price'], array_keys($rows));
+        $this->assertSame('12', $rows['sale_price']['old_value']);
+        $this->assertSame('', (string) $rows['sale_price']['new_value']);
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', [], [ListMode::BATCH_HEADER => wp_generate_uuid4()]);
+        $this->assertStatus(200, $response);
+        $this->assertSame([true], array_column($this->data($response)['results'], 'ok'));
+
+        $restored = wc_get_product($product->get_id());
+        $this->assertSame('15', $restored->get_regular_price());
+        $this->assertSame('12', $restored->get_sale_price(), 'the sale WooCommerce cleared is back');
+        $this->assertSame('12', get_post_meta($product->get_id(), '_price', true));
+    }
+
     public function test_clearing_brands_empties_them_logs_and_reverts(): void
     {
         $brand = wp_insert_term('Saga', 'product_brand');
