@@ -47,6 +47,20 @@ Open **Products → Catalog** (`edit.php?post_type=product&page=wc-products-list
 - For a campaign on variable products: filter by brand or category, select the parents, open Bulk edit, tick **Apply price and sale fields to all variations**, set Sale price "Regular price minus %" and the schedule, check the summary, press **Update**.
 - **History** in the toolbar opens the log (`&screen=history`). `&object_id=<id>` scopes it to one product, `&batch=<uuid>` to one save.
 
+## History modes (POC)
+
+The change log (`{prefix}wc_products_list_log`) is the History and Undo of the app, and stays the default. A proof of concept records native WordPress revisions next to it, switched by a constant in `wp-config.php` (`config/application.php` on Bedrock):
+
+```php
+define('WC_PRODUCTS_LIST_HISTORY', 'both'); // log (default) | both | revisions
+```
+
+- `log` or unset: as before; the revisions module is not loaded.
+- `both`: the log as before, plus a revision for every product and variation save from any path (the list, wc/v3, the classic editor, imports, WP-CLI) under the same batch id. Compare them with `wp wc-products-list history compare --batch=<uuid>`.
+- `revisions`: revisions only; undo is `wp wc-products-list history undo <uuid>` (History's screen still reads the log).
+
+`backfill` writes baselines ahead of a campaign, `purge` removes the revisions and batch terms again (in every mode). `both` roughly doubles save time and storage per campaign, so do not enable it on a client store without a retention plan. Design, every core/WooCommerce extension and the measured cost: [docs/revisions.md](docs/revisions.md).
+
 ## Capabilities
 
 The Catalog screen and the plugin's REST routes need `edit_products` (shop managers and administrators have it; the `wc_products_list/capability` filter changes it). Saves go through WooCommerce's `wc/v3` endpoints, which have requirements of their own:
@@ -111,7 +125,8 @@ CI runs the static checks, the JS suite, a rebuild with `git diff --exit-code bu
 
 Further reading:
 
-- [docs/contracts.md](docs/contracts.md): headers, PHP hooks, REST routes, logging rules, bootstrap payload, JS boundaries.
+- [docs/contracts.md](docs/contracts.md): headers, PHP hooks, REST routes, logging rules, concurrent edits (§3.6), bootstrap payload, JS boundaries.
+- [docs/revisions.md](docs/revisions.md): the native-revisions POC (History modes) and every core/WooCommerce extension it adds.
 - [docs/hierarchy-upstream.md](docs/hierarchy-upstream.md): the hierarchy mirrors the prop names of gutenberg#83316 (`getItemParentId`, `getItemHasChildren`, `expandedItemIds`, `onChangeExpandedItemIds`) and explains how to switch once upstream ships it ([gutenberg#80360](https://github.com/WordPress/gutenberg/issues/80360)).
 - [docs/dataviews-patch.md](docs/dataviews-patch.md): the one patch applied to dataviews 20 (row re-render).
 
@@ -121,7 +136,7 @@ Further reading:
 - No row virtualisation: Expand all on a 100-per-page view expands as many parents as fit in about 600 rows, and rendering that takes several seconds; selecting or collapsing at that size blocks the tab noticeably.
 - Only the default view's list request is prefetched; deep links with search or filters wait for the bundle.
 - Per-row variation summaries cost 226–437 ms of a list request on a loaded host, and batch writes compute them once per item.
-- History's batch list aggregates the whole log table on every request; History reverts whole batches only (no single-change revert) and is a separate page load.
+- History reverts whole batches only (no single-change revert) and is a separate page load.
 - Translations: the per-product grid lives in bulk edit's language tabs (name and short description; no SEO columns, short descriptions with markup show as HTML). There is no inline per-language editing in the list itself, no EUR → SEK/NOK/DKK conversion, no attribute-term translation UI, no per-language image alt text and no per-language local attribute values.
 - Whole-krona price points (…9 / …99 kr) are not a rounding option.
 - Back/Forward do not step through in-app URL state (it uses `replaceState`).
