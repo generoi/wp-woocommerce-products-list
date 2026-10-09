@@ -39,9 +39,6 @@ final class Batches
     /** @var array<string, array{term_id: int, tt_id: int}> */
     private static array $terms = [];
 
-    /** @var array<int, int> tt_id => relationships added since the last flush */
-    private static array $counts = [];
-
     /** @var array<string, array<string, true>> uuid => fields added since the last flush */
     private static array $fields = [];
 
@@ -147,7 +144,6 @@ final class Batches
         self::$processUuid = null;
         self::$importing = false;
         self::$terms = [];
-        self::$counts = [];
         self::$fields = [];
         self::$lastUuid = null;
     }
@@ -243,8 +239,6 @@ final class Batches
 
     public static function assign(int $revisionId): void
     {
-        global $wpdb;
-
         $context = self::context();
         $term = self::ensure($context);
 
@@ -252,14 +246,9 @@ final class Batches
             return;
         }
 
-        $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$wpdb->term_relationships} (object_id, term_taxonomy_id, term_order) VALUES (%d, %d, 0)",
-            $revisionId,
-            $term['tt_id']
-        ));
-        wp_cache_delete($revisionId, self::TAXONOMY.'_relationships');
-
-        self::$counts[$term['tt_id']] = (self::$counts[$term['tt_id']] ?? 0) + 1;
+        // Core's API, count and caches included (docs/revisions.md: a direct
+        // INSERT with one count update per request is the lighter option).
+        wp_set_object_terms($revisionId, [$term['term_id']], self::TAXONOMY, true);
         self::$lastUuid = $context['uuid'];
     }
 
@@ -280,15 +269,10 @@ final class Batches
     }
 
     /**
-     * Write the term counts and field lists gathered since the last flush.
+     * Write the field lists gathered since the last flush (once per request).
      */
     public static function flush(): void
     {
-        global $wpdb;
-
-        foreach (self::$counts as $ttId => $count) {
-            $wpdb->query($wpdb->prepare("UPDATE {$wpdb->term_taxonomy} SET count = count + %d WHERE term_taxonomy_id = %d", $count, $ttId));
-        }
 
         foreach (self::$fields as $uuid => $fields) {
             $term = self::term($uuid);
@@ -303,11 +287,6 @@ final class Batches
             update_term_meta($term['term_id'], 'fields', (string) wp_json_encode($merged));
         }
 
-        if (self::$counts !== []) {
-            wp_cache_set_terms_last_changed();
-        }
-
-        self::$counts = [];
         self::$fields = [];
     }
 
