@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 - 2026-10-09
+
+- Quick and bulk edit remember the last tab used (for example Svenska) when switching to another product, opening bulk edit or reloading the page. A translation filter ("Missing in Svenska") and "Update & next" still choose the tab first.
+
 ## 0.1.7 - 2026-10-09
 
 - History: the title and the Batches / All changes switch get the same inset as the list page instead of touching the card edge.

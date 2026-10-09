@@ -92,25 +92,53 @@ const PANEL_ID = 'wc-pl-edit-panel';
 export const SAVED_NOTICE_ID = 'wc-pl-saved';
 
 /**
- * The tab "Update & next" carries to the next row's editor (fixing the
- * Swedish names one after another stays on Svenska). Any other editor opens
- * on General, or on the language of the list's translation filter: a
- * restock after a translation session must not open on Svenska.
+ * The tab the editor opens on is remembered: switching to another product,
+ * opening bulk edit or reloading the page keeps the last tab the user was on
+ * (fixing Swedish names product after product stays on Svenska). A list
+ * filtered on a translation ("Missing in Svenska") still opens on that
+ * language. "Update & next" hands its tab over explicitly as well.
  */
+const REMEMBERED_TAB_KEY = 'wcProductsList.editorTab';
+
 let carriedTab: string | null = null;
+let rememberedTab: string | null = null;
+
+function readRememberedTab(): string | null {
+	try {
+		return window.sessionStorage.getItem( REMEMBERED_TAB_KEY );
+	} catch {
+		// Private mode or blocked storage: the in-memory value covers this page.
+		return rememberedTab;
+	}
+}
+
+/** Remember the tab the user is on, for the next editor (this page and reloads in this browser tab). */
+export function rememberTab( tab: string ): void {
+	rememberedTab = tab;
+
+	try {
+		window.sessionStorage.setItem( REMEMBERED_TAB_KEY, tab );
+	} catch {
+		// Private mode or blocked storage: the in-memory value still covers this page.
+	}
+}
 
 /** Hand the open tab to the editor "Update & next" opens next. */
 export function carryTabToNext( tab: string ): void {
 	carriedTab = tab;
 }
 
-/** The tab a new editor opens on: the filter's language, else the tab carried by "Update & next", else General. */
+/**
+ * The tab a new editor opens on: the filter's language, else the tab carried
+ * by "Update & next", else the last tab used, else General. A remembered tab
+ * the editor does not have (an extension tab) falls back to the first tab.
+ */
 export function openingTab( initialTab: string | undefined | null ): string {
 	const carried = carriedTab;
 
 	carriedTab = null;
 
-	return initialTab ?? carried ?? GENERAL_TAB_ID;
+	return initialTab ?? carried ?? readRememberedTab() ?? GENERAL_TAB_ID;
 }
 
 /** How many item names a notice lists before "and N more". */
@@ -468,8 +496,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ itemsOpen, setItemsOpen ] = useState( true );
 	const selectedRows = frozenRows ?? liveRows;
 	const selectionKey = selectedRows.map( ( item ) => item.id ).join( ',' );
-	// The tab the editor opens on: the list's translation filter, else the one "Update & next" carried over, else General.
+	// The tab the editor opens on: the list's translation filter, else the one "Update & next" carried over, else the last one used, else General.
 	const [ tabId, setTabId ] = useState( () => openingTab( initialTab ) );
+
+	// Remember the open tab for the next editor (another product, bulk edit, a reload).
+	useEffect( () => {
+		rememberTab( tabId );
+	}, [ tabId ] );
 	// The same rows reloaded with the editable fields of the open tabs (the list only carries the visible columns), by id.
 	const [ hydrated, setHydrated ] = useState< ReadonlyMap< number, ProductListItem > >( () => new Map() );
 	const [ loaded, setLoaded ] = useState( false );

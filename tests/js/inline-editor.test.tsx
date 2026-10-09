@@ -547,7 +547,7 @@ describe( 'InlineEditor tabs', () => {
 		window.sessionStorage.clear();
 	} );
 
-	it( 'loads a language tab on its first visit only; the next editor opens on General', async () => {
+	it( 'loads a language tab on its first visit only; the next editor opens on the last tab used', async () => {
 		const { listProducts } = await import( '../../resources/api/client' );
 		const calls = listProducts as unknown as ReturnType< typeof vi.fn >;
 		const view = renderEditor( [ simple( 1, { name: 'One' } ) ], { fields: withLanguage } );
@@ -569,11 +569,12 @@ describe( 'InlineEditor tabs', () => {
 		expect( calls ).toHaveBeenCalledTimes( 2 );
 
 		view.unmount();
-		// A new editor (a restock after a translation session) opens on General, not on the last language used.
+		// The next editor (another product) opens on the tab used last: the owner switches products
+		// while translating and wants to stay on Svenska.
 		renderEditor( [ simple( 2, { name: 'Two' } ) ], { fields: withLanguage } );
 		await screen.findByText( 'Two' );
-		expect( screen.getByRole( 'tab', { name: 'General' } ) ).toHaveAttribute( 'aria-selected', 'true' );
-		expect( String( calls.mock.calls[ 2 ]?.[ 0 ]?._fields ) ).not.toContain( 'i18n' );
+		expect( screen.getByRole( 'tab', { name: 'SE' } ) ).toHaveAttribute( 'aria-selected', 'true' );
+		await waitFor( () => expect( String( calls.mock.calls.at( -1 )?.[ 0 ]?._fields ) ).toContain( 'i18n' ) );
 	} );
 
 	it( '"Update & next" carries the open tab to the next row\'s editor', async () => {

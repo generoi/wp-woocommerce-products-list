@@ -1,6 +1,6 @@
 {
   "name": "wp-woocommerce-products-list",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "A fast DataViews product catalog for WooCommerce",
   "license": "MIT",
