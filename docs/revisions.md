@@ -100,7 +100,7 @@ All of these are used as they are. Each extension below says what core does, why
 
 - **Core:** has no grouping of revisions across posts.
 - **Added:** `Batches.php`:
-  - a private taxonomy `wcpl_batch` on `revision`, registered at Batches.php:53;
+  - a private taxonomy `wcpl_batch` on `revision`, registered at Batches.php:50;
   - one term per batch: the app's batch id, or one per REST request, or one per process for admin, import and CLI;
   - term meta: source, user, time, `reverts` and the changed fields;
   - `assign()` uses core's `wp_set_object_terms()`.
@@ -123,6 +123,41 @@ All of these are used as they are. Each extension below says what core does, why
 ### 8. Not built: compare-screen fields
 
 The plan calls for `_wp_post_revision_field_{key}` callbacks, so the product compare screen shows prices and terms. This is a small, separate step, and it's not needed to judge the data model.
+
+## What it costs (ddev, production copy: 865 products, 24,242 variations)
+
+These numbers come from the Phase 0 benchmark, a sale price on every variation. The full report has the method and the raw numbers.
+
+- **Correctness:** `compare` matched the log for all 24,242 objects of a campaign. There were 0 key mismatches, 0 value mismatches, and the undo dry run had 0 conflicts.
+- **Queries per variation save:**
+
+  | Mode | Queries |
+  |---|---|
+  | `log` | 45 |
+  | `revisions` or `both`, first campaign (with baseline) | 100 |
+  | `revisions` or `both`, later campaigns | 89–91 |
+
+  The count did not grow over 11 campaigns.
+- **Save time:** measured on the same 3,000 variations, back to back.
+
+  | Mode | Time |
+  |---|---|
+  | `log` | 22–33 s |
+  | `revisions` | 47 s |
+  | `both` | 49–51 s |
+
+  That is +40 % to +110 %.
+- **Storage per full campaign:**
+
+  | Setup | Storage |
+  |---|---|
+  | Log | about 10 MB |
+  | Revisions, full key set, first campaign (with baseline) | about 346 MB |
+  | Revisions, full key set, later campaigns | about 221 MB |
+
+  Most of it is the variation description and its five translations: a revision carries about 5.7 KB of meta. Without those keys, a revision carries about 225 bytes of meta, and a campaign estimates at about 53 MB, measured on 5,000 variations.
+- **Batch page of 100:** 80–100 ms, against 67–93 ms for the log.
+- **Undo of 24,242 variations through CRUD:** 356 s, against a save of 309 s.
 
 ## Tests
 
