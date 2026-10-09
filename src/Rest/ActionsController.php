@@ -206,6 +206,60 @@ final class ActionsController
      */
     private function runOne(Action $action, int $id, array $args, WP_REST_Request $request, string $batchId): array
     {
+        // The object lock every list-mode save takes (Concurrency, §3.6):
+        // a delete, trash, restore or status change waits for a save of
+        // the same row in another tab or by another user, and that save
+        // waits for it, then sees the row gone or changed.
+        if (! Concurrency::lockObject($id)) {
+            return $this->locked($action, $id, $args, $batchId);
+        }
+
+        try {
+            return $this->runLocked($action, $id, $args, $request, $batchId);
+        } finally {
+            Concurrency::unlockObject($id);
+        }
+    }
+
+    /**
+     * The result and the `skipped` log row (reason `locked`) of an id
+     * whose lock was not had within `Concurrency::lockTimeout()`.
+     *
+     * @param  array<string, mixed>  $args
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>, 2: null}
+     */
+    private function locked(Action $action, int $id, array $args, string $batchId): array
+    {
+        $error = Concurrency::lockedError($id);
+        $post = get_post($id);
+        $isVariation = $post !== null && $post->post_type === 'product_variation';
+
+        return [
+            ['id' => $id, 'ok' => false, 'code' => $error->get_error_code(), 'message' => $error->get_error_message()],
+            [[
+                'batch_id' => $batchId,
+                'source' => 'action',
+                'action' => $action->id(),
+                'object_type' => $isVariation ? 'variation' : 'product',
+                'object_id' => $id,
+                'parent_id' => $isVariation ? (int) $post->post_parent : 0,
+                'field' => '',
+                'old_value' => null,
+                'new_value' => null,
+                'status' => Logger::STATUS_SKIPPED,
+                'message' => $error->get_error_message(),
+                'context' => ['reason' => 'locked', 'args' => $args, 'code' => $error->get_error_code()],
+            ]],
+            null,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $args
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>, 2: ?WC_Product}
+     */
+    private function runLocked(Action $action, int $id, array $args, WP_REST_Request $request, string $batchId): array
+    {
         $product = wc_get_product($id);
         $base = [
             'batch_id' => $batchId,

@@ -12,14 +12,20 @@
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { drafts, published } from '@wordpress/icons';
-import { batchProducts, batchVariationsAcross, newBatchId, toRow } from '../api/client';
+import { addQueryArgs } from '@wordpress/url';
+import { batchProducts, batchVariationsAcross, closeBatch, isRequestFailure, newBatchId, toRow } from '../api/client';
 import type { BatchOptions, WriteSource } from '../api/client';
-import { invalidateProducts, patchItems } from '../store/products';
+import { invalidateProducts, patchItems, removeItems } from '../store/products';
 import { isVariation, parentIdOf } from '../edit/field-value';
 import { saveFields } from '../edit/save';
 import { undoBatch } from '../edit/undo';
 import { canUndo } from '../edit/log-access';
-import { withoutUntouchedImages } from '../edit/save-runner';
+import { outcomeUnknown, UNCERTAIN_CODE, uncertainMessage, withoutUntouchedImages } from '../edit/save-runner';
+import { humanizeError, isConflictCode, isGoneCode } from '../edit/errors';
+import { writeItem } from '../edit/expect';
+import { hydrateSelection } from '../edit/hydrate';
+import { getSettings } from '../settings';
+import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import { isBatchItemError } from '../types';
 import type { BatchResponse, ProductAction, ProductField, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
@@ -52,7 +58,30 @@ function fieldList( fields: OptimisticOptions[ 'fields' ], patch: Record< string
 	return saveFields( fields as ProductField[], patch );
 }
 
-/** Patch now, send the batch, roll back the rows that failed. Resolves with the ids that were updated. */
+interface RowFailure {
+	id: number;
+	message: string;
+	code?: string;
+}
+
+/** Whether the stored row holds every value of the patch (status / featured: plain scalars). */
+function holdsPatch( row: ProductListItem, patch: Patch ): boolean {
+	return Object.entries( patch ).every( ( [ key, value ] ) => key === 'id' || ( row as Record< string, unknown > )[ key ] === value );
+}
+
+/**
+ * Patch now, send the batch, roll back the rows that failed. Resolves with the ids that were updated.
+ *
+ * It runs as a save does (docs/contracts.md §3.6): the list's save bar, row
+ * locks and leave-page guard while it runs (`beginSaveJob`); every item
+ * carries its expected value (`_wcpl_expect`, so a row another tab or user
+ * changed meanwhile is refused with `wc_products_list_conflict`, re-read
+ * and reported, never overwritten); an action of several requests sends the
+ * planned header and closes its batch at the end. A request that failed
+ * with an unknown outcome (offline, a 5xx) is settled by re-reading its rows:
+ * the rows that hold the new value count as updated (Undo covers them), the
+ * others show what is stored. Rows of the requests that went through stay updated.
+ */
 export async function optimisticBatch( items: ProductListItem[], options: OptimisticOptions ): Promise< number[] > {
 	const rows = realRows( items ).filter( ( item ) => ! options.eligible || options.eligible( item ) );
 
@@ -65,6 +94,7 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	const okIds: number[] = [];
 
 	const snapshots = new Map< number, Patch >();
+	const patchOf = new Map< number, Patch >();
 	const patches: Patch[] = [];
 
 	for ( const item of rows ) {
@@ -76,27 +106,46 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		}
 
 		snapshots.set( item.id, snapshot );
+		patchOf.set( item.id, patch );
 		patches.push( patch );
 	}
 
 	patchItems( patches );
 
+	const settings = getSettings();
 	const batchId = newBatchId();
 	const { id: _id, ...sample } = patches[ 0 ] ?? { id: 0 };
 	const fields = fieldList( options.fields, sample );
-	const requestOptions: BatchOptions = { batchId, source, ...( fields ? { fields } : {} ) };
 	const byRowId = new Map( rows.map( ( item ) => [ item.id, item ] ) );
-	const products = patches.filter( ( patch ) => {
-		const item = byRowId.get( patch.id );
-
-		return ! item || ! isVariation( item );
+	const productRows = rows.filter( ( item ) => ! isVariation( item ) );
+	const variationRows = rows.filter( ( item ) => isVariation( item ) );
+	const requests =
+		( settings.caps.editOthers === false ? variationRows.length : Math.ceil( variationRows.length / Math.max( 1, settings.limits.actionBatchSize ) ) ) +
+		Math.ceil( productRows.length / Math.max( 1, settings.limits.batchSize ) );
+	// Several requests: the server keeps the batch `running` (History will not revert it half-written) until it is closed.
+	const planned = requests > 1 ? rows.length : 0;
+	let done = 0;
+	const jobId = beginSaveJob( rows );
+	const progress = ( offset: number ) => ( answered: number ) => updateSaveJob( jobId, offset + answered, rows.length );
+	const requestOptions = ( offset: number ): BatchOptions => ( {
+		batchId,
+		source,
+		...( fields ? { fields } : {} ),
+		...( planned ? { planned } : {} ),
+		onProgress: progress( offset ),
 	} );
-	const variations = patches.filter( ( patch ) => ! products.includes( patch ) );
 
-	const failed: Array< { id: number; message: string } > = [];
+	updateSaveJob( jobId, 0, rows.length );
+
+	const failed: RowFailure[] = [];
+	/** Rows whose request failed with an unknown outcome: re-read before they are reported. */
+	const uncertain: RowFailure[] = [];
+	/** Rows refused because they changed meanwhile: re-read, so they show what is stored. */
+	const conflicted: number[] = [];
+	const rollback: Patch[] = [];
 	let ok = 0;
 
-	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: Patch[] ) => {
+	const absorb = ( response: BatchResponse< RawProduct | RawVariation >, sent: ProductListItem[] ) => {
 		const seen = new Set< number >();
 		const returned: Patch[] = [];
 
@@ -104,7 +153,18 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 			seen.add( row.id );
 
 			if ( isBatchItemError( row ) ) {
-				failed.push( { id: row.id, message: row.error.message } );
+				const { code, message } = row.error;
+
+				if ( isRequestFailure( row.error.data ) && outcomeUnknown( { status: row.error.data.status, code } ) ) {
+					uncertain.push( { id: row.id, code, message: humanizeError( code, message ) } );
+					continue;
+				}
+
+				if ( isConflictCode( code ) ) {
+					conflicted.push( row.id );
+				}
+
+				failed.push( { id: row.id, code, message: humanizeError( code, message ) } );
 			} else {
 				ok += 1;
 				okIds.push( row.id );
@@ -113,13 +173,13 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 				const parentId = item && isVariation( item ) ? parentIdOf( item ) : undefined;
 
 				// The same normalisation as a list read (hierarchy keys, the `wcProductsList.item` filter), thumbnails kept.
-				returned.push( withoutUntouchedImages( toRow( row, parentId ) as unknown as Record< string, unknown >, sent.find( ( patch ) => patch.id === row.id ) ?? {} ) as unknown as Patch );
+				returned.push( withoutUntouchedImages( toRow( row, parentId ) as unknown as Record< string, unknown >, patchOf.get( row.id ) ?? {} ) as unknown as Patch );
 			}
 		}
 
-		for ( const patch of sent ) {
-			if ( ! seen.has( patch.id ) ) {
-				failed.push( { id: patch.id, message: __( 'No result returned for this item.', 'wp-woocommerce-products-list' ) } );
+		for ( const item of sent ) {
+			if ( ! seen.has( item.id ) ) {
+				failed.push( { id: item.id, message: __( 'No result returned for this item.', 'wp-woocommerce-products-list' ) } );
 			}
 		}
 
@@ -129,46 +189,148 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		}
 	};
 
-	const fail = ( sent: Patch[], error: unknown ) => {
-		const message = errorMessage( error );
+	const fail = ( sent: ProductListItem[], error: unknown ) => {
+		const code = typeof ( error as { code?: unknown } | null )?.code === 'string' ? ( error as { code: string } ).code : undefined;
+		const message = humanizeError( code, errorMessage( error ) );
+		const into = outcomeUnknown( error ) ? uncertain : failed;
 
-		sent.forEach( ( patch ) => failed.push( { id: patch.id, message } ) );
+		sent.forEach( ( item ) => into.push( { id: item.id, message, ...( code ? { code } : {} ) } ) );
 	};
 
-	if ( variations.length ) {
-		try {
-			absorb(
-				await batchVariationsAcross(
-					variations.map( ( patch ) => {
-						const item = byRowId.get( patch.id );
+	/** The request item: the patch and the value it was based on (`_wcpl_expect`). */
+	const bodyOf = ( item: ProductListItem ) => {
+		const { id: _patchId, ...payload } = patchOf.get( item.id ) ?? { id: item.id };
 
-						return { ...patch, parent_id: item ? parentIdOf( item ) : 0 };
-					} ),
-					requestOptions
-				),
-				variations
-			);
-		} catch ( error ) {
-			fail( variations, error );
+		return writeItem( item, payload );
+	};
+
+	try {
+		if ( variationRows.length ) {
+			try {
+				absorb(
+					await batchVariationsAcross(
+						variationRows.map( ( item ) => ( { ...bodyOf( item ), parent_id: parentIdOf( item ) } ) ),
+						requestOptions( done )
+					),
+					variationRows
+				);
+			} catch ( error ) {
+				fail( variationRows, error );
+			}
+
+			done += variationRows.length;
+			updateSaveJob( jobId, done, rows.length );
 		}
+
+		if ( productRows.length ) {
+			try {
+				absorb( await batchProducts( productRows.map( bodyOf ), requestOptions( done ) ), productRows );
+			} catch ( error ) {
+				fail( productRows, error );
+			}
+
+			done += productRows.length;
+			updateSaveJob( jobId, done, rows.length );
+		}
+
+		failed.forEach( ( failure ) => {
+			const snapshot = snapshots.get( failure.id );
+
+			if ( snapshot ) {
+				rollback.push( snapshot );
+			}
+		} );
+
+		const reread = [ ...uncertain.map( ( entry ) => entry.id ), ...conflicted ];
+
+		if ( reread.length ) {
+			const keys = Array.from( new Set( [ 'id', 'date_modified_gmt', 'status', ...Object.keys( sample ) ] ) ).sort();
+			let fresh: Map< number, ProductListItem > | null = null;
+
+			try {
+				const { items: read, missing } = await hydrateSelection(
+					reread.map( ( id ) => byRowId.get( id ) ).filter( ( item ): item is ProductListItem => item !== undefined ),
+					keys
+				);
+				const gone = new Set( missing );
+
+				fresh = new Map( read.filter( ( row ) => ! gone.has( row.id ) ).map( ( row ) => [ row.id, row ] ) );
+			} catch {
+				fresh = null;
+			}
+
+			const current: Patch[] = [];
+
+			for ( const entry of uncertain ) {
+				const row = fresh?.get( entry.id );
+				const patch = patchOf.get( entry.id );
+
+				if ( ! fresh ) {
+					// Nothing is known: the row shows what it had, and the message says it may have been saved.
+					failed.push( { ...entry, message: uncertainMessage( entry.message ), code: UNCERTAIN_CODE } );
+					rollback.push( snapshots.get( entry.id ) ?? { id: entry.id } );
+					continue;
+				}
+
+				if ( ! row ) {
+					failed.push( { id: entry.id, message: humanizeError( 'woocommerce_rest_product_invalid_id', '' ), code: 'woocommerce_rest_product_invalid_id' } );
+					rollback.push( snapshots.get( entry.id ) ?? { id: entry.id } );
+					continue;
+				}
+
+				current.push( { ...withoutUntouchedImages( row as Record< string, unknown >, patch ?? {} ), id: entry.id } as Patch );
+
+				if ( patch && holdsPatch( row, patch ) ) {
+					// The write went through before the answer was lost: it is in the batch, Undo covers it.
+					ok += 1;
+					okIds.push( entry.id );
+				} else {
+					failed.push( entry );
+				}
+			}
+
+			for ( const id of conflicted ) {
+				const row = fresh?.get( id );
+
+				if ( row ) {
+					current.push( { ...withoutUntouchedImages( row as Record< string, unknown >, patchOf.get( id ) ?? {} ), id } as Patch );
+				}
+			}
+
+			// Snapshots first, then what is stored now.
+			if ( rollback.length ) {
+				patchItems( rollback.splice( 0 ) );
+			}
+
+			if ( current.length ) {
+				patchItems( current );
+			}
+		}
+
+		if ( rollback.length ) {
+			patchItems( rollback );
+		}
+	} finally {
+		if ( planned ) {
+			await closeBatch( batchId );
+		}
+
+		finishSaveJob( jobId );
 	}
 
-	if ( products.length ) {
-		try {
-			absorb( await batchProducts( products, requestOptions ), products );
-		} catch ( error ) {
-			fail( products, error );
-		}
-	}
+	// Rows deleted meanwhile (another tab or user) leave the list; the server logged them as skipped.
+	removeItems( failed.filter( ( failure ) => isGoneCode( failure.code ) ).map( ( failure ) => failure.id ) );
 
 	if ( failed.length ) {
-		patchItems( failed.map( ( failure ) => snapshots.get( failure.id ) ).filter( ( snapshot ): snapshot is Patch => snapshot !== undefined ) );
+		// A clash with another tab or user says so first: those rows now show the other change.
+		const first = failed.find( ( failure ) => isConflictCode( failure.code ) ) ?? failed[ 0 ];
+
 		notify.error(
 			sprintf(
 				/* translators: 1: number of rows that failed, 2: the first error message */
 				_n( '%1$d item could not be updated: %2$s', '%1$d items could not be updated: %2$s', failed.length, 'wp-woocommerce-products-list' ),
 				failed.length,
-				failed[ 0 ]?.message ?? ''
+				first?.message ?? ''
 			)
 		);
 	}
@@ -176,20 +338,24 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	if ( ok ) {
 		// The batch is in the change log: Undo reverts it (disable a colour's variations, feature 99 products…).
 		const noticeId = `wc-pl-action-${ batchId }`;
+		const history = settings.links.history ? [ { label: __( 'View in History', 'wp-woocommerce-products-list' ), url: addQueryArgs( settings.links.history, { batch: batchId } ) } ] : [];
 
 		notify.success( options.success( ok ), {
 			id: noticeId,
 			// A change to many items keeps its Undo until dismissed or replaced by a newer one.
 			...( ok > 1 && canUndo() ? { explicitDismiss: true } : {} ),
-			actions: ! canUndo() ? [] : [
-				{
-					label: __( 'Undo', 'wp-woocommerce-products-list' ),
-					onClick: () => {
-						notify.remove( noticeId );
-						void undoBatch( batchId );
-					},
-				},
-			],
+			actions: ! canUndo()
+				? history
+				: [
+						{
+							label: __( 'Undo', 'wp-woocommerce-products-list' ),
+							onClick: () => {
+								notify.remove( noticeId );
+								void undoBatch( batchId );
+							},
+						},
+						...history,
+				  ],
 		} );
 	}
 

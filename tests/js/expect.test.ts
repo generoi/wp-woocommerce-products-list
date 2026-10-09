@@ -48,11 +48,11 @@ describe( 'expectedValues: names', () => {
 		expect( expectedValues( row( { name: 'Pelsi' } ), { name: 'Pelsi 2' } ) ).toEqual( { name: 'Pelsi' } );
 	} );
 
-	it( 'never sends a variation\'s name: wc/v3 returns the attribute summary, the stored title has the parent\'s name in front', () => {
+	it( 'sends a variation\'s name as loaded (the wc/v3 attribute summary, which the server also accepts)', () => {
 		const item = variation( 2512, 2500, { name: 'Juli, 31' } ) as ProductListItem;
 
-		expect( expectedValues( item, { name: 'Juli, 31 X' } ) ).toBeNull();
-		expect( writeItem( item, { name: 'Juli, 31 X', regular_price: '60' } ) ).toEqual( { id: 2512, name: 'Juli, 31 X', regular_price: '60', _wcpl_expect: { regular_price: '50' } } );
+		expect( expectedValues( item, { name: 'Juli, 31 X' } ) ).toEqual( { name: 'Juli, 31' } );
+		expect( writeItem( item, { name: 'Juli, 31 X', regular_price: '60' } ) ).toEqual( { id: 2512, name: 'Juli, 31 X', regular_price: '60', _wcpl_expect: { name: 'Juli, 31', regular_price: '50' } } );
 	} );
 } );
 
@@ -106,13 +106,12 @@ describe( 'expectedValues: translations and market prices (i18n)', () => {
 } );
 
 describe( 'expectedValues: fields whose list form is not the stored one', () => {
-	it( 'sends nothing for descriptions, images, cost of goods and attributes', () => {
+	it( 'sends descriptions, images and cost of goods as loaded (the server accepts the rendered form)', () => {
 		const item = row( {
 			description: '<p>Text</p>\n',
 			short_description: '<p>Short</p>\n',
-			images: [ { id: 5 } ],
-			cost_of_goods_sold: { values: [ { defined_value: 3, effective_value: 3 } ] },
-			attributes: [ { id: 1, options: [ 'Red' ] } ],
+			images: [ { id: 5, src: 'https://example.test/5.jpg' } ],
+			cost_of_goods_sold: { values: [ { defined_value: 3, effective_value: 3 } ], total_value: 3 },
 		} );
 
 		expect(
@@ -121,9 +120,28 @@ describe( 'expectedValues: fields whose list form is not the stored one', () => 
 				short_description: 'Short 2',
 				images: [ { id: 6 } ],
 				cost_of_goods_sold: { values: [ { defined_value: 4 } ] },
-				attributes: [ { id: 1, options: [ 'Blue' ] } ],
 			} )
-		).toBeNull();
+		).toEqual( {
+			description: '<p>Text</p>\n',
+			short_description: '<p>Short</p>\n',
+			images: [ { id: 5 } ],
+			cost_of_goods_sold: { values: [ { defined_value: 3, effective_value: 3 } ], total_value: 3 },
+		} );
+	} );
+
+	it( 'sends [] for a row without an image, and nothing for an image list it cannot read', () => {
+		expect( expectedValues( row( { images: [] } ), { images: [ { id: 6 } ] } ) ).toEqual( { images: [] } );
+		expect( expectedValues( row( { images: [ { src: 'x' } ] } ), { images: [ { id: 6 } ] } ) ).toBeNull();
+	} );
+
+	it( 'sends a bare cost of goods number as loaded', () => {
+		expect( expectedValues( row( { cost_of_goods_sold: 2.5 } ), { cost_of_goods_sold: { values: [ { defined_value: 4 } ] } } ) ).toEqual( { cost_of_goods_sold: 2.5 } );
+	} );
+
+	it( 'sends nothing for attributes or extension fields (last write wins)', () => {
+		const item = row( { attributes: [ { id: 1, options: [ 'Red' ] } ], acme_extra: 'x' } );
+
+		expect( expectedValues( item, { attributes: [ { id: 1, options: [ 'Blue' ] } ], acme_extra: 'y' } ) ).toBeNull();
 	} );
 } );
 

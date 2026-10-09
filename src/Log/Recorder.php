@@ -90,6 +90,7 @@ final class Recorder
         'wc_products_list_conflict' => 'conflict',
         'wc_products_list_locked' => 'locked',
         'wc_products_list_trashed' => 'trashed',
+        'wc_products_list_deleted' => 'deleted',
     ];
 
     /** @var array<int, Pending> keyed by spl_object_id of the request */

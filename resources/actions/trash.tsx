@@ -8,11 +8,12 @@ import { useEffect, useRef, useState } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { trash } from '@wordpress/icons';
-import { runAction } from '../api/client';
+import { actionRequestCount, closeBatch, newBatchId, runAction } from '../api/client';
 import type { RenderModalProps } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
 import { captureFocusOrigin, restoreFocus, useReturnFocus } from '../edit/focus';
 import { invalidateProducts, removeItems } from '../store/products';
+import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
 import { canDelete, errorMessage, idsOf, isRealRow, nameOf, realRows, summarize } from './context';
@@ -25,13 +26,31 @@ export function needsConfirm( rows: ProductListItem[] ): boolean {
 
 const NAMES_SHOWN = 10;
 
-/** The rows leave the page at once; the request runs behind an Undo. */
-export function trashRows( rows: ProductListItem[] ): void {
+/**
+ * The rows leave the page at once; the requests run behind an Undo. While
+ * they run the list shows the save bar and guards leaving the page
+ * (`beginSaveJob`); a trash of several requests is planned and its batch
+ * closed at the end, so History never offers to revert half of it. A
+ * request that fails among several keeps the ones already done: those
+ * products are in the Trash, with Undo; the failed ones come back.
+ */
+export function trashRows( rows: ProductListItem[] ): Promise< void > {
 	const ids = idsOf( rows );
+	const batchId = newBatchId();
+	const planned = actionRequestCount( 'trash', ids.length ) > 1 ? ids.length : 0;
+	const jobId = beginSaveJob( realRows( rows ) );
 
 	removeItems( ids );
+	updateSaveJob( jobId, 0, ids.length );
 
-	void runAction( 'trash', ids, {}, { fields: [ 'id', 'status' ] } )
+	return runAction( 'trash', ids, {}, { fields: [ 'id', 'status' ], batchId, ...( planned ? { planned } : {} ), onProgress: ( done, total ) => updateSaveJob( jobId, done, total ) } )
+		.finally( async () => {
+			if ( planned ) {
+				await closeBatch( batchId );
+			}
+
+			finishSaveJob( jobId );
+		} )
 		.then( ( response ) => {
 			const { ok, failed } = summarize( response );
 
@@ -100,7 +119,7 @@ function TrashModal( { items, closeModal, onActionPerformed }: RenderModalProps<
 		}
 
 		ranRef.current = true;
-		trashRows( rows );
+		void trashRows( rows );
 		onActionPerformed?.( rows );
 		closeModal?.();
 	};

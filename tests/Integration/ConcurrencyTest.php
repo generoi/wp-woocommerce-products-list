@@ -262,6 +262,200 @@ class ConcurrencyTest extends RestTestCase
         $this->assertSame([], Concurrency::heldObjects());
     }
 
+    /**
+     * Delete a row the way another process would: gone from the database,
+     * still in this request's caches.
+     */
+    private function deleteBehindTheCache(int $id): void
+    {
+        global $wpdb;
+
+        $wpdb->delete($wpdb->posts, ['ID' => $id]);
+        $wpdb->delete($wpdb->postmeta, ['post_id' => $id]);
+        $wpdb->delete($wpdb->wc_product_meta_lookup, ['product_id' => $id]);
+    }
+
+    private function metaRows(int $id): int
+    {
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE post_id = %d", $id));
+    }
+
+    private function lookupRows(int $id): int
+    {
+        global $wpdb;
+
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->wc_product_meta_lookup} WHERE product_id = %d", $id));
+    }
+
+    public function test_a_variation_deleted_for_good_while_a_batch_runs_is_skipped_and_nothing_is_written_for_it(): void
+    {
+        $parent = $this->variableProduct(['38', '39', '40']);
+        [$v38, $v39, $v40] = $parent->get_children();
+
+        add_filter('woocommerce_rest_pre_insert_product_variation_object', function ($object) use ($v38, $v39) {
+            static $done = false;
+
+            if (! $done && $object instanceof \WC_Product && $object->get_id() === $v38) {
+                $done = true;
+                $this->deleteBehindTheCache($v39);
+            }
+
+            return $object;
+        }, 1);
+
+        $response = $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', ['update' => [
+            ['id' => $v38, 'regular_price' => '12'],
+            ['id' => $v39, 'regular_price' => '12'],
+            ['id' => $v40, 'regular_price' => '12'],
+        ]], [Logger::SOURCE_HEADER => 'bulk']);
+
+        $this->assertStatus(200, $response);
+        $items = $this->data($response)['update'];
+        $this->assertSame(Concurrency::DELETED_ERROR, $items[1]['error']['code']);
+        $this->assertArrayNotHasKey('error', $items[2], 'the rest of the batch carries on');
+        $this->assertSame(0, $this->metaRows($v39), 'no orphan meta');
+        $this->assertSame(0, $this->lookupRows($v39), 'no orphan lookup row');
+        $this->assertSame('12', get_post_meta($v40, '_regular_price', true));
+
+        $skipped = array_values(array_filter($this->rows(), static fn (array $row): bool => (int) $row['object_id'] === $v39));
+        $this->assertNotEmpty($skipped);
+        $this->assertSame(Logger::STATUS_SKIPPED, $skipped[0]['status']);
+        $this->assertSame('deleted', json_decode((string) $skipped[0]['context'], true)['reason']);
+        $this->assertSame([], Concurrency::heldObjects());
+    }
+
+    public function test_a_product_deleted_for_good_while_a_products_batch_runs_is_skipped(): void
+    {
+        $first = $this->simpleProduct(['regular_price' => '15']);
+        $gone = $this->simpleProduct(['regular_price' => '15']);
+
+        add_filter('woocommerce_rest_pre_insert_product_object', function ($object) use ($first, $gone) {
+            static $done = false;
+
+            if (! $done && $object instanceof \WC_Product && $object->get_id() === $first->get_id()) {
+                $done = true;
+                $this->deleteBehindTheCache($gone->get_id());
+            }
+
+            return $object;
+        }, 1);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $first->get_id(), 'regular_price' => '12'],
+            ['id' => $gone->get_id(), 'regular_price' => '12'],
+        ]], [Logger::SOURCE_HEADER => 'bulk']);
+
+        $this->assertStatus(200, $response);
+        $this->assertSame(Concurrency::DELETED_ERROR, $this->data($response)['update'][1]['error']['code']);
+        $this->assertSame(0, $this->metaRows($gone->get_id()));
+        $this->assertSame(0, $this->lookupRows($gone->get_id()));
+        $this->assertSame('12', get_post_meta($first->get_id(), '_regular_price', true));
+    }
+
+    public function test_row_actions_wait_for_a_save_of_the_row_and_give_up_on_a_held_lock(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        add_filter(Concurrency::FILTER_LOCK_TIMEOUT, static fn (): int => 0);
+
+        $name = Concurrency::lockName('o', (string) $product->get_id());
+        $this->assertSame('1', (string) $this->other()->query("SELECT GET_LOCK('{$name}', 0)")->fetch_row()[0]);
+
+        foreach (['trash', 'draft'] as $action) {
+            $response = $this->request('POST', '/wc-products-list/v1/actions/'.$action, ['ids' => [$product->get_id()]]);
+            $this->assertStatus(200, $response);
+            $data = $this->data($response);
+            $this->assertFalse($data['results'][0]['ok'], $action);
+            $this->assertSame(Concurrency::LOCKED_ERROR, $data['results'][0]['code']);
+            $row = $this->rows($data['batch_id'])[0];
+            $this->assertSame(Logger::STATUS_SKIPPED, $row['status']);
+            $this->assertSame('locked', json_decode((string) $row['context'], true)['reason']);
+        }
+
+        clean_post_cache($product->get_id());
+        $this->assertSame('publish', get_post_status($product->get_id()));
+
+        $this->other()->query("SELECT RELEASE_LOCK('{$name}')");
+        $response = $this->request('POST', '/wc-products-list/v1/actions/trash', ['ids' => [$product->get_id()]]);
+        $this->assertTrue($this->data($response)['results'][0]['ok']);
+        $this->assertSame('trash', get_post_status($product->get_id()));
+        $this->assertSame([], Concurrency::heldObjects(), 'the action let its lock go');
+    }
+
+    public function test_expected_values_in_the_form_wc_v3_shows_them_match_the_stored_value(): void
+    {
+        // Cost of goods is a WooCommerce feature; its getters warn while it is off.
+        update_option('woocommerce_feature_cost_of_goods_sold_enabled', 'yes');
+
+        $product = $this->simpleProduct(['description' => "First line.\n\nSecond line.", 'short_description' => 'Short one.', 'image_id' => 0]);
+        $id = $product->get_id();
+        $image = self::factory()->attachment->create_object(['file' => 'a.jpg', 'post_mime_type' => 'image/jpeg', 'post_parent' => $id]);
+        $gallery = self::factory()->attachment->create_object(['file' => 'b.jpg', 'post_mime_type' => 'image/jpeg', 'post_parent' => $id]);
+        $product = wc_get_product($id);
+        $product->set_image_id($image);
+        $product->set_gallery_image_ids([$gallery]);
+        $product->save();
+        $stored = wc_get_product($id);
+
+        $rendered = wpautop(do_shortcode("First line.\n\nSecond line."));
+        $short = apply_filters('woocommerce_short_description', 'Short one.');
+
+        foreach ([
+            'description' => [$rendered, "First line.\n\nSecond line."],
+            'short_description' => [$short, 'Short one.'],
+            'images' => [wp_json_encode([['id' => $image]]), wp_json_encode([['id' => $image], ['id' => $gallery]])],
+            'cost_of_goods_sold' => [wp_json_encode(['values' => [['defined_value' => 0, 'effective_value' => 0]], 'total_value' => 0]), '0'],
+        ] as $path => $forms) {
+            foreach ($forms as $form) {
+                $this->assertSame([], Concurrency::conflicts($stored, [$path => $form]), $path.': '.$form);
+            }
+        }
+
+        foreach ([
+            'description' => '<p>Someone else wrote this.</p>',
+            'short_description' => 'Another short one.',
+            'images' => wp_json_encode([['id' => $gallery]]),
+            'cost_of_goods_sold' => wp_json_encode(['values' => [['defined_value' => 4.5]]]),
+        ] as $path => $value) {
+            $this->assertArrayHasKey($path, Concurrency::conflicts($stored, [$path => $value]), $path);
+        }
+
+        $this->assertNull(Concurrency::cogsNumber('{"other":1}'));
+        $this->assertSame(4.5, Concurrency::cogsNumber('{"value":"4.5"}'));
+        $this->assertSame(7.0, Concurrency::cogsNumber('{"values":[{"defined_value":3},{"defined_value":4}]}'));
+    }
+
+    public function test_a_description_saved_by_someone_else_is_a_conflict_through_rest(): void
+    {
+        $product = $this->simpleProduct(['description' => 'Original.']);
+        $id = $product->get_id();
+        $loaded = wpautop(do_shortcode('Original.'));
+
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['description' => 'Mine.', Concurrency::EXPECT_KEY => ['description' => $loaded]]));
+        $this->assertSame('Mine.', get_post($id)->post_content);
+
+        // The other tab still has "Original." loaded.
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['description' => 'Theirs.', Concurrency::EXPECT_KEY => ['description' => $loaded]]);
+        $this->assertStatus(409, $response);
+        $this->assertSame(Concurrency::CONFLICT_ERROR, $this->data($response)['code']);
+        clean_post_cache($id);
+        $this->assertSame('Mine.', get_post($id)->post_content);
+    }
+
+    public function test_a_variation_name_matches_as_wc_v3_shows_it(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $variation = wc_get_product($v38);
+        $this->assertInstanceOf(\WC_Product_Variation::class, $variation);
+        $summary = wc_get_formatted_variation($variation, true, false, false);
+
+        $this->assertSame([], Concurrency::conflicts($variation, ['name' => $summary]));
+        $this->assertSame([], Concurrency::conflicts($variation, ['name' => $variation->get_name('edit')]));
+        $this->assertArrayHasKey('name', Concurrency::conflicts($variation, ['name' => 'Size: 99']));
+    }
+
     public function test_a_revert_leaves_alone_an_edit_made_while_it_runs(): void
     {
         $a = $this->simpleProduct(['regular_price' => '20']);

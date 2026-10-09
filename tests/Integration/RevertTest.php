@@ -64,6 +64,30 @@ class RevertTest extends RestTestCase
         return $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batch), ARRAY_A); // phpcs:ignore
     }
 
+    public function test_reverting_a_variation_menu_order_back_to_zero_writes_it(): void
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        [$v38, $v39] = $parent->get_children();
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', [
+            'update' => [['id' => $v38, 'menu_order' => 1], ['id' => $v39, 'menu_order' => 2]],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+        $this->assertSame(1, wc_get_product($v38)->get_menu_order());
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert');
+        $this->assertStatus(200, $response);
+        $this->assertSame([true, true], array_column($this->data($response)['results'], 'ok'));
+
+        // WooCommerce's variations controller alone would skip the 0 (`if ( $request['menu_order'] )`).
+        clean_post_cache($v38);
+        $this->assertSame(0, (int) get_post_field('menu_order', $v38));
+        $this->assertSame(0, (int) get_post_field('menu_order', $v39));
+
+        $rows = $this->rows($this->data($response)['batch_id']);
+        $this->assertSame(['menu_order', 'menu_order'], array_column($rows, 'field'));
+        $this->assertSame(['0', '0'], array_column($rows, 'new_value'));
+    }
+
     public function test_reverting_a_bulk_sale_restores_products_and_variations(): void
     {
         $simple = $this->simpleProduct(['sku' => 'S1']);

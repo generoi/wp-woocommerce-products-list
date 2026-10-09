@@ -411,6 +411,13 @@ final class Saves
             $product = $guarded;
         }
 
+        // WooCommerce's variations controller skips a falsy `menu_order`
+        // (`if ( $request['menu_order'] )`), so a bulk "change to 0" or the
+        // revert of a "+1" would report success and change nothing.
+        if ($product instanceof \WC_Product_Variation && isset($request['menu_order']) && is_numeric($request['menu_order']) && (int) $request['menu_order'] === 0) {
+            $product->set_menu_order(0);
+        }
+
         // POC: in `revisions` mode the field log stays quiet (docs/revisions.md).
         if (History::logs()) {
             Recorder::begin($product, $request, $creating);
@@ -452,7 +459,9 @@ final class Saves
      * (`Concurrency`, docs/contracts.md §3.6): wait for another save of
      * the object to finish, make sure WooCommerce saves from the stored
      * state rather than from caches primed earlier in the request, refuse
-     * a write to a trashed row, and refuse the item when a field it
+     * a write to a trashed row or one deleted meanwhile (404
+     * `wc_products_list_deleted`, logged as skipped with reason
+     * `deleted`), and refuse the item when a field it
      * changes no longer has the value the editor based the change on.
      *
      * @return WC_Product|\WP_Error the product to save (a fresh load when the cached one was stale)
@@ -466,6 +475,10 @@ final class Saves
         }
 
         $product = Concurrency::refresh($product, $request);
+
+        if ($product === null) {
+            return Concurrency::deletedError($id);
+        }
 
         if (Concurrency::trashed($product) && $request->get_param('status') === null) {
             return Concurrency::trashedError($id);

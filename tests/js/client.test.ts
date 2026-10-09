@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import apiFetch from '@wordpress/api-fetch';
-import { batchProducts, batchVariations, listProducts, runAction } from '../../resources/api/client';
+import { batchProducts, batchVariations, batchVariationsAcross, isRequestFailure, listProducts, REQUEST_FAILED_KEY, runAction } from '../../resources/api/client';
+import { isBatchItemError } from '../../resources/types';
 import { setSettings } from '../../resources/settings';
 import { editSettings } from './edit-fixtures';
 
@@ -10,6 +11,9 @@ vi.mock( '@wordpress/api-fetch', () => {
 
 	return { default: fn };
 } );
+
+// A failed request is reported through apiFetch too: not part of what these tests count.
+vi.mock( '../../resources/api/report-error', () => ( { reportClientError: vi.fn(), shouldReportApiError: () => false } ) );
 
 const fetchMock = apiFetch as unknown as ReturnType< typeof vi.fn >;
 
@@ -163,5 +167,95 @@ describe( 'runAction chunking', () => {
 
 		expect( trashed.results.map( ( row ) => row.id ) ).toEqual( [ 1, 2, 3, 4, 5 ] );
 		expect( calls().map( ( call ) => ( call.data as { ids: number[] } ).ids ) ).toEqual( [ [ 1, 2, 3 ], [ 1, 2 ], [ 3 ], [ 4, 5 ] ] );
+	} );
+} );
+
+describe( 'a request that fails among several', () => {
+	const offline = { code: 'fetch_error', message: 'You are probably offline.' };
+
+	beforeEach( () => {
+		fetchMock.mockReset();
+	} );
+	afterEach( () => setSettings( undefined ) );
+
+	it( 'keeps the rows of the requests that went through; the failed request\'s rows come back as marked per-row errors', async () => {
+		setSettings( editSettings( { limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 50, actionBatchSize: 100 } } ) );
+		let call = 0;
+		fetchMock.mockImplementation( async ( options: { data: { update: Array< { id: number } > } } ) => {
+			call += 1;
+
+			if ( call === 2 ) {
+				throw offline;
+			}
+
+			return { update: options.data.update.map( ( row ) => ( { id: row.id, status: 'private' } ) ) };
+		} );
+
+		const rows = Array.from( { length: 250 }, ( _, index ) => ( { id: 1001 + index, parent_id: 7, status: 'private' } ) );
+		const progress: number[] = [];
+		const result = await batchVariationsAcross( rows, { batchId: 'b', source: 'action', onProgress: ( done ) => progress.push( done ) } );
+
+		expect( fetchMock ).toHaveBeenCalledTimes( 3 );
+		expect( result.update ).toHaveLength( 250 );
+
+		const errors = ( result.update ?? [] ).filter( isBatchItemError );
+		expect( errors.map( ( row ) => row.id ) ).toEqual( rows.slice( 100, 200 ).map( ( row ) => row.id ) );
+		expect( errors[ 0 ]?.error ).toMatchObject( { code: 'fetch_error', message: 'You are probably offline.', data: { [ REQUEST_FAILED_KEY ]: true, status: 0 } } );
+		expect( isRequestFailure( errors[ 0 ]?.error.data ) ).toBe( true );
+		expect( progress ).toEqual( [ 100, 200, 250 ] );
+	} );
+
+	it( 'throws when no request got an answer, and for a single request as before', async () => {
+		setSettings( editSettings( { limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 2, actionBatchSize: 100 } } ) );
+		fetchMock.mockRejectedValue( offline );
+
+		await expect( batchProducts( [ { id: 1 }, { id: 2 }, { id: 3 } ] ) ).rejects.toMatchObject( { code: 'fetch_error' } );
+		await expect( batchProducts( [ { id: 1 } ] ) ).rejects.toMatchObject( { code: 'fetch_error' } );
+		await expect( batchVariations( 9, [ { id: 91 }, { id: 92 }, { id: 93 } ] ) ).rejects.toMatchObject( { code: 'fetch_error' } );
+	} );
+
+	it( 'stops after an abort: the request aborted and those not sent fail, the answered ones stand', async () => {
+		setSettings( editSettings( { limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 1, actionBatchSize: 100 } } ) );
+		let call = 0;
+		fetchMock.mockImplementation( async ( options: { data: { update: Array< { id: number } > } } ) => {
+			call += 1;
+
+			if ( call === 2 ) {
+				throw { name: 'AbortError', message: 'aborted' };
+			}
+
+			return { update: options.data.update };
+		} );
+
+		const result = await batchProducts( [ { id: 1 }, { id: 2 }, { id: 3 } ] );
+
+		expect( fetchMock ).toHaveBeenCalledTimes( 2 );
+		expect( result.update?.map( ( row ) => [ row.id, isBatchItemError( row ) ] ) ).toEqual( [ [ 1, false ], [ 2, true ], [ 3, true ] ] );
+	} );
+
+	it( 'runAction keeps the answered chunks and fails only the ids of the failed request', async () => {
+		setSettings( editSettings( { limits: { perPageMax: 100, maxChildrenPerParent: 1000, batchSize: 100, actionBatchSize: 100, actionBatchSizes: { trash: 2 } } } ) );
+		let call = 0;
+		fetchMock.mockImplementation( async ( options: { data: { ids: number[] } } ) => {
+			call += 1;
+
+			if ( call === 2 ) {
+				throw offline;
+			}
+
+			return { results: options.data.ids.map( ( id ) => ( { id, ok: true } ) ), items: [] };
+		} );
+
+		const progress: number[] = [];
+		const result = await runAction( 'trash', [ 1, 2, 3, 4, 5 ], {}, { onProgress: ( done ) => progress.push( done ) } );
+
+		expect( result.results.map( ( row ) => [ row.id, row.ok ] ) ).toEqual( [ [ 1, true ], [ 2, true ], [ 3, false ], [ 4, false ], [ 5, true ] ] );
+		expect( result.results[ 2 ] ).toMatchObject( { code: 'fetch_error', message: 'You are probably offline.', data: { [ REQUEST_FAILED_KEY ]: true } } );
+		expect( progress ).toEqual( [ 2, 4, 5 ] );
+
+		fetchMock.mockReset();
+		fetchMock.mockRejectedValue( offline );
+		await expect( runAction( 'trash', [ 1, 2, 3 ] ) ).rejects.toMatchObject( { code: 'fetch_error' } );
+		await expect( runAction( 'trash', [ 1 ] ) ).rejects.toMatchObject( { code: 'fetch_error' } );
 	} );
 } );

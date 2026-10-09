@@ -10,6 +10,7 @@ use GeneroWP\ProductsList\History\Restore;
 use GeneroWP\ProductsList\History\Revisions;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Table;
+use GeneroWP\ProductsList\Rest\Concurrency;
 use WC_Product;
 
 /**
@@ -766,6 +767,64 @@ class RevisionsSpikeTest extends RestTestCase
         $undo = Restore::undoAll($batch);
         $this->assertSame(1, $undo['conflicts']);
         $this->assertSame('140', get_post_meta($id, '_sale_price', true));
+    }
+
+    /**
+     * The undo checks each object against the stored state under its
+     * object lock, not against the caches it primed for the chunk: a save
+     * made by another process since then is a conflict, not overwritten.
+     */
+    public function test_undo_sees_a_save_made_behind_its_primed_caches(): void
+    {
+        global $wpdb;
+
+        $id = $this->simpleProduct(['sku' => 'UL1'])->get_id();
+        $this->ready();
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '31']));
+        $this->settle();
+        $batch = $this->batchId();
+
+        // This process has the batch's value cached; another one stores 45.
+        $this->assertSame('31', get_post_meta($id, '_regular_price', true));
+        $wpdb->update($wpdb->postmeta, ['meta_value' => '45'], ['post_id' => $id, 'meta_key' => '_regular_price']);
+
+        $undo = Restore::undo($batch);
+        $this->assertSame([], $undo['restored'], wp_json_encode($undo));
+        $this->assertSame($id, $undo['conflicts'][0]['id'] ?? null);
+        $this->settle();
+        $this->assertSame('45', get_post_meta($id, '_regular_price', true), 'the other save stays');
+        $this->assertSame([], Concurrency::heldObjects());
+    }
+
+    public function test_undo_skips_an_object_another_save_holds(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'UL2'])->get_id();
+        $this->ready();
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '32']));
+        $this->settle();
+        $batch = $this->batchId();
+
+        add_filter(Concurrency::FILTER_LOCK_TIMEOUT, static fn (): int => 0);
+        $other = new \mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME);
+        $name = Concurrency::lockName('o', (string) $id);
+
+        try {
+            $this->assertSame('1', (string) $other->query("SELECT GET_LOCK('{$name}', 0)")->fetch_row()[0]);
+
+            $undo = Restore::undo($batch);
+            $this->assertSame([['id' => $id, 'reason' => 'locked']], $undo['skipped']);
+            $this->assertSame('32', get_post_meta($id, '_regular_price', true));
+
+            $this->assertSame([$id], Restore::undo($batch, ['dry' => true])['restored'], 'a dry run takes no lock');
+        } finally {
+            $other->query("SELECT RELEASE_LOCK('{$name}')");
+            $other->close();
+        }
+
+        $undo = Restore::undo($batch);
+        $this->assertSame([$id], $undo['restored'], wp_json_encode($undo));
+        $this->settle();
+        $this->assertSame('189', get_post_meta($id, '_regular_price', true));
     }
 
     public function test_core_restore_button_goes_through_crud(): void

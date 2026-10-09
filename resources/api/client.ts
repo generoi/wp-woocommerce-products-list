@@ -12,6 +12,7 @@ import { FILTERS } from '../extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../hierarchy/normalize';
 import { getSettings } from '../settings';
 import type {
+	BatchItemError,
 	BatchResponse,
 	ProductListItem,
 	ProductUpdate,
@@ -553,6 +554,86 @@ export interface BatchOptions extends RequestOptions {
 	 * would trim `{update: [...]}` itself and the app would get `{}`.
 	 */
 	fields?: string[];
+	/** After each request of a call that takes several: the rows answered so far, of all. */
+	onProgress?( done: number, total: number ): void;
+}
+
+/**
+ * The `data` key of a per-row error (or failed action result) the client
+ * made itself for a row whose whole request failed, in a call of several
+ * requests: the requests before and after it still count. Its `status` is
+ * the request's (0: no answer, the write may have been stored anyway).
+ */
+export const REQUEST_FAILED_KEY = 'wcpl_request_failed';
+
+/** Whether a per-row error stands for its whole request failing (see REQUEST_FAILED_KEY). */
+export function isRequestFailure( data: unknown ): data is { [ REQUEST_FAILED_KEY ]: true; status: number } {
+	return typeof data === 'object' && data !== null && ( data as Record< string, unknown > )[ REQUEST_FAILED_KEY ] === true;
+}
+
+function requestFailure( id: number, error: unknown ): BatchItemError {
+	const apiError = error instanceof ApiError ? error : null;
+
+	return {
+		id,
+		error: {
+			code: apiError?.code ?? 'request_failed',
+			message: error instanceof Error ? error.message : String( error ),
+			data: { [ REQUEST_FAILED_KEY ]: true, status: apiError?.status ?? 0 },
+		},
+	};
+}
+
+/**
+ * Send `parts` one request after the other. One request: a failure throws,
+ * as ever. Several: a failed request does not throw away the ones already
+ * answered, its rows come back as per-row errors marked REQUEST_FAILED_KEY
+ * and the next request is still sent (an abort stops the rest, which fail
+ * the same way); it throws only when no request got an answer, so nothing
+ * was written for sure.
+ */
+async function sendChunks< Row extends { id: number }, Item >(
+	parts: Row[][],
+	send: ( part: Row[] ) => Promise< BatchResponse< Item > >,
+	options?: BatchOptions
+): Promise< BatchResponse< Item > > {
+	const total = parts.reduce( ( sum, part ) => sum + part.length, 0 );
+	let result: BatchResponse< Item > = { update: [] };
+	let answered = false;
+	let firstError: unknown = null;
+	let done = 0;
+
+	for ( let index = 0; index < parts.length; index++ ) {
+		const part = parts[ index ]!;
+
+		try {
+			result = mergeBatch( result, await send( part ) );
+			answered = true;
+		} catch ( error ) {
+			if ( parts.length === 1 ) {
+				throw error;
+			}
+
+			firstError ??= error;
+
+			const rest = isAbortError( error ) ? parts.slice( index ).flat() : part;
+
+			result = mergeBatch( result, { update: rest.map( ( row ) => requestFailure( row.id, error ) ) } );
+
+			if ( rest !== part ) {
+				break;
+			}
+		}
+
+		done += part.length;
+		options?.onProgress?.( done, total );
+	}
+
+	if ( ! answered && firstError ) {
+		throw firstError;
+	}
+
+	return result;
 }
 
 function batchPath( path: string, options?: BatchOptions ): string {
@@ -591,23 +672,22 @@ function singleWritesOnly(): boolean {
 /** `products/batch` in sequential chunks of `limits.batchSize`, one batch id. */
 export async function batchProducts( update: ProductUpdate[], options?: BatchOptions ): Promise< BatchResponse< RawProduct > > {
 	const batchId = options?.batchId ?? newBatchId();
-	let result: BatchResponse< RawProduct > = { update: [] };
 
 	if ( update.length === 1 && update[ 0 ] && singleWritesOnly() ) {
 		return singleWrite< RawProduct >( `${ PRODUCTS }/${ update[ 0 ].id }`, update[ 0 ], { ...options, batchId } );
 	}
 
-	for ( const part of chunk( update, getSettings().limits.batchSize ) ) {
-		const response = await request< BatchResponse< RawProduct > >( {
-			path: batchPath( `${ PRODUCTS }/batch`, options ),
-			method: 'POST',
-			data: { update: part },
-			...listMode( { ...options, batchId } ),
-		} );
-		result = mergeBatch( result, response );
-	}
-
-	return result;
+	return sendChunks(
+		chunk( update, getSettings().limits.batchSize ),
+		( part ) =>
+			request< BatchResponse< RawProduct > >( {
+				path: batchPath( `${ PRODUCTS }/batch`, options ),
+				method: 'POST',
+				data: { update: part },
+				...listMode( { ...options, batchId } ),
+			} ),
+		options
+	);
 }
 
 /** A variation row for the cross-parent batch: its parent is only needed for the single-write fallback. */
@@ -634,19 +714,19 @@ export async function batchVariationsAcross( update: VariationUpdateAcross[], op
 		return result;
 	}
 
-	for ( const part of chunk( update, getSettings().limits.actionBatchSize ) ) {
-		const response = await request< BatchResponse< RawVariation > >( {
-			path: batchPath( `${ OWN }/variations/batch`, options ),
-			method: 'POST',
-			// The server addresses each row by its own parent; the one sent along
-			// only names the parent in the log row of a variation deleted meanwhile.
-			data: { update: part },
-			...listMode( { ...options, batchId } ),
-		} );
-		result = mergeBatch( result, response );
-	}
-
-	return result;
+	return sendChunks(
+		chunk( update, getSettings().limits.actionBatchSize ),
+		( part ) =>
+			request< BatchResponse< RawVariation > >( {
+				path: batchPath( `${ OWN }/variations/batch`, options ),
+				method: 'POST',
+				// The server addresses each row by its own parent; the one sent along
+				// only names the parent in the log row of a variation deleted meanwhile.
+				data: { update: part },
+				...listMode( { ...options, batchId } ),
+			} ),
+		options
+	);
 }
 
 export async function batchVariations(
@@ -655,23 +735,22 @@ export async function batchVariations(
 	options?: BatchOptions
 ): Promise< BatchResponse< RawVariation > > {
 	const batchId = options?.batchId ?? newBatchId();
-	let result: BatchResponse< RawVariation > = { update: [] };
 
 	if ( update.length === 1 && update[ 0 ] && singleWritesOnly() ) {
 		return singleWrite< RawVariation >( `${ PRODUCTS }/${ parentId }/variations/${ update[ 0 ].id }`, update[ 0 ], { ...options, batchId } );
 	}
 
-	for ( const part of chunk( update, getSettings().limits.batchSize ) ) {
-		const response = await request< BatchResponse< RawVariation > >( {
-			path: batchPath( `${ PRODUCTS }/${ parentId }/variations/batch`, options ),
-			method: 'POST',
-			data: { update: part },
-			...listMode( { ...options, batchId } ),
-		} );
-		result = mergeBatch( result, response );
-	}
-
-	return result;
+	return sendChunks(
+		chunk( update, getSettings().limits.batchSize ),
+		( part ) =>
+			request< BatchResponse< RawVariation > >( {
+				path: batchPath( `${ PRODUCTS }/${ parentId }/variations/batch`, options ),
+				method: 'POST',
+				data: { update: part },
+				...listMode( { ...options, batchId } ),
+			} ),
+		options
+	);
 }
 
 /** Ids per `POST /actions/{action}` request: the action's own limit (`limits.actionBatchSizes`), else `limits.actionBatchSize`. */
@@ -693,12 +772,23 @@ function tooManyIdsMax( error: unknown ): number | null {
 	return Number.isInteger( max ) && max > 0 ? max : null;
 }
 
-/** `POST /actions/{action}` in chunks of the action's batch size, one batch id. */
+/** The requests `runAction` sends for this many ids (before any re-chunking to a lower server limit). */
+export function actionRequestCount( action: string, count: number ): number {
+	return Math.ceil( count / Math.max( 1, actionBatchSizeOf( action ) ) );
+}
+
+/**
+ * `POST /actions/{action}` in chunks of the action's batch size, one batch
+ * id. A failed request among several does not throw away the ones already
+ * answered: its ids come back as failed results marked REQUEST_FAILED_KEY
+ * and the next request is still sent (an abort stops the rest); it throws
+ * only when no request got an answer.
+ */
 export async function runAction(
 	action: string,
 	ids: number[],
 	args: Record< string, unknown > = {},
-	options?: RequestOptions & { fields?: string[] }
+	options?: RequestOptions & { fields?: string[]; onProgress?( done: number, total: number ): void }
 ): Promise< ActionResponse > {
 	const batchId = options?.batchId ?? newBatchId();
 	// `fields`, not `_fields`: core would trim the whole response to those
@@ -707,6 +797,10 @@ export async function runAction(
 	const result: ActionResponse = { batch_id: batchId, results: [], items: [] };
 
 	const queue = chunk( ids, actionBatchSizeOf( action ) );
+	const several = queue.length > 1;
+	let answered = false;
+	let firstError: unknown = null;
+	let done = 0;
 
 	while ( queue.length ) {
 		const part = queue.shift() as number[];
@@ -728,10 +822,35 @@ export async function runAction(
 				continue;
 			}
 
-			throw error;
+			if ( ! several ) {
+				throw error;
+			}
+
+			firstError ??= error;
+
+			// The ids of this request (and, after an abort, of the ones not sent) failed; the answered ones stand.
+			const failedIds = isAbortError( error ) ? [ ...part, ...queue.splice( 0 ).flat() ] : part;
+
+			result.results.push(
+				...failedIds.map( ( id ) => {
+					const { error: failure } = requestFailure( id, error );
+
+					return { id, ok: false, code: failure.code, message: failure.message, data: failure.data as Record< string, unknown > };
+				} )
+			);
+			done += failedIds.length;
+			options?.onProgress?.( done, ids.length );
+			continue;
 		}
+		answered = true;
 		result.results.push( ...( response.results ?? [] ) );
 		result.items.push( ...( response.items ?? [] ).map( ( raw ) => toRow( raw as RawProduct ) ) );
+		done += part.length;
+		options?.onProgress?.( done, ids.length );
+	}
+
+	if ( ! answered && firstError ) {
+		throw firstError;
 	}
 
 	return result;
@@ -913,7 +1032,7 @@ export async function closeBatch( batchId: string ): Promise< void > {
 }
 
 /** Why the app left an item out of a save (POST /log/skipped `reason`). */
-export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'unchanged' | 'failed' | 'other';
+export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'locked' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'unchanged' | 'failed' | 'other';
 
 export interface SkippedItem {
 	id: number;

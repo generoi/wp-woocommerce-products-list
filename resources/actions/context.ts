@@ -9,6 +9,7 @@ import { notify } from './notices';
 import type { ActionResponse } from '../api/client';
 import type { View } from '../dataviews';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
+import { actionResultMessage } from '../edit/errors';
 import { isVariation } from '../edit/field-value';
 import { isRowPending } from '../store/save-activity';
 import type { ProductAction, ProductField, ProductListItem, Settings } from '../types';
@@ -101,7 +102,7 @@ export function summarize( response: ActionResponse ): ResultSummary {
 		if ( result.ok ) {
 			ok.push( result.id );
 		} else {
-			failed.push( { id: result.id, message: result.message ?? __( 'The action failed.', 'wp-woocommerce-products-list' ) } );
+			failed.push( { id: result.id, message: actionResultMessage( result.code, result.message ) } );
 		}
 	}
 

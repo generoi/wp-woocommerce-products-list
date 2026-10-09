@@ -870,6 +870,6 @@ async function settleUncertain(
 	}
 }
 
-function uncertainMessage( message: string ): string {
+export function uncertainMessage( message: string ): string {
 	return `${ message } ${ __( 'It may have been saved anyway: check its current values before you update it again.', 'wp-woocommerce-products-list' ) }`;
 }

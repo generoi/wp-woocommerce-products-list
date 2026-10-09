@@ -37,6 +37,8 @@ use WP_REST_Request;
  *
  * Writes to a product in the Trash (or a variation of one) are refused
  * with `wc_products_list_trashed` (409) unless the request sets `status`.
+ * A row deleted for good after the request loaded it is refused with
+ * `wc_products_list_deleted` (404), so nothing is written for it.
  */
 final class Concurrency
 {
@@ -48,6 +50,8 @@ final class Concurrency
     public const LOCKED_ERROR = 'wc_products_list_locked';
 
     public const TRASHED_ERROR = 'wc_products_list_trashed';
+
+    public const DELETED_ERROR = 'wc_products_list_deleted';
 
     public const REVERT_RUNNING_ERROR = 'wc_products_list_revert_running';
 
@@ -323,8 +327,14 @@ final class Concurrency
      * to it (but not to the stored one) would otherwise be dropped and
      * the other writer's value kept without a word. A relative stock
      * write (`inventory_delta`) is added to the stored quantity again.
+     *
+     * Null when the row is gone: deleted for good since the request
+     * loaded it (another tab's Delete, wp-admin's "Remove variation").
+     * Saving the cached copy (or the empty variation WooCommerce loads for
+     * a missing post) would write meta and a lookup row for a post
+     * that no longer exists, so the caller refuses the item instead.
      */
-    public static function refresh(WC_Product $product, ?WP_REST_Request $request = null): WC_Product
+    public static function refresh(WC_Product $product, ?WP_REST_Request $request = null): ?WC_Product
     {
         $id = $product->get_id();
 
@@ -333,6 +343,13 @@ final class Concurrency
         }
 
         self::forget($id);
+
+        // Before the reload: WooCommerce's variation data store loads an
+        // empty variation for a missing post instead of failing.
+        if (get_post($id) === null) {
+            return null;
+        }
+
         $fresh = wc_get_product($id);
 
         if (! $fresh instanceof WC_Product || get_class($fresh) !== get_class($product)) {
@@ -423,12 +440,116 @@ final class Concurrency
         $conflicts = [];
 
         foreach ($expected as $path => $value) {
-            if (! self::same($value, $current[$path] ?? null)) {
+            if (! self::matches($stored, $path, $value, $current[$path] ?? null)) {
                 $conflicts[$path] = $current[$path] ?? null;
             }
         }
 
         return $conflicts;
+    }
+
+    /**
+     * Whether an expected value matches the stored one. Most fields
+     * compare in their stored form (`same()`); a few are shown by wc/v3
+     * in another form than they are stored, and the editor sends what it
+     * loaded, so either form counts:
+     *
+     * - `description`: raw, or as wc/v3's view context renders it
+     *   (`wpautop(do_shortcode())` for a product, `wc_format_content()`
+     *   for a variation);
+     * - `short_description`: raw, or through `woocommerce_short_description`;
+     * - a variation's `name`: the stored title, or wc/v3's attribute summary
+     *   (`wc_get_formatted_variation($v, true, false, false)`);
+     * - `cost_of_goods_sold`: by its number, from `{value}`, wc/v3's
+     *   `{values: [{defined_value}]}` (summed, as WooCommerce does) or a
+     *   bare number; no value is 0;
+     * - `images`: the full id list, or only the featured image (the list
+     *   rows drop the gallery): a list of at most one entry matches when
+     *   it names the stored featured image (or none when there is none).
+     *
+     * The rendered forms are computed only when the plain comparison fails.
+     */
+    public static function matches(WC_Product $stored, string $path, ?string $expected, ?string $current): bool
+    {
+        if (self::same($expected, $current)) {
+            return true;
+        }
+
+        $expected ??= '';
+        $isVariation = $stored->is_type('variation');
+
+        switch ($path) {
+            case 'description':
+                $raw = (string) $stored->get_description('edit');
+                $rendered = $isVariation ? wc_format_content($raw) : wpautop(do_shortcode($raw));
+
+                return trim($expected) === trim((string) $rendered);
+            case 'short_description':
+                if ($isVariation) {
+                    return false;
+                }
+
+                return trim($expected) === trim((string) apply_filters('woocommerce_short_description', (string) $stored->get_short_description('edit')));
+            case 'name':
+                return $isVariation && $stored instanceof \WC_Product_Variation
+                    && trim($expected) === trim((string) wc_get_formatted_variation($stored, true, false, false));
+            case 'cost_of_goods_sold':
+                $want = self::cogsNumber($expected);
+                $have = self::cogsNumber((string) $current);
+
+                return $want !== null && $have !== null && abs($want - $have) < 0.0000001;
+            case 'images':
+                $list = $expected === '' ? [] : json_decode($expected, true);
+
+                if (! is_array($list) || ! array_is_list($list) || count($list) > 1) {
+                    return false;
+                }
+
+                $featured = isset($list[0]) && is_array($list[0]) && is_numeric($list[0]['id'] ?? null) ? (int) $list[0]['id'] : 0;
+
+                return $featured === (int) $stored->get_image_id('edit');
+        }
+
+        return false;
+    }
+
+    /**
+     * The number of a cost-of-goods value in any of its forms, null when
+     * it is none of them. No value counts as 0, as WooCommerce reads it.
+     */
+    public static function cogsNumber(string $value): ?float
+    {
+        $value = trim($value);
+
+        if ($value === '' || $value === 'null') {
+            return 0.0;
+        }
+
+        if (is_numeric($value)) {
+            return (float) $value;
+        }
+
+        $decoded = json_decode($value, true);
+
+        if (! is_array($decoded)) {
+            return null;
+        }
+
+        if (array_key_exists('value', $decoded)) {
+            return is_numeric($decoded['value']) ? (float) $decoded['value'] : ($decoded['value'] === null || $decoded['value'] === '' ? 0.0 : null);
+        }
+
+        if (is_array($decoded['values'] ?? null)) {
+            $sum = 0.0;
+
+            foreach ($decoded['values'] as $info) {
+                $sum += is_array($info) && is_numeric($info['defined_value'] ?? null) ? (float) $info['defined_value'] : 0.0;
+            }
+
+            return $sum;
+        }
+
+        return null;
     }
 
     /**
@@ -512,6 +633,15 @@ final class Concurrency
             self::LOCKED_ERROR,
             __('Another save of this item is still running (another tab, another user or an undo). Nothing was saved for this item; try again in a moment.', 'wp-woocommerce-products-list'),
             ['status' => 409, 'id' => $id]
+        );
+    }
+
+    public static function deletedError(int $id): WP_Error
+    {
+        return new WP_Error(
+            self::DELETED_ERROR,
+            __('This item was deleted meanwhile (in another tab or by another user). Nothing was saved for it.', 'wp-woocommerce-products-list'),
+            ['status' => 404, 'id' => $id]
         );
     }
 

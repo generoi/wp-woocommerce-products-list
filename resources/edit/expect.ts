@@ -16,17 +16,25 @@
  *   row carries the stored meta `_i18n_{field}_{lang}` as
  *   `i18n.{lang}.{field}.value`, which the server's default reader reads).
  *
- * Not sent, as their list form is not the stored one: the relative stock key
- * (`inventory_delta` is applied to the stock as stored, so an order
- * meanwhile is not a conflict), a variation's `name` (wc/v3 returns the
- * attribute summary, the stored title has the parent's name in front),
- * `description` / `short_description` (wc/v3 view context runs wpautop on
- * them), `images` (list rows drop the gallery), `cost_of_goods_sold` and
- * `attributes` (other shapes) and other extension fields. Those still get
- * the server's lock and fresh-state checks.
+ * - the fields wc/v3 shows in another form than it stores, as loaded (the
+ *   server also accepts the rendered form, `Concurrency::matches()`):
+ *   `description` / `short_description` (view context runs wpautop and the
+ *   shortcodes on them), a variation's `name` (the attribute summary; the
+ *   stored title has the parent's name in front), `cost_of_goods_sold`
+ *   (wc/v3's `{values, total_value}` object or a number, compared by
+ *   number) and `images` (the row's list, which holds only the featured
+ *   image as list rows drop the gallery; `[]` when the row has none).
+ *
+ * Not sent: the relative stock key (`inventory_delta` is applied to the
+ * stock as stored, so an order meanwhile is not a conflict), `attributes`
+ * and extension fields other than `i18n.*` (no stored form the client
+ * knows). Those stay "last write wins" behind the server's lock and
+ * fresh-state checks; the log's old value shows what was overwritten.
+ * A description whose shortcode output changes between two renders is a
+ * false conflict (409, nothing written; reload and apply again).
  */
 import type { ProductListItem } from '../types';
-import { isPlainObject, isVariation } from './field-value';
+import { isPlainObject } from './field-value';
 
 /** The per-item request key. */
 export const EXPECT_KEY = '_wcpl_expect';
@@ -64,6 +72,9 @@ const SCALAR_KEYS: ReadonlySet< string > = new Set( [
 
 /** The request key of gds-woo-i18n's translations and market prices (`i18n: {se: {name}}`). */
 const I18N_KEY = 'i18n';
+
+/** Texts wc/v3 view context renders (wpautop, shortcodes): sent as loaded, the server accepts both forms. */
+const RENDERED_TEXT_KEYS: ReadonlySet< string > = new Set( [ 'description', 'short_description' ] );
 
 const TERM_KEYS: ReadonlySet< string > = new Set( [ 'categories', 'tags', 'brands' ] );
 
@@ -160,14 +171,30 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 	const expect: Record< string, unknown > = {};
 
 	for ( const [ key, value ] of Object.entries( payload ) ) {
-		if ( SCALAR_KEYS.has( key ) ) {
-			// A variation's wc/v3 name is its attribute summary, not the stored title: never a fair comparison.
-			if ( key === 'name' && isVariation( item ) ) {
-				continue;
-			}
-
+		// A variation's `name` (the attribute summary wc/v3 returns) is accepted in that form too.
+		if ( SCALAR_KEYS.has( key ) || RENDERED_TEXT_KEYS.has( key ) ) {
 			if ( key in row && isScalar( row[ key ] ) ) {
 				expect[ key ] = row[ key ];
+			}
+
+			continue;
+		}
+
+		if ( key === 'cost_of_goods_sold' ) {
+			const loaded = key in row ? row[ key ] : undefined;
+
+			if ( typeof loaded === 'number' || typeof loaded === 'string' || loaded === null || isPlainObject( loaded ) ) {
+				expect[ key ] = loaded;
+			}
+
+			continue;
+		}
+
+		if ( key === 'images' ) {
+			const ids = key in row ? ( row[ key ] === null ? [] : termIds( row[ key ] ) ) : undefined;
+
+			if ( ids ) {
+				expect[ key ] = ids;
 			}
 
 			continue;

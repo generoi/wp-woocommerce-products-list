@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useRef } from '@wordpress/element';
 import { applyFilters } from '@wordpress/hooks';
 import { __, _n, sprintf } from '@wordpress/i18n';
-import { runAction } from '../api/client';
+import { actionRequestCount, closeBatch, newBatchId, runAction } from '../api/client';
 import type { ActionResponse, ActionResult } from '../api/client';
 import { isEditorHostedAction } from '../edit/hosted-actions';
 import { undoBatch } from '../edit/undo';
@@ -18,6 +18,7 @@ import type { Hierarchy } from '../hierarchy/use-hierarchy';
 import { actionsFromSettings } from '../extensions/declarative';
 import { FILTERS } from '../extensions/hooks';
 import { invalidateProducts, patchItems } from '../store/products';
+import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import type { ProductAction, Settings } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
 import { errorMessage, rowFields, summarize, withScope } from './context';
@@ -125,9 +126,24 @@ export interface RunDeclarativeOptions {
 
 export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[], options: RunDeclarativeOptions = {} ): Promise< ActionResponse > {
 	let response: ActionResponse;
+	// A run of its own (not part of the editor's Update, which plans and closes its batch itself) that takes several
+	// requests is planned and closed here, so History never reverts it half-written.
+	const own = ! options.batchId;
+	const batchId = options.batchId ?? newBatchId();
+	const planned = options.planned ?? ( own && actionRequestCount( action, ids.length ) > 1 ? ids.length : 0 );
+	// The list's save bar, row locks and leave-page guard while it runs (the rows by id: a tool may run on rows not on
+	// the page). Inside the editor's Update the editor's own job covers it.
+	const jobId = own ? beginSaveJob( ids.map( ( id ) => ( { id, parent_id: 0 } ) ) ) : null;
+	const progress = ( done: number, total: number ) => {
+		if ( jobId !== null ) {
+			updateSaveJob( jobId, done, total );
+		}
+	};
+
+	progress( 0, ids.length );
 
 	try {
-		response = await runAction( action, ids, args, { fields, ...( options.batchId ? { batchId: options.batchId } : {} ), ...( options.planned ? { planned: options.planned } : {} ) } );
+		response = await runAction( action, ids, args, { fields, batchId, ...( planned ? { planned } : {} ), onProgress: progress } );
 	} catch ( error ) {
 		if ( ! options.inlineErrors ) {
 			notify.error( errorMessage( error ) );
@@ -140,6 +156,14 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 		}
 
 		throw error;
+	} finally {
+		if ( own && planned ) {
+			await closeBatch( batchId );
+		}
+
+		if ( jobId !== null ) {
+			finishSaveJob( jobId );
+		}
 	}
 
 	const { ok, failed } = summarize( response );
@@ -171,6 +195,11 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 	}
 
 	if ( failed.length ) {
+		// The rows that did change (a request among several failed, or some rows were refused) keep their Undo.
+		if ( ok.length && ! options.silent ) {
+			notifyDeclarativeSuccess( response, label );
+		}
+
 		notify.error(
 			ok.length
 				? sprintf(

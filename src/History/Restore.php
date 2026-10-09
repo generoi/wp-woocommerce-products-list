@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\History;
 
+use GeneroWP\ProductsList\Rest\Concurrency;
 use WC_Product;
 use WC_Product_Variation;
 use WP_Post;
@@ -18,7 +19,11 @@ use WP_Post;
  * `reverts`, so an undo can itself be undone (redo).
  *
  * A key whose current value is no longer what the batch left is a
- * conflict: the object is left alone unless forced.
+ * conflict: the object is left alone unless forced. Each object is
+ * checked and written under its `Rest\Concurrency` object lock, from
+ * the stored state, so a save made while the undo runs is either
+ * finished first (and then a conflict) or waits for the undo; an object
+ * still locked after the lock timeout is skipped with reason `locked`.
  */
 final class Restore
 {
@@ -99,35 +104,54 @@ final class Restore
                     continue;
                 }
 
-                if (! $force) {
-                    $current = self::current($id);
-                    $conflicts = [];
-
-                    foreach ($keys as $key) {
-                        $name = explode(':', $key, 2)[1];
-
-                        if (self::normal($name, self::value($current, $key)) !== self::normal($name, self::value($after, $key))) {
-                            $conflicts[] = $key;
-                        }
-                    }
-
-                    if ($conflicts !== []) {
-                        $result['conflicts'][] = ['id' => $id, 'keys' => $conflicts];
-
-                        continue;
-                    }
-                }
-
-                if ($dry) {
-                    $result['restored'][] = $id;
+                // Under the object lock every list-mode save takes
+                // (Rest\Concurrency, docs/contracts.md §3.6), and from the
+                // stored state rather than the caches primed for the chunk:
+                // a save of the object made since then is a conflict, and
+                // one running now finishes first.
+                if (! $dry && ! Concurrency::lockObject($id)) {
+                    $result['skipped'][] = ['id' => $id, 'reason' => 'locked'];
 
                     continue;
                 }
 
-                if (self::apply($id, $before, $keys)) {
-                    $result['restored'][] = $id;
-                } else {
-                    $result['skipped'][] = ['id' => $id, 'reason' => 'missing'];
+                try {
+                    if (! $dry) {
+                        Concurrency::forget($id);
+                    }
+
+                    if (! $force) {
+                        $current = self::current($id);
+                        $conflicts = [];
+
+                        foreach ($keys as $key) {
+                            $name = explode(':', $key, 2)[1];
+
+                            if (self::normal($name, self::value($current, $key)) !== self::normal($name, self::value($after, $key))) {
+                                $conflicts[] = $key;
+                            }
+                        }
+
+                        if ($conflicts !== []) {
+                            $result['conflicts'][] = ['id' => $id, 'keys' => $conflicts];
+
+                            continue;
+                        }
+                    }
+
+                    if ($dry) {
+                        $result['restored'][] = $id;
+
+                        continue;
+                    }
+
+                    if (self::apply($id, $before, $keys)) {
+                        $result['restored'][] = $id;
+                    } else {
+                        $result['skipped'][] = ['id' => $id, 'reason' => 'missing'];
+                    }
+                } finally {
+                    Concurrency::unlockObject($id);
                 }
             }
 

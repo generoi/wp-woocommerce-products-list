@@ -124,6 +124,7 @@ All of these are used as they are. Each extension below says what core does, why
 - `restored()` also deletes the revision core took during its own `wp_update_post`. That revision has the restored post fields but the old meta.
 - **Lighter alternative:** keep that extra revision. It's harmless but confusing in the compare screen.
 - **Batch undo** (`Restore::undo()`): for each object, it restores the predecessor of the batch's first revision. That predecessor is the state right before the batch's save, because a save whose object drifted from its latest revision takes a catch-up revision first (§4). Only the keys that differ from the batch's last revision are written, through the same CRUD path. A key changed since the batch is a conflict: the object is left alone unless `--force` is given. The writes form a new batch with `reverts`, so undoing the undo redoes.
+- **Concurrency of the undo:** each object is checked and written under the object lock every list-mode save takes (`Rest\Concurrency::lockObject()`, contracts §3.6), after `Concurrency::forget()` drops the caches primed for the chunk, so the conflict check reads the stored state. A save of the object running meanwhile finishes first (and is then a conflict) or waits for the undo's write; an object still locked after `wc_products_list/lock_timeout` is reported in `skipped` with reason `locked`. A `--dry-run` takes no lock.
 
 ### 8. Not built: compare-screen fields
 
@@ -198,7 +199,7 @@ These numbers come from the Phase 0 benchmark, a sale price on every variation. 
 
 ## Concurrency (all modes)
 
-The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lock per object for the duration of one item's save, a fresh load under the lock when the batch's primed caches are stale, refusal of trashed rows, optional expected values per item (`_wcpl_expect`, 409 `wc_products_list_conflict`), one revert per batch at a time, and a running-batch marker that blocks History's plan, check and revert of a batch still being written. In `both` mode the revision of a refused item is not taken (nothing is saved).
+The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lock per object for the duration of one item's save, a fresh load under the lock when the batch's primed caches are stale, refusal of trashed rows and of rows deleted meanwhile, the same lock around row actions (delete, trash, restore, status) and around each object of a revisions-mode undo (§7), optional expected values per item (`_wcpl_expect`, 409 `wc_products_list_conflict`), one revert per batch at a time, and a running-batch marker that blocks History's plan, check and revert of a batch still being written. In `both` mode the revision of a refused item is not taken (nothing is saved).
 
 ## Tests
 

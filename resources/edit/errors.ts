@@ -21,10 +21,11 @@ const MESSAGES: Record< string, () => string > = {
 	wc_products_list_conflict: () => __( 'Changed by someone else since it was loaded, so it was not saved. It now shows the current values: check them and apply the edits again.', 'wp-woocommerce-products-list' ),
 	wc_products_list_locked: () => __( 'Another save of this item was running, so it was not saved. Try again in a moment.', 'wp-woocommerce-products-list' ),
 	wc_products_list_trashed: () => __( 'This item is in the Trash, so it was not saved.', 'wp-woocommerce-products-list' ),
+	wc_products_list_deleted: () => __( 'Deleted meanwhile (another tab or user); nothing was saved for this item.', 'wp-woocommerce-products-list' ),
 };
 
 /** Per-item refusals of the server's concurrency checks: the server logs them as skipped rows itself (not posted to /log/skipped again). */
-const SERVER_LOGGED_CODES: ReadonlySet< string > = new Set( [ 'wc_products_list_conflict', 'wc_products_list_locked', 'wc_products_list_trashed' ] );
+const SERVER_LOGGED_CODES: ReadonlySet< string > = new Set( [ 'wc_products_list_conflict', 'wc_products_list_locked', 'wc_products_list_trashed', 'wc_products_list_deleted' ] );
 
 export function isServerLoggedCode( code: string | undefined ): boolean {
 	return code !== undefined && SERVER_LOGGED_CODES.has( code );
@@ -77,9 +78,20 @@ const GONE_CODES: ReadonlySet< string > = new Set( [
 	'woocommerce_rest_product_variation_invalid_id',
 	'woocommerce_rest_invalid_id',
 	'rest_post_invalid_id',
+	// The server's deleted check (docs/contracts.md §3.6): deleted after the save loaded it.
+	'wc_products_list_deleted',
 ] );
 
 /** Whether an error code means the row no longer exists (nothing to retry; the row leaves the list). */
 export function isGoneCode( code: string | undefined ): boolean {
 	return code !== undefined && GONE_CODES.has( code );
+}
+
+/** The message of a row action's per-id result: a lock held by a save of the row reads like the save's own. */
+export function actionResultMessage( code: string | undefined, message: string | undefined ): string {
+	if ( code === 'wc_products_list_locked' ) {
+		return __( 'Another save of this item was still running, so the action was not applied to it. Try again in a moment.', 'wp-woocommerce-products-list' );
+	}
+
+	return message || __( 'The action failed.', 'wp-woocommerce-products-list' );
 }

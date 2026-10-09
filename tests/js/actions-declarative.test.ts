@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { runAction } from '../../resources/api/client';
+import { closeBatch, runAction } from '../../resources/api/client';
+import { isRowPending } from '../../resources/store/save-activity';
 import { declarativeSummary, runDeclarativeAction } from '../../resources/actions/index';
 import { notify } from '../../resources/actions/notices';
 import { undoBatch } from '../../resources/edit/undo';
 import { invalidateProducts, patchItems } from '../../resources/store/products';
 
-vi.mock( '../../resources/api/client', () => ( { runAction: vi.fn() } ) );
+vi.mock( '../../resources/api/client', () => ( {
+	runAction: vi.fn(),
+	newBatchId: () => 'b1',
+	closeBatch: vi.fn( async () => undefined ),
+	// 100 ids per request.
+	actionRequestCount: ( _action: string, count: number ) => Math.ceil( count / 100 ),
+} ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() } } ) );
 vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), invalidateProducts: vi.fn() } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn( async () => undefined ) } ) );
@@ -24,7 +31,9 @@ describe( 'runDeclarativeAction', () => {
 
 		await runDeclarativeAction( 'i18n_copy', 'Copy translations', [ 1, 2 ], { lang: 'se' }, [ 'id', 'name' ] );
 
-		expect( runAction ).toHaveBeenCalledWith( 'i18n_copy', [ 1, 2 ], { lang: 'se' }, { fields: [ 'id', 'name' ] } );
+		expect( runAction ).toHaveBeenCalledWith( 'i18n_copy', [ 1, 2 ], { lang: 'se' }, { fields: [ 'id', 'name' ], batchId: 'b1', onProgress: expect.any( Function ) } );
+		// One request: nothing planned, nothing to close.
+		expect( closeBatch ).not.toHaveBeenCalled();
 		expect( patchItems ).toHaveBeenCalledWith( [ { id: 1 } ] );
 		expect( invalidateProducts ).toHaveBeenCalledWith( { counts: true } );
 		expect( notify.error ).not.toHaveBeenCalled();
@@ -59,13 +68,13 @@ describe( 'runDeclarativeAction', () => {
 		expect( options.actions ).toHaveLength( 1 );
 	} );
 
-	it( 'reports the first failure, with the count of items that did update, and no success notice', async () => {
+	it( 'reports the first failure, with the count of items that did update, and keeps Undo for those', async () => {
 		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 1, ok: true, changed: 1 }, { id: 2, ok: false, code: 'not_found', message: 'The product no longer exists.' } ] ) );
 
 		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 1, 2 ], {}, [ 'id' ] );
 
 		expect( notify.error ).toHaveBeenCalledWith( '1 updated, 1 failed: The product no longer exists.' );
-		expect( notify.success ).not.toHaveBeenCalled();
+		expect( notify.success ).toHaveBeenCalledWith( 'Clear translations: 1 item updated.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
 		expect( invalidateProducts ).toHaveBeenCalledWith( { counts: true } );
 
 		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 2, ok: false, code: 'forbidden', message: 'Not allowed.' } ] ) );
@@ -99,5 +108,43 @@ describe( 'declarativeSummary', () => {
 		expect( declarativeSummary( 'Copy translations', 1, 0 ) ).toBe( 'Copy translations: 1 item updated.' );
 		expect( declarativeSummary( 'Copy translations', 2, 1 ) ).toBe( 'Copy translations: 2 updated, 1 already had these values.' );
 		expect( declarativeSummary( 'Copy translations', 0, 2 ) ).toBe( 'Copy translations: nothing changed, 2 items already had these values.' );
+	} );
+
+	it( 'runs a tool of several requests as a save: rows locked while it runs, the batch planned and closed, the inner run left to the editor', async () => {
+		const ids = Array.from( { length: 150 }, ( _, index ) => index + 1 );
+		let lockedDuring = false;
+
+		vi.mocked( runAction ).mockImplementationOnce( async () => {
+			lockedDuring = isRowPending( 1 ) && isRowPending( 150 );
+
+			return response( ids.map( ( id ) => ( { id, ok: true, changed: 1 } ) ) );
+		} );
+
+		await runDeclarativeAction( 'i18n_copy', 'Copy translations', ids, {}, [ 'id' ] );
+
+		expect( lockedDuring ).toBe( true );
+		expect( isRowPending( 1 ) ).toBe( false );
+		expect( vi.mocked( runAction ).mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { batchId: 'b1', planned: 150 } );
+		expect( closeBatch ).toHaveBeenCalledWith( 'b1' );
+
+		// Inside the editor's Update: its batch, its plan, its close and its job.
+		vi.mocked( closeBatch ).mockClear();
+		vi.mocked( runAction ).mockImplementationOnce( async () => {
+			lockedDuring = isRowPending( 1 );
+
+			return response( ids.map( ( id ) => ( { id, ok: true, changed: 1 } ) ) );
+		} );
+		await runDeclarativeAction( 'i18n_copy', 'Copy translations', ids, {}, [ 'id' ], { batchId: 'editor', planned: 400, silent: true } );
+		expect( lockedDuring ).toBe( false );
+		expect( vi.mocked( runAction ).mock.calls[ 1 ]?.[ 3 ] ).toMatchObject( { batchId: 'editor', planned: 400 } );
+		expect( closeBatch ).not.toHaveBeenCalled();
+	} );
+
+	it( 'releases the rows and closes its batch when the run fails', async () => {
+		vi.mocked( runAction ).mockRejectedValueOnce( new Error( 'offline' ) );
+
+		await expect( runDeclarativeAction( 'i18n_copy', 'Copy translations', Array.from( { length: 120 }, ( _, index ) => index + 1 ), {}, [ 'id' ] ) ).rejects.toThrow( 'offline' );
+		expect( isRowPending( 1 ) ).toBe( false );
+		expect( closeBatch ).toHaveBeenCalledWith( 'b1' );
 	} );
 } );
