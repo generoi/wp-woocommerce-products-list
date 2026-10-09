@@ -405,6 +405,41 @@ class RevisionsSpikeTest extends RestTestCase
         $this->assertNull(get_term($term['term_id'], Batches::TAXONOMY));
     }
 
+    public function test_the_batch_term_is_counted_once_per_flush_not_per_revision(): void
+    {
+        $ids = [];
+
+        foreach (['BC1', 'BC2', 'BC3'] as $sku) {
+            $ids[] = $this->simpleProduct(['sku' => $sku])->get_id();
+        }
+
+        $this->ready();
+        Batches::begin($batch = wp_generate_uuid4(), 'bulk');
+        $counts = 0;
+        $watch = static function (string $query) use (&$counts): string {
+            if (preg_match('/SELECT COUNT\(\*\) FROM \S*term_relationships/i', $query) === 1) {
+                $counts++;
+            }
+
+            return $query;
+        };
+        add_filter('query', $watch);
+
+        foreach ($ids as $id) {
+            $product = wc_get_product($id);
+            $product->set_sale_price('100');
+            $product->save();
+        }
+
+        remove_filter('query', $watch);
+        $this->assertSame(0, $counts, 'no recount of the batch term per revision');
+        Batches::end();
+        $this->settle();
+
+        $term = Batches::term($batch);
+        $this->assertSame(3, (int) get_term($term['term_id'], Batches::TAXONOMY)->count);
+    }
+
     public function test_purge_deletes_revisions_and_batch_terms(): void
     {
         $id = $this->simpleProduct(['sku' => 'PU1'])->get_id();

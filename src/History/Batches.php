@@ -67,8 +67,37 @@ final class Batches
             'rewrite' => false,
             'query_var' => false,
             'hierarchical' => false,
-            'update_count_callback' => '_update_generic_term_count',
+            'update_count_callback' => [self::class, 'updateCount'],
         ]);
+    }
+
+    /** @var array<int, true> term_taxonomy ids whose count is recounted at the next flush */
+    private static array $pendingCounts = [];
+
+    private static bool $deferCount = false;
+
+    /**
+     * The taxonomy's `update_count_callback`: core's generic count, except
+     * while `assign()` adds a revision. Core recounts the term after every
+     * `wp_set_object_terms()` (a COUNT(*) over all the batch's
+     * relationships), so a 24,000-revision campaign got about 10 ms slower
+     * per save by its end; the term is recounted once per request in
+     * `flush()` instead.
+     *
+     * @param  array<int, int|string>  $terms  term_taxonomy ids
+     * @param  \WP_Taxonomy|string  $taxonomy
+     */
+    public static function updateCount($terms, $taxonomy): void
+    {
+        if (self::$deferCount) {
+            foreach ((array) $terms as $ttId) {
+                self::$pendingCounts[(int) $ttId] = true;
+            }
+
+            return;
+        }
+
+        _update_generic_term_count($terms, $taxonomy instanceof \WP_Taxonomy ? $taxonomy : get_taxonomy((string) $taxonomy));
     }
 
     /** Whether a batch was set explicitly (Restore, tests). */
@@ -209,6 +238,7 @@ final class Batches
         self::$terms = [];
         self::$fields = [];
         self::$assigned = [];
+        self::$pendingCounts = [];
         self::$lastUuid = null;
     }
 
@@ -312,7 +342,14 @@ final class Batches
 
         // Core's API, count and caches included (docs/revisions.md: a direct
         // INSERT with one count update per request is the lighter option).
-        wp_set_object_terms($revisionId, [$term['term_id']], self::TAXONOMY, true);
+        self::$deferCount = true;
+
+        try {
+            wp_set_object_terms($revisionId, [$term['term_id']], self::TAXONOMY, true);
+        } finally {
+            self::$deferCount = false;
+        }
+
         self::$lastUuid = $context['uuid'];
         self::$assigned[$context['uuid']] = (self::$assigned[$context['uuid']] ?? 0) + 1;
     }
@@ -338,6 +375,12 @@ final class Batches
      */
     public static function flush(): void
     {
+        if (self::$pendingCounts !== []) {
+            $ttIds = array_keys(self::$pendingCounts);
+            self::$pendingCounts = [];
+            wp_update_term_count_now($ttIds, self::TAXONOMY);
+        }
+
         foreach (self::$assigned as $uuid => $count) {
             $term = self::term((string) $uuid);
 

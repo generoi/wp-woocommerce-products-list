@@ -106,8 +106,9 @@ All of these are used as they are. Each extension below says what core does, why
   - a private taxonomy `wcpl_batch` on `revision`, registered at Batches.php:50;
   - one term per batch: the app's batch id, or one per REST request, or one per process for admin, import and CLI;
   - term meta: source, user, time, `reverts` and the changed fields;
-  - `assign()` uses core's `wp_set_object_terms()`.
-- **Lighter for writes:** a direct `INSERT` into `term_relationships`, with the count updated once per request. It saves about 5 queries per revision. Kept on core's API for the POC.
+  - `assign()` uses core's `wp_set_object_terms()`;
+  - the taxonomy's `update_count_callback` is `Batches::updateCount()`: core's `_update_generic_term_count()`, except inside `assign()`, where the term is only noted and recounted once per request in `flush()` (end of the REST request, `Batches::end()`, `shutdown`). Core recounts after every `wp_set_object_terms()` with a `COUNT(*)` over all of the batch's relationships, so each save of a campaign got slower as the batch grew: 100 assignments to a 24,000-revision batch took 1,069 ms, against 61 ms with the deferred count (150 ms and 49 ms at 2,000). Deletions (retention, purge) still count at once.
+- **Lighter for writes:** a direct `INSERT` into `term_relationships`. It saves about 2 more queries per revision. Kept on core's API for the POC.
 
 ### 7. Undo and the Restore button go through WooCommerce CRUD (needed)
 
