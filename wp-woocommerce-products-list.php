@@ -4,7 +4,7 @@
 Plugin Name:  WooCommerce Products List
 Plugin URI:   https://github.com/generoi/wp-woocommerce-products-list
 Description:  A fast DataViews product catalog for WooCommerce with variations inline, bulk editing, scheduled sales and a change log.
-Version:      0.1.3
+Version:      0.1.5
 Requires at least: 6.8
 Requires PHP: 8.2
 Requires Plugins: woocommerce
@@ -22,7 +22,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('WC_PRODUCTS_LIST_VERSION', '0.1.4');
+define('WC_PRODUCTS_LIST_VERSION', '0.1.5');
 define('WC_PRODUCTS_LIST_FILE', __FILE__);
 define('WC_PRODUCTS_LIST_PATH', __DIR__);
 

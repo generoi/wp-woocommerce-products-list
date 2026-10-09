@@ -126,6 +126,10 @@ $link: #2271b1;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 4px;
+	// Always its own line under the layout/settings buttons: when a selection adds "N selected ·
+	// Bulk edit · Clear selection" the header would otherwise wrap onto a new line and push the
+	// table down under the pointer, so the next checkbox click lands on another row.
+	flex-basis: 100%;
 }
 
 // The toolbar wraps onto a second line when the list is narrow (beside the

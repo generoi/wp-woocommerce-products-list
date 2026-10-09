@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 - 2026-10-09
+
+- The list header (counts, selection, Columns, Expand all, History, Add new) always takes its own line, so ticking the first row no longer wraps it and pushes the table down under the pointer.
+- Plugin header version matches the release again.
+
 ## 0.1.4 - 2026-10-09
 
 - Side by side, the editor panel is a card like the list: the same 8px gap under the admin bar, the same border and 4px radius, the list's 15px right gutter and a 16px gap between them.
