@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10 - 2026-10-09
+
+- Searching no longer opens products whose variations only match by name (an attribute value such as "Black x BREJD"). Only a search that matches a variation's SKU or barcode opens its product and scrolls to the variation. Searched rows carry `wc_products_list.variation_sku_match`.
+- Checkbox ticks and the "some selected" dash are white and inset again instead of black and edge to edge on the blue box.
+- The toolbar (count, selection, Columns, Expand all, History, Add new) sits beside the search box again, on one line that scrolls sideways instead of wrapping, so selecting a row never shifts the table.
+- The Trash tab follows Draft instead of sitting at the far right.
+- With the editor panel open the filter chips stay visible on one line that scrolls sideways when they do not fit.
+
 ## 0.1.9 - 2026-10-09
 
 - "Decrease by" on Sale price (an amount or a percent) now starts from the regular price on rows that are not on sale, instead of skipping them. A running sale is still decreased from its sale price. "Increase by" on an empty sale price still skips the row.
