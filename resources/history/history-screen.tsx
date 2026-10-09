@@ -32,6 +32,7 @@ import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from 
 import type { RevertCheckSummary, RevertOutcome } from './revert';
 import { batchQueryFromView, createBatchFields } from './batch-fields';
 import { invalidateLog, useLog, useLogBatches } from './use-log';
+import { filtersFromUrl, syncUrl } from './url-state';
 import type { LogBatch, LogRow } from './use-log';
 import '../edit/style.scss';
 
@@ -65,20 +66,11 @@ export function formatLogTime( row: { created_at: string; created_at_gmt?: strin
 }
 
 function initialFilters(): Filter[] {
-	const href = typeof window !== 'undefined' ? window.location.href : '';
-	const objectId = Number( getQueryArg( href, 'object_id' ) );
-	const batch = getQueryArg( href, 'batch' );
-	const filters: Filter[] = [];
+	return filtersFromUrl( typeof window !== 'undefined' ? window.location.href : '' ).filters;
+}
 
-	if ( Number.isInteger( objectId ) && objectId > 0 ) {
-		filters.push( { field: 'object_id', operator: 'is', value: objectId } );
-	}
-
-	if ( typeof batch === 'string' && batch ) {
-		filters.push( { field: 'batch_id', operator: 'is', value: batch } );
-	}
-
-	return filters;
+function initialSearch(): string {
+	return filtersFromUrl( typeof window !== 'undefined' ? window.location.href : '' ).search;
 }
 
 function revertLabel( done: number, total: number ): string {
@@ -476,7 +468,9 @@ type HistoryMode = 'batches' | 'changes';
 function initialMode(): HistoryMode {
 	const href = typeof window !== 'undefined' ? window.location.href : '';
 
-	return getQueryArg( href, 'object_id' ) || getQueryArg( href, 'batch' ) || getQueryArg( href, 'view' ) === 'changes' ? 'changes' : 'batches';
+	const named = filtersFromUrl( href );
+
+	return named.filters.length || named.search || getQueryArg( href, 'view' ) === 'changes' ? 'changes' : 'batches';
 }
 
 function EmptyLog( { error, filtered, onReset }: { error?: Error; filtered: boolean; onReset: () => void } ) {
@@ -508,6 +502,7 @@ export function HistoryScreen( { fields: productFields = [] }: { fields?: Produc
 		titleField: 'created_at',
 		fields: TABLE_FIELDS,
 		filters: initialFilters(),
+		search: initialSearch(),
 		layout: { density: 'compact' },
 	} ) );
 	const [ batchView, setBatchView ] = useState< View >( () => ( {
@@ -550,6 +545,11 @@ export function HistoryScreen( { fields: productFields = [] }: { fields?: Produc
 			document.title = previous;
 		};
 	}, [] );
+	// The changes view's filters live in the URL: a filtered view is a link to hand on.
+	useEffect( () => {
+		syncUrl( view, mode );
+	}, [ view, mode ] );
+
 	const query = useMemo( () => logQueryFromView( view ), [ view ] );
 	const log = useLog( query, { enabled: mode === 'changes' } );
 	const batchQuery = useMemo( () => batchQueryFromView( batchView ), [ batchView ] );
@@ -631,7 +631,7 @@ export function HistoryScreen( { fields: productFields = [] }: { fields?: Produc
 	const header = (
 		<div className="wc-products-list__header">
 			<Button variant="tertiary" size="compact" href={ settings.links.page }>
-				{ __( '← Catalog', 'wp-woocommerce-products-list' ) }
+				{ __( '← All Products (New)', 'wp-woocommerce-products-list' ) }
 			</Button>
 		</div>
 	);

@@ -7,7 +7,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorHost } from '../../resources/edit/editor-context';
-import type { EditorSession } from '../../resources/edit/editor-rows';
+import type { EditorSession } from '../../resources/edit/editor-session';
 import type { ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
 
@@ -207,20 +207,20 @@ describe( 'Escape and deleted rows', () => {
 } );
 
 describe( 'relative price ops and rows changed meanwhile', () => {
-	it( 'stops before writing when a row was saved by someone else since the editor loaded it, reloads it, and saves on the next Update', async () => {
+	it( 'saves the other rows and holds back the one saved by someone else meanwhile; Update then applies the edit to its reloaded value', async () => {
 		const pricedFields = coreFields().filter( ( field ) => [ 'name', 'regular_price', 'sale_price' ].includes( field.id ) );
 		let stamp = '2026-10-09T01:00:00';
 		let regular = '14.70';
-		const fresh = ( id: number ) => simple( id, { regular_price: id === 1 ? regular : '20', sale_price: '', date_modified_gmt: id === 1 ? stamp : '2026-10-01T00:00:00' } );
+		const fresh = ( id: number ) => simple( id, { name: `Row ${ id }`, regular_price: id === 1 ? regular : '20', sale_price: '', date_modified_gmt: id === 1 ? stamp : '2026-10-01T00:00:00' } );
 
 		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
 			const ids = String( query.include ).split( ',' ).map( Number );
 
 			return { items: ids.map( fresh ), total: ids.length, totalPages: 1 };
 		} );
-		saveEdits.mockResolvedValue( { updated: [ fresh( 1 ), fresh( 2 ) ], errors: [], batchId: 'b8', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+		saveEdits.mockImplementation( async ( rows: ProductListItem[] ) => ( { updated: rows.map( ( row ) => fresh( row.id ) ), errors: [], batchId: 'b8', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } ) );
 
-		const host = hostFor( [ simple( 1 ), simple( 2 ) ], pricedFields );
+		const host = hostFor( [ simple( 1, { name: 'Row 1' } ), simple( 2, { name: 'Row 2' } ) ], pricedFields );
 
 		render( <InlineEditor host={ host } /> );
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
@@ -235,16 +235,44 @@ describe( 'relative price ops and rows changed meanwhile', () => {
 
 		fireEvent.click( await screen.findByRole( 'button', { name: /^Update 2/ } ) );
 
-		expect( ( await screen.findAllByText( /1 row changed since this editor loaded it/ ) ).length ).toBeGreaterThan( 0 );
-		expect( saveEdits ).not.toHaveBeenCalled();
-
-		// The next Update works on the reloaded value (14, not 14.70).
-		fireEvent.click( await screen.findByRole( 'button', { name: /^Update 2/ } ) );
+		// Row 2 saves at once; row 1 is held back and named.
 		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+		expect( ( saveEdits.mock.calls[ 0 ]?.[ 0 ] as ProductListItem[] ).map( ( row ) => row.id ) ).toEqual( [ 2 ] );
+		expect( ( await screen.findAllByText( /1 row changed since this editor loaded it/ ) ).length ).toBeGreaterThan( 0 );
+		expect( notify.success ).toHaveBeenCalledWith( expect.stringContaining( 'left for you to check' ), expect.anything() );
+		expect( host.close ).not.toHaveBeenCalled();
 
-		const sent = saveEdits.mock.calls[ 0 ]?.[ 0 ] as ProductListItem[];
+		// The next Update works on the reloaded value (14, not 14.70), on row 1 only.
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Update the 1 changed item too' } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 2 ) );
 
-		expect( sent.find( ( row ) => row.id === 1 )?.regular_price ).toBe( '14' );
+		const sent = saveEdits.mock.calls[ 1 ]?.[ 0 ] as ProductListItem[];
+
+		expect( sent.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
+		expect( sent[ 0 ]?.regular_price ).toBe( '14' );
+	} );
+
+	it( 'writes nothing when every row was saved by someone else meanwhile', async () => {
+		const pricedFields = coreFields().filter( ( field ) => [ 'name', 'regular_price', 'sale_price' ].includes( field.id ) );
+		let stamp = 'a';
+		const fresh = ( id: number ) => simple( id, { regular_price: '10', sale_price: '', date_modified_gmt: stamp } );
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+
+			return { items: ids.map( fresh ), total: ids.length, totalPages: 1 };
+		} );
+
+		render( <InlineEditor host={ hostFor( [ simple( 1 ), simple( 2 ) ], pricedFields ) } /> );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		await waitFor( () => expect( listProducts ).toHaveBeenCalled() );
+
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '+10%' } } );
+		stamp = 'b';
+		fireEvent.click( await screen.findByRole( 'button', { name: /^Update 2/ } ) );
+
+		expect( ( await screen.findAllByText( /2 rows changed since this editor loaded them/ ) ).length ).toBeGreaterThan( 0 );
+		expect( saveEdits ).not.toHaveBeenCalled();
 	} );
 } );
 

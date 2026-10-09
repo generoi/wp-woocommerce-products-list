@@ -246,4 +246,96 @@ class VariationsTest extends RestTestCase
             $this->assertIsArray(wp_cache_get(\WC_Data::generate_meta_cache_key($id, 'products'), 'products'), "variation #{$id}");
         }
     }
+
+    /**
+     * `GET /wc/v3/variations?parent=…`: many parents' variations in a few
+     * pages instead of one request per parent (expand all, bulk edit of a
+     * whole page), grouped by parent in the order given, each parent's in
+     * menu order, and within the query budget of one parent's expand.
+     */
+    public function test_variations_across_parents_come_grouped_in_the_given_order(): void
+    {
+        global $wpdb;
+
+        $first = $this->variableProduct(['38', '39', '40']);
+        $second = $this->variableProduct(['41', '42']);
+        $a = $first->get_children();
+        $b = $second->get_children();
+
+        foreach ([$a[0] => 5, $a[1] => 1, $a[2] => 1, $b[0] => 9, $b[1] => 0] as $id => $order) {
+            $variation = wc_get_product($id);
+            $variation->set_menu_order($order);
+            $variation->save();
+        }
+
+        $parents = [$second->get_id(), $first->get_id()];
+        $expected = [$b[1], $b[0], $a[1], $a[2], $a[0]];
+
+        $response = $this->request('GET', '/wc/v3/variations', ['parent' => $parents, 'per_page' => 100, '_fields' => 'id,parent_id,wc_products_list']);
+        $this->assertStatus(200, $response);
+        $rows = $this->data($response);
+        $this->assertSame($expected, array_column($rows, 'id'));
+        $this->assertSame($second->get_id(), $rows[0][Rows::KEY]['parent_id']);
+
+        // The app's explicit menu order keeps the grouping, and pages split nothing.
+        $paged = [];
+
+        foreach ([1, 2, 3] as $page) {
+            $response = $this->request('GET', '/wc/v3/variations', ['parent' => $parents, 'per_page' => 2, 'page' => $page, 'orderby' => 'menu_order', 'order' => 'asc', '_fields' => 'id']);
+            $this->assertStatus(200, $response);
+            array_push($paged, ...array_column($this->data($response), 'id'));
+        }
+
+        $this->assertSame($expected, $paged);
+
+        // Budget: one request for both parents costs no more than expanding one.
+        $big = $this->variableProduct(array_map('strval', range(20, 49)));
+        wp_cache_flush();
+        $before = $wpdb->num_queries;
+        $response = $this->request('GET', '/wc/v3/variations', [
+            'parent' => [$big->get_id(), $first->get_id(), $second->get_id()],
+            'per_page' => 100,
+            '_fields' => 'id,name,sku,price,regular_price,sale_price,stock_status,stock_quantity,status,parent_id,image,attributes,wc_products_list',
+        ]);
+        $this->assertCount(35, $this->data($response));
+        $queries = $wpdb->num_queries - $before;
+        $this->assertLessThanOrEqual(35, $queries, "{$queries} queries for 35 variations of 3 parents");
+    }
+
+    public function test_the_cross_parent_route_reads_by_parent_or_by_id(): void
+    {
+        $first = $this->variableProduct(['38', '39', '40']);
+        $second = $this->variableProduct(['41', '42']);
+        $a = $first->get_children();
+        $b = $second->get_children();
+        $route = '/wc-products-list/v1/variations';
+
+        // By parent, comma-separated as the app sends it: grouped in the order given, paged with the wc/v3 headers.
+        $response = $this->request('GET', $route, ['parent' => $second->get_id().','.$first->get_id(), 'per_page' => 4, '_fields' => 'id,parent_id,wc_products_list']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([...$b, $a[0], $a[1]], array_column($this->data($response), 'id'));
+        $this->assertSame($second->get_id(), $this->data($response)[0][Rows::KEY]['parent_id']);
+        $this->assertSame(5, (int) $response->get_headers()['X-WP-Total']);
+        $this->assertSame(2, (int) $response->get_headers()['X-WP-TotalPages']);
+
+        $response = $this->request('GET', $route, ['parent' => [$second->get_id(), $first->get_id()], 'per_page' => 4, 'page' => 2]);
+        $this->assertSame([$a[2]], array_column($this->data($response), 'id'));
+
+        // By id, across parents; a product id is no variation and is left out.
+        $response = $this->request('GET', $route, ['include' => implode(',', [$a[1], $b[0], $first->get_id()])]);
+        $this->assertStatus(200, $response);
+        $ids = array_column($this->data($response), 'id');
+        sort($ids);
+        $this->assertSame([$a[1], $b[0]], $ids);
+
+        // Exactly one of the two, at most 100 ids.
+        $this->assertStatus(400, $this->request('GET', $route, []));
+        $this->assertStatus(400, $this->request('GET', $route, ['include' => [$a[0]], 'parent' => [$first->get_id()]]));
+        $this->assertStatus(400, $this->request('GET', $route, ['include' => range(1, 101)]));
+        $this->assertStatus(400, $this->request('GET', $route, ['parent' => [$first->get_id()], 'per_page' => 101]));
+
+        // The list capability, as every route of the app.
+        $this->actAs('subscriber');
+        $this->assertStatus(403, $this->request('GET', $route, ['parent' => [$first->get_id()]]));
+    }
 }

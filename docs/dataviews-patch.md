@@ -29,7 +29,15 @@ tab for most of a minute on 2,500 rows. With it a toggle re-renders one row.
    `onChangeSelection`, the ordered selectable ids and `hasRangeGesture` from a live ref
    inside its handlers (shift-click ranges and ctrl-click toggles stay right).
 
-`tests/js/dataviews-row-memo.test.tsx` renders the patched bundle and asserts the row
+4. The parts of a row that re-render with it stay put: `ColumnPrimary` (the title column with
+   its checkbox label) is `memo`ised, `ItemActions` is `memo( ItemActionsBase )`, and
+   `CompactItemActions` renders a plain "Actions" button until first use (click, ArrowUp/
+   ArrowDown, or a mouse hovering it for `MENU_HOVER_INTENT_MS`, 120 ms) and mounts the
+   menu then, opening it at once when the mount came from a click or a key. A header
+   "Select all" on a 600-row page re-renders 600 checkboxes, not 600 menus and title cells.
+
+`tests/js/dataviews-row-parts-memo.test.tsx` covers 4 (primary column and actions render
+counts, the lazy menu opening on first click). `tests/js/dataviews-row-memo.test.tsx` renders the patched bundle and asserts the row
 render counts, the accumulating toggles and a shift-click range.
 
 ## What the app must keep doing
@@ -42,8 +50,12 @@ through `onChangeView`. A new inline arrow for any of these re-renders every row
 ## Upgrading `@wordpress/dataviews`
 
 `pnpm patch @wordpress/dataviews@<new version>` opens the new bundle (with this patch
-applied when it still fits); re-apply the four edits above by hand if it does not, run
+applied when it still fits); re-apply the edits above by hand if it does not, run
 `pnpm patch-commit <dir>`, then `pnpm test` (the row-memo test fails loudly when the
 memo is lost) and `pnpm build`. Drop the patch the day upstream memoises its rows
 (watch `src/components/dataviews-layouts/table/index.tsx` for a `memo(` around
 `TableRow`).
+
+## Primary actions as icon buttons (`ButtonTrigger`)
+
+DataViews 20 renders a primary action as a text button in the table, and its CSS shows it only on the hovered or selected row. The product owner wants Quick edit visible on every row without hover. `ButtonTrigger` now renders an action that has an `icon` and sets `showIcon: true` as `Button` with `icon`, `label` (its accessible name and tooltip), `showTooltip` and the class `dataviews-primary-action-button`; every other primary action is unchanged. resources/style.scss keeps `.dataviews-primary-action-button` visible on every table row (plain CSS, no per-row state). Test: tests/js/dataviews-primary-icon.test.tsx.

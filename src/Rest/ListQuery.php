@@ -212,10 +212,18 @@ final class ListQuery
 
         $explicit = $request->get_query_params()['orderby'] ?? $request->get_body_params()['orderby'] ?? null;
 
-        if ($explicit === null || $explicit === '') {
+        $parents = self::ids($args['post_parent__in'] ?? []);
+        $acrossParents = ! isset($args['post_parent']) && $parents !== [];
+
+        if ($explicit === null || $explicit === '' || ($acrossParents && $explicit === 'menu_order')) {
             // The order the product editor shows them in, and the one
-            // WooCommerce itself reads the children in.
-            $args['orderby'] = ['menu_order' => 'ASC', 'ID' => 'ASC'];
+            // WooCommerce itself reads the children in. Across parents
+            // (`GET /wc/v3/variations?parent=1,2,3`, many parents' variations
+            // in a few pages instead of one request per parent): grouped by
+            // parent in the order given, so pages never split a tie.
+            $args['orderby'] = $acrossParents
+                ? ['post_parent__in' => 'ASC', 'menu_order' => 'ASC', 'ID' => 'ASC']
+                : ['menu_order' => 'ASC', 'ID' => 'ASC'];
             $args['order'] = 'ASC';
         }
 
@@ -409,8 +417,10 @@ final class ListQuery
 
         $variations = '/wc/v3/products/(?P<product_id>[\d]+)/variations';
 
-        if (isset($endpoints[$variations])) {
-            $endpoints[$variations] = $this->extendCollection($endpoints[$variations], ['menu_order'], []);
+        foreach ([$variations, '/wc/v3/variations'] as $route) {
+            if (isset($endpoints[$route])) {
+                $endpoints[$route] = $this->extendCollection($endpoints[$route], ['menu_order'], []);
+            }
         }
 
         return $endpoints;

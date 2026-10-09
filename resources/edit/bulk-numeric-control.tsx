@@ -6,13 +6,13 @@
  * save time.
  */
 import { BaseControl, SelectControl, TextControl, __experimentalHStack as HStack, __experimentalText as Text } from '@wordpress/components';
-import { useId, useMemo } from '@wordpress/element';
+import { useId, useMemo, useRef, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import type { ComponentType } from 'react';
 import type { DataFormControlProps } from '../dataviews';
 import type { Settings } from '../types';
 import type { FieldCurrency } from '../extensions/declarative';
-import { DONT_CHANGE, isNumericOp, ROUNDING_ENDINGS, validateNumericOp, WHOLE_UNIT_ENDINGS } from './bulk-numeric';
+import { DONT_CHANGE, isNumericOp, parseShorthand, ROUNDING_ENDINGS, validateNumericOp, WHOLE_UNIT_ENDINGS } from './bulk-numeric';
 import type { RoundMode } from './bulk-numeric';
 import type { NumericKind, NumericOp } from './bulk-numeric';
 
@@ -88,6 +88,43 @@ function hint( op: NumericOp, salePrice: boolean ): string | null {
 	return salePrice ? __( 'Relative to each row’s current sale price. Rows without a sale price are skipped; use “Regular price minus” to start a sale.', 'wp-woocommerce-products-list' ) : null;
 }
 
+/** What the idle note says: the value box takes shorthand. */
+export function shorthandHint( kind: NumericKind, salePrice: boolean ): string {
+	if ( kind !== 'money' ) {
+		return __( 'Type a number to change to it, or +5 / -5 to change each item by that much.', 'wp-woocommerce-products-list' );
+	}
+
+	return salePrice
+		? __( 'Type a price to change to it, +5% / -10% / +2 to change each item’s sale price, or r-20% for its regular price minus 20%.', 'wp-woocommerce-products-list' )
+		: __( 'Type a price to change to it, or +5%, -10%, +2 to change each item by that much.', 'wp-woocommerce-products-list' );
+}
+
+/**
+ * The op a keystroke in the value box makes: shorthand picks the operation
+ * (`+5%`, `-2`, `=49.90`, `r-20%`); a bare number goes into the chosen one,
+ * or is "change to" when none was chosen; an empty box is "no change"
+ * unless the operation was picked in the select.
+ */
+export function opFromInput( text: string, current: NumericOp, kind: NumericKind, salePrice: boolean, chosen: boolean ): NumericOp {
+	const keep = current.round && current.operation !== 'set' ? { round: current.round, ...( current.roundMode ? { roundMode: current.roundMode } : {} ) } : {};
+
+	if ( text.trim() === '' ) {
+		return chosen && current.operation !== 'dont_change' ? { ...current, value: '' } : DONT_CHANGE;
+	}
+
+	const parsed = parseShorthand( text, kind, salePrice );
+
+	if ( parsed ) {
+		return parsed.operation === 'set' ? parsed : { ...parsed, ...keep };
+	}
+
+	if ( current.operation === 'dont_change' ) {
+		return { operation: 'set', value: text };
+	}
+
+	return { ...current, value: text };
+}
+
 export interface BulkNumericControlOptions {
 	kind: NumericKind;
 	settings: Settings;
@@ -161,6 +198,9 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 	function BulkNumericControl( { data, field, onChange, hideLabelFromVision }: DataFormControlProps< FormData > ) {
 		const raw = data[ field.id ];
 		const op: NumericOp = isNumericOp( raw ) ? raw : DONT_CHANGE;
+		// What was typed ("+5%"), shown while it is what the op came from; the op alone is shown otherwise (a reset, the select).
+		const [ draft, setDraft ] = useState< { text: string; op: string } | null >( null );
+		const chosenRef = useRef( false );
 		const list = useMemo( () => choices( kind, settings, salePrice, currency ), [] );
 		const idle = op.operation === 'dont_change';
 		const error = validateNumericOp( op, kind, settings );
@@ -172,6 +212,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 		const roundable = ! idle && op.operation !== 'set';
 
 		const update = ( next: NumericOp ) => onChange( { [ field.id ]: next } );
+		const shownValue = draft && draft.op === JSON.stringify( op ) ? draft.text : idle ? '' : op.value;
 
 		return (
 			<BaseControl
@@ -193,6 +234,9 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						onChange={ ( value: string ) => {
 							const choice = list.find( ( entry ) => entry.value === value ) ?? list[ 0 ]!;
 
+							chosenRef.current = choice.operation !== 'dont_change';
+							setDraft( null );
+
 							update( {
 								operation: choice.operation,
 								value: op.value,
@@ -209,10 +253,14 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						className="wc-pl-bulk-numeric__value"
 						type="text"
 						inputMode="decimal"
-						disabled={ idle }
 						placeholder={ idle ? options.placeholder ?? '' : '' }
-						value={ idle ? '' : op.value }
-						onChange={ ( value: string ) => update( { ...op, value } ) }
+						value={ shownValue }
+						onChange={ ( value: string ) => {
+							const next = opFromInput( value, op, kind, salePrice, chosenRef.current );
+
+							setDraft( { text: value, op: JSON.stringify( next ) } );
+							update( next );
+						} }
 					/>
 				</HStack>
 				{ rounding.length > 0 ? (
@@ -256,7 +304,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 				) : null }
 				{ /* A fixed slot: an operation's note appearing or going never moves the fields below. */ }
 				<Text variant="muted" className="wc-pl-bulk-numeric__note">
-					{ note ?? '' }
+					{ note ?? ( idle ? shorthandHint( kind, salePrice ) : '' ) }
 				</Text>
 			</BaseControl>
 		);

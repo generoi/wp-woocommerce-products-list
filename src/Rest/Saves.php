@@ -483,7 +483,34 @@ final class Saves
             return;
         }
 
+        self::clearBrands($product, $request);
         Recorder::complete($product, $request);
+    }
+
+    /**
+     * `brands: []` empties the product's brands. WooCommerce Brands
+     * (`WC_Brands::rest_api_add_brands_to_product`) writes the list only
+     * when it is not empty, so removing the last brand would answer 200
+     * and keep it. Before the recorder reads the saved values, so the
+     * change is logged and can be reverted.
+     */
+    public static function clearBrands(WC_Product $product, WP_REST_Request $request): void
+    {
+        if ($product->is_type('variation') || $product->get_id() <= 0 || ! taxonomy_exists('product_brand')) {
+            return;
+        }
+
+        $brands = $request->get_param('brands');
+
+        if (! is_array($brands) || $brands !== []) {
+            return;
+        }
+
+        if (wp_get_object_terms($product->get_id(), 'product_brand', ['fields' => 'ids']) === []) {
+            return;
+        }
+
+        wp_set_object_terms($product->get_id(), [], 'product_brand');
     }
 
     /**

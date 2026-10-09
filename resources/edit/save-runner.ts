@@ -48,6 +48,146 @@ export interface SaveDeps {
 	normalizeRow?( raw: RawProduct | RawVariation, parentId?: number ): ProductListItem;
 	/** Cross-parent variation requests in flight at once (they are independent per chunk); `DEFAULT_CONCURRENCY` when missing. */
 	concurrency?: number;
+	/**
+	 * Read these rows' stored values again (`fields` plus id and stamp), after
+	 * a request failed as a whole with an outcome the client cannot know (the
+	 * connection dropped, a gateway timeout, a 5xx after the commit). By id;
+	 * rows that no longer exist are absent. Without it such rows roll back
+	 * to their snapshots and are reported as failed.
+	 */
+	rereadRows?( items: ProductListItem[], fields: string[] ): Promise< Map< number, ProductListItem > >;
+	/** Run `task` on the next macrotask (tests pass a synchronous one). */
+	defer?( task: () => void ): void;
+}
+
+/**
+ * The next macrotask, without the timer clamping of a hidden tab
+ * (MessageChannel is not throttled the way setTimeout is).
+ */
+export function nextTask( task: () => void ): void {
+	if ( typeof MessageChannel === 'function' ) {
+		const channel = new MessageChannel();
+
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			task();
+		};
+		channel.port2.postMessage( null );
+
+		return;
+	}
+
+	setTimeout( task, 0 );
+}
+
+/** The error code of a row whose write may or may not have been stored (the re-read could not tell). */
+export const UNCERTAIN_CODE = 'wc_products_list_uncertain';
+
+/**
+ * Whether a request that failed as a whole may still have been stored: no
+ * HTTP answer at all (the connection dropped, a timeout), an unreadable
+ * one, or a server/gateway error. A 4xx was refused before anything was
+ * written.
+ */
+export function outcomeUnknown( error: unknown ): boolean {
+	const status = Number( ( error as { status?: unknown } | null )?.status ?? 0 );
+	const code = String( ( error as { code?: unknown } | null )?.code ?? '' );
+
+	if ( status >= 400 && status < 500 ) {
+		return false;
+	}
+
+	return status === 0 || status >= 500 || code === 'fetch_error' || code === 'invalid_json' || code === 'invalid_response';
+}
+
+function sameValue( wanted: unknown, stored: unknown ): boolean | null {
+	if ( wanted === null || wanted === undefined || wanted === '' ) {
+		return stored === null || stored === undefined || stored === '';
+	}
+
+	if ( typeof wanted === 'number' || typeof wanted === 'string' ) {
+		if ( typeof stored !== 'number' && typeof stored !== 'string' ) {
+			return false;
+		}
+
+		const a = Number( wanted );
+		const b = Number( stored );
+
+		// "21.9" and "21.90" are one price.
+		return String( wanted ) === String( stored ) || ( String( wanted ).trim() !== '' && String( stored ).trim() !== '' && Number.isFinite( a ) && Number.isFinite( b ) && a === b );
+	}
+
+	if ( typeof wanted === 'boolean' ) {
+		return stored === wanted;
+	}
+
+	if ( Array.isArray( wanted ) ) {
+		if ( ! Array.isArray( stored ) ) {
+			return false;
+		}
+
+		// Terms and images go by id; anything else is not compared.
+		const ids = ( list: unknown[] ) => list.map( ( entry ) => ( typeof entry === 'object' && entry !== null && 'id' in entry ? Number( ( entry as { id: unknown } ).id ) : NaN ) );
+		const a = ids( wanted );
+		const b = ids( stored );
+
+		if ( a.some( Number.isNaN ) || b.some( Number.isNaN ) ) {
+			return null;
+		}
+
+		return a.length === b.length && a.every( ( id ) => b.includes( id ) );
+	}
+
+	if ( typeof wanted === 'object' ) {
+		if ( typeof stored !== 'object' || stored === null || Array.isArray( stored ) ) {
+			return false;
+		}
+
+		let known = false;
+
+		for ( const [ key, value ] of Object.entries( wanted as Record< string, unknown > ) ) {
+			const same = sameValue( value, ( stored as Record< string, unknown > )[ key ] );
+
+			if ( same === false ) {
+				return false;
+			}
+
+			known ||= same === true;
+		}
+
+		return known ? true : null;
+	}
+
+	return null;
+}
+
+/**
+ * Whether a re-read row holds what the write sent: true when every key it
+ * can compare matches (and there is one), false when one differs, null when
+ * nothing could be compared (only a relative stock change, meta data).
+ */
+export function payloadStored( row: Record< string, unknown >, payload: Record< string, unknown > ): boolean | null {
+	let known = false;
+
+	for ( const [ key, value ] of Object.entries( payload ) ) {
+		if ( key === STOCK_DELTA_KEY || key === 'meta_data' ) {
+			continue;
+		}
+
+		if ( ! ( key in row ) ) {
+			continue;
+		}
+
+		const same = sameValue( value, row[ key ] );
+
+		if ( same === false ) {
+			return false;
+		}
+
+		known ||= same === true;
+	}
+
+	return known ? true : null;
 }
 
 /** Variation chunks sent side by side: a 500-variation campaign is three requests at a time, not five in a row. */
@@ -373,22 +513,31 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	const byId = new Map( prepared.map( ( entry ) => [ entry.target.item.id, entry ] ) );
 
 	/*
-	 * The returned rows go into the cache on the next task, not inside the
-	 * request loop: patching re-renders the list (hundreds of expanded
-	 * variation rows), and done synchronously that render sat between one
-	 * response and the next request of its lane, seconds of idle network on
-	 * a 261-variation campaign. Responses that land together share one
-	 * render. Optimistic patches flush what is queued first, so the order
-	 * of writes to a row never changes, and the save flushes before it
-	 * resolves.
+	 * The cache is written twice per save, not once per response: the
+	 * optimistic values when the requests are on their way, and every
+	 * returned row (and rollback) in one go when the last one is back. Each
+	 * write re-renders the list (hundreds of expanded variation rows), and a
+	 * render between two responses held the main thread for a second at a
+	 * time while the next request of a lane waited. The optimistic patch
+	 * runs on the next task, after the requests went out (a render in the
+	 * same task ran before apiFetch's middleware chain reached fetch(), so
+	 * the network sat idle behind it). A row's writes keep their order: a
+	 * pending optimistic patch is applied before the final flush.
 	 */
+	const defer = deps.defer ?? nextTask;
 	let queued: Array< Partial< ProductListItem > & { id: number } > = [];
-	let flushTimer: ReturnType< typeof setTimeout > | null = null;
-	const flush = (): void => {
-		if ( flushTimer !== null ) {
-			clearTimeout( flushTimer );
-			flushTimer = null;
+	let optimistic: Array< Partial< ProductListItem > & { id: number } > = [];
+	let optimisticScheduled = false;
+	const applyOptimistic = (): void => {
+		if ( optimistic.length ) {
+			const patches = optimistic;
+
+			optimistic = [];
+			deps.patchItems( patches );
 		}
+	};
+	const flush = (): void => {
+		applyOptimistic();
 
 		if ( queued.length ) {
 			const patches = queued;
@@ -399,15 +548,20 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	};
 	const queuePatches = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {
 		queued = queued.concat( patches );
+	};
+	const patchSoon = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {
+		optimistic = optimistic.concat( patches );
 
-		if ( flushTimer === null ) {
-			flushTimer = setTimeout( flush, 0 );
+		if ( ! optimisticScheduled ) {
+			optimisticScheduled = true;
+			defer( () => {
+				optimisticScheduled = false;
+				applyOptimistic();
+			} );
 		}
 	};
-	const patchNow = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {
-		flush();
-		deps.patchItems( patches );
-	};
+	/** Groups whose request failed as a whole with an outcome the client cannot know: re-read before they are reported. */
+	const uncertain: Array< { group: Prepared[]; message: string; code?: string } > = [];
 
 	// One patch per response: every patch re-renders the list (and the
 	// expanded variations), so 100 rows go into the cache in one go, not 100.
@@ -457,6 +611,12 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		const code = errorCode( error );
 		const message = humanizeError( code, errorMessage( error ) );
 
+		if ( deps.rereadRows && outcomeUnknown( error ) ) {
+			uncertain.push( { group, message, code } );
+
+			return;
+		}
+
 		for ( const entry of group ) {
 			result.errors.push( { id: entry.target.item.id, message, code } );
 		}
@@ -487,8 +647,8 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		const across = deps.batchVariationsAcross;
 		const lanes = packVariationLanes( Array.from( byParent.values() ), deps.variationsBatchSize ?? deps.batchSize );
 
-		// Every row shows its new value at once, not chunk by chunk.
-		patchNow( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+		// Every row shows its new value at once, not chunk by chunk (once the requests are out).
+		patchSoon( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 		await runConcurrently(
 			lanes.map( ( lane ) => async () => {
@@ -513,7 +673,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	} else {
 		for ( const [ parentId, entries ] of byParent ) {
 			for ( const group of chunk( entries, deps.batchSize ) ) {
-				patchNow( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+				patchSoon( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 				try {
 					const response = await deps.batchVariations( parentId, group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
@@ -536,7 +696,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		const concurrency = deps.concurrency ?? DEFAULT_CONCURRENCY;
 		const size = Math.max( 1, Math.min( deps.batchSize, Math.ceil( parents.length / concurrency ) ) );
 
-		patchNow( parents.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+		patchSoon( parents.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 		await runConcurrently(
 			chunk( parents, size ).map( ( group ) => async () => {
@@ -555,7 +715,86 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		);
 	}
 
+	if ( uncertain.length ) {
+		await settleUncertain( deps, uncertain, result, queuePatches );
+	}
+
 	flush();
 
 	return result;
+}
+
+/**
+ * The rows of requests that failed with an unknown outcome, read again:
+ * a row that holds what was sent is reported as updated (a retry of a
+ * relative op would otherwise apply it a second time), a row that does
+ * not is a plain failure and shows its stored values; a row the re-read
+ * cannot decide on (or that could not be read) fails with
+ * `UNCERTAIN_CODE`, and the editor asks before a relative op runs on it again.
+ */
+async function settleUncertain(
+	deps: SaveDeps,
+	groups: Array< { group: Prepared[]; message: string; code?: string } >,
+	result: SaveResult,
+	queuePatches: ( patches: Array< Partial< ProductListItem > & { id: number } > ) => void
+): Promise< void > {
+	const entries = groups.flatMap( ( { group, message, code } ) => group.map( ( entry ) => ( { entry, message, code } ) ) );
+	const keys = new Set< string >( [ 'id', 'date_modified_gmt', 'status' ] );
+
+	for ( const { entry } of entries ) {
+		for ( const key of Object.keys( entry.payload ) ) {
+			keys.add( key === STOCK_DELTA_KEY ? 'stock_quantity' : key );
+		}
+	}
+
+	let fresh: Map< number, ProductListItem > | null = null;
+
+	try {
+		fresh = await deps.rereadRows!( entries.map( ( { entry } ) => entry.target.item ), Array.from( keys ).sort() );
+	} catch {
+		fresh = null;
+	}
+
+	for ( const { entry, message, code } of entries ) {
+		const id = entry.target.item.id;
+		const row = fresh?.get( id );
+
+		if ( ! fresh ) {
+			result.errors.push( { id, message: uncertainMessage( message ), code: UNCERTAIN_CODE } );
+			queuePatches( [ entry.snapshot as Partial< ProductListItem > & { id: number } ] );
+			continue;
+		}
+
+		if ( ! row ) {
+			result.errors.push( { id, message: humanizeError( 'woocommerce_rest_product_invalid_id', '' ), code: 'woocommerce_rest_product_invalid_id' } );
+			queuePatches( [ entry.snapshot as Partial< ProductListItem > & { id: number } ] );
+			continue;
+		}
+
+		const stored = payloadStored( row as Record< string, unknown >, entry.payload );
+		const before = ( entry.target.item as { date_modified_gmt?: unknown } ).date_modified_gmt;
+		const after = ( row as { date_modified_gmt?: unknown } ).date_modified_gmt;
+		const touched = typeof before === 'string' && before !== '' && typeof after === 'string' && after !== '' && before !== after;
+		const patch = { ...withoutUntouchedImages( row as Record< string, unknown >, entry.payload ), id } as Partial< ProductListItem > & { id: number };
+
+		if ( stored === true || ( stored === null && touched ) ) {
+			// The write went through before the answer was lost.
+			result.updated.push( { ...entry.target.item, ...row } as ProductListItem );
+			queuePatches( [ patch ] );
+			continue;
+		}
+
+		// The row shows what is stored now, whatever the request did.
+		queuePatches( [ patch ] );
+
+		if ( stored === false && ! touched ) {
+			result.errors.push( { id, message, ...( code ? { code } : {} ) } );
+		} else {
+			result.errors.push( { id, message: uncertainMessage( message ), code: UNCERTAIN_CODE } );
+		}
+	}
+}
+
+function uncertainMessage( message: string ): string {
+	return `${ message } ${ __( 'It may have been saved anyway: check its current values before you update it again.', 'wp-woocommerce-products-list' ) }`;
 }

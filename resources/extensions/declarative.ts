@@ -378,6 +378,20 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 			untranslated: Array.isArray( untranslated ) ? ( untranslated as UntranslatedTerm[] ).filter( ( term ) => term && typeof term === 'object' ) : [],
 		};
 	};
+	// An untranslated value's container may carry what the shop shows instead (`effective`) and its label (`shownLabel`).
+	const shownReference = def.reference
+		? ( item: ProductListItem ): { label: string; text: string } | null => {
+				const container = containerPath ? getPath( item, containerPath ) : null;
+
+				if ( ! container || typeof container !== 'object' ) {
+					return null;
+				}
+
+				const { effective, shownLabel } = container as { effective?: unknown; shownLabel?: unknown };
+
+				return typeof effective === 'string' && effective !== '' && typeof shownLabel === 'string' && shownLabel !== '' ? { label: shownLabel, text: effective } : null;
+		  }
+		: undefined;
 	const untranslatedMarker = ( terms: UntranslatedTerm[], label: string | undefined ) => {
 		if ( ! terms.length ) {
 			return null;
@@ -467,6 +481,7 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 		type: TYPE_MAP[ def.type ],
 		elements: def.options.length > 0 ? def.options.map( ( option ) => ( { value: option.value, label: option.label } ) ) : undefined,
 		Edit: editControlFor( def, currency ),
+		html: def.type === 'html' || undefined,
 		readOnly: ! editable,
 		enableSorting: def.enableSorting,
 		enableGlobalSearch: false,
@@ -497,6 +512,7 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 			  }
 			: false,
 		reference,
+		shownReference,
 		source: def.source || 'extension',
 		columnStyle: defaultColumnStyle( def ),
 		columnGroup: def.group ?? undefined,

@@ -125,7 +125,8 @@ describe( 'applyNumericOp', () => {
 		}
 
 		expect( checked ).toBeGreaterThan( 100000 );
-	} );
+		// ~257k checks: a few seconds alone, more while the whole suite (and a build) share the CPU.
+	}, 90000 );
 
 	it( 'projects a sale price from the regular price with regular_minus', () => {
 		expect( applyNumericOp( '', op( 'regular_minus', '20', true ), 'money', settings, { regular: '189' } ) ).toBe( '151.20' );

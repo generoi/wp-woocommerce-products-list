@@ -8,7 +8,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DataFormControlProps } from '../../resources/dataviews';
 import type { EditorHost } from '../../resources/edit/editor-context';
-import type { EditorSession } from '../../resources/edit/editor-rows';
+import type { EditorSession } from '../../resources/edit/editor-session';
 import type { FormData } from '../../resources/edit/form-fields';
 import type { ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, field, simple } from './edit-fixtures';

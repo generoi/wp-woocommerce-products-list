@@ -1,0 +1,182 @@
+/**
+ * "Translate product by product" in a bulk language tab, and the server's
+ * dry run of "Edit translated text".
+ */
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { gridTextToHtml, htmlToGridText, isPlainParagraphs, TranslationGrid, TranslationStore } from '../../resources/edit/translation-grid';
+import { ServerPreview, serverPreviewLines, serverPreviewPath, useServerPreview } from '../../resources/edit/server-preview';
+import type { ServerPreviewResponse } from '../../resources/edit/server-preview';
+import type { DeclarativeAction, ProductField, ProductListItem } from '../../resources/types';
+
+function i18nField( lang: string, name: string ): ProductField {
+	return {
+		id: `i18n:${ lang }.${ name }`,
+		label: `${ lang }: ${ name }`,
+		type: 'text',
+		rest: {
+			fields: [ 'i18n' ],
+			read: ( item: unknown ) => ( item as { i18n?: Record< string, Record< string, { value?: string } > > } ).i18n?.[ lang ]?.[ name ]?.value,
+			write: ( value: unknown ) => ( { i18n: { [ lang ]: { [ name ]: value } } } ),
+		},
+		reference: ( item: unknown ) => ( item as { i18n?: Record< string, Record< string, { source?: string } > > } ).i18n?.[ lang ]?.[ name ]?.source,
+	} as unknown as ProductField;
+}
+
+function product( id: number, name: string, se: { name?: string; short?: string } = {} ): ProductListItem {
+	return {
+		id,
+		name,
+		type: 'simple',
+		parent_id: 0,
+		i18n: { se: { name: { value: se.name ?? '', source: name }, short_description: { value: se.short ?? '', source: '<p>Kuvaus</p>' } } },
+	} as unknown as ProductListItem;
+}
+
+describe( 'translation grid text', () => {
+	it( 'edits plain paragraphs as text and stores them in the same shape', () => {
+		expect( isPlainParagraphs( '<p>A &amp; B</p>\n<p>C<br />D</p>' ) ).toBe( true );
+		expect( isPlainParagraphs( '<p>A <strong>B</strong></p>' ) ).toBe( false );
+		expect( htmlToGridText( '<p>A &amp; B</p>\n<p>C<br />\nD</p>' ) ).toBe( 'A & B\n\nC\nD' );
+		expect( gridTextToHtml( 'A & B\n\nC\nD', '<p>old</p>' ) ).toBe( '<p>A &amp; B</p>\n<p>C<br />\nD</p>' );
+		// Stored without <p> (wpautop adds them): stays without.
+		expect( gridTextToHtml( 'One\n\nTwo <3', 'old' ) ).toBe( 'One\n\nTwo &lt;3' );
+		// Other markup is edited as HTML, untouched.
+		expect( htmlToGridText( '<ul><li>x</li></ul>' ) ).toBe( '<ul><li>x</li></ul>' );
+		expect( gridTextToHtml( '<ul><li>y</li></ul>', '<ul><li>x</li></ul>' ) ).toBe( '<ul><li>y</li></ul>' );
+	} );
+
+	it( 'counts products with edits and drops an edit typed back to the stored value', () => {
+		const store = new TranslationStore();
+		const seen: number[] = [];
+
+		store.subscribe( ( count ) => seen.push( count ) );
+		store.set( 1, 'i18n:se.name', 'Sockor', '' );
+		store.set( 1, 'i18n:se.short_description', 'x', '' );
+		store.set( 2, 'i18n:se.name', 'Skor', '' );
+		store.set( 2, 'i18n:se.name', '', '' );
+
+		expect( store.count() ).toBe( 1 );
+		expect( store.entries() ).toEqual( [ [ 1, { 'i18n:se.name': 'Sockor', 'i18n:se.short_description': 'x' } ] ] );
+		expect( seen ).toEqual( [ 1, 2, 1 ] );
+		store.clear( [ 1 ] );
+		expect( store.count() ).toBe( 0 );
+	} );
+} );
+
+describe( 'TranslationGrid', () => {
+	it( 'lists the products (not variations) with their texts and moves down the column on Enter', async () => {
+		const rows = [ product( 1, 'Villasukat', { name: 'Ullsockor' } ), product( 2, 'Kengät' ) ];
+		const load = vi.fn( async () => ( { items: rows, missing: [], parentStamps: new Map() } ) );
+		const store = new TranslationStore();
+		const fields = [ i18nField( 'se', 'name' ), i18nField( 'se', 'short_description' ) ];
+		const variation = { id: 9, name: 'V', type: 'variation', parent_id: 1 } as unknown as ProductListItem;
+
+		render(
+			<TranslationGrid
+				tabId="i18n:se"
+				tabLabel="Svenska"
+				items={ [ ...rows, variation ] }
+				fields={ fields }
+				settings={ { languages: { default: 'fi', others: [ 'se' ], labels: { fi: 'Suomi', se: 'Svenska' } } } }
+				store={ store }
+				load={ load as never }
+			/>
+		);
+
+		expect( screen.getByText( /1 variation is not listed/ ) ).toBeTruthy();
+		fireEvent.click( screen.getByText( /Translate product by product/ ) );
+		const details = document.querySelector( 'details' ) as HTMLDetailsElement;
+
+		details.open = true;
+		fireEvent( details, new Event( 'toggle' ) );
+
+		await waitFor( () => expect( screen.getAllByRole( 'textbox' ).length ).toBe( 4 ) );
+		expect( load ).toHaveBeenCalledWith( rows, expect.arrayContaining( [ 'i18n.se.name', 'i18n.se.short_description' ] ) );
+
+		const names = Array.from( document.querySelectorAll< HTMLInputElement >( 'input[data-grid-col="name"]' ) );
+
+		expect( names[ 0 ]!.value ).toBe( 'Ullsockor' );
+		// No own name: the reference shows what the shop falls back to.
+		expect( screen.getByText( /Suomi: Kengät/ ) ).toBeTruthy();
+		expect( Array.from( document.querySelectorAll< HTMLTextAreaElement >( 'textarea' ) )[ 0 ]!.placeholder ).toBe( 'Kuvaus' );
+
+		names[ 0 ]!.focus();
+		fireEvent.keyDown( names[ 0 ]!, { key: 'Enter' } );
+		expect( document.activeElement ).toBe( names[ 1 ] );
+
+		fireEvent.change( names[ 1 ]!, { target: { value: 'Skor' } } );
+		expect( store.entries() ).toEqual( [ [ 2, { 'i18n:se.name': 'Skor' } ] ] );
+		await waitFor( () => expect( screen.getByText( /1 product changed/ ) ).toBeTruthy() );
+	} );
+} );
+
+const transform: DeclarativeAction = {
+	id: 'i18n_transform',
+	label: 'Edit translated text',
+	args: [
+		{ id: 'operation', label: 'Operation', type: 'select', required: true, default: 'replace', options: [] },
+		{ id: 'text', label: 'Text', type: 'text', required: false, default: null, options: [] },
+	],
+} as unknown as DeclarativeAction;
+
+const response: ServerPreviewResponse = {
+	items: [
+		{ id: 1, name: 'Collonil', name_source: { lang: 'en', label: 'English', own: false, value: 'Collonil' }, fields: { meta_title: { old: '', new: 'Collonil | Brand', status: 'change' } } },
+		{ id: 2, name: 'Boot', fields: { meta_title: { old: 'x', new: null, status: 'skipped', reason: 'no_own_name' } } },
+		{ id: 3, name: 'Same', fields: { meta_title: { old: 'y', new: null, status: 'unchanged' } } },
+		{ id: 4, error: 'gone', message: 'This item no longer exists.' },
+	],
+	summary: { items: 3, change: 1, unchanged: 1, skipped: 1, error: 0, name_sources: { en: 1 } },
+	message: '1 of 3 have no Deutsch name yet: {name} would be the name in English (1).',
+};
+
+describe( 'server preview', () => {
+	it( 'is asked for text transforms only, when the integration has the route', () => {
+		const settings = { languages: { default: 'fi', others: [], labels: {}, routes: { preview: '/gds-woo-i18n/v1/products-list/preview' } } };
+
+		expect( serverPreviewPath( transform, { operation: 'template' }, settings ) ).toBe( '/gds-woo-i18n/v1/products-list/preview' );
+		expect( serverPreviewPath( transform, { operation: 'set' }, settings ) ).not.toBeNull();
+		expect( serverPreviewPath( transform, { operation: 'clear' }, settings ) ).toBeNull();
+		expect( serverPreviewPath( transform, { operation: 'template' }, { languages: { default: 'fi', others: [], labels: {} } } ) ).toBeNull();
+	} );
+
+	it( 'lists changes first, names where {name} comes from, and leaves unchanged values out', () => {
+		const lines = serverPreviewLines( response, ( field ) => ( field === 'meta_title' ? 'SEO title' : field ), 'Deutsch' );
+
+		expect( lines.map( ( line ) => line.status ) ).toEqual( [ 'change', 'skipped', 'gone' ] );
+		expect( lines[ 0 ] ).toMatchObject( { name: 'Collonil', field: 'SEO title', after: 'Collonil | Brand', note: '{name} from English' } );
+		expect( lines[ 1 ]!.note ).toBe( 'skipped: no Deutsch name of its own' );
+
+		render( <ServerPreview state={ { result: { ...response, notPreviewed: 0 }, loading: false, failed: false } } fieldLabel={ () => 'SEO title' } langLabel="Deutsch" /> );
+		expect( screen.getByText( response.message! ) ).toBeTruthy();
+		expect( screen.getByText( /Preview: 1 value changes\. 1 skipped\./ ) ).toBeTruthy();
+	} );
+
+	it( 'debounces, sends the first hundred ids and drops a superseded answer', async () => {
+		vi.useFakeTimers();
+		const fetcher = vi.fn( async ( _path: string, _ids: number[], _args: Record< string, unknown > ) => response );
+		const ids = Array.from( { length: 150 }, ( _, index ) => index + 1 );
+		let state: ReturnType< typeof useServerPreview > | null = null;
+
+		function Probe( { text }: { text: string } ) {
+			state = useServerPreview( '/p', ids, { operation: 'template', text }, fetcher );
+
+			return null;
+		}
+
+		const { rerender } = render( <Probe text="{name} a" /> );
+
+		rerender( <Probe text="{name} ab" /> );
+		await act( async () => {
+			vi.advanceTimersByTime( 400 );
+		} );
+		vi.useRealTimers();
+		await waitFor( () => expect( state!.result ).not.toBeNull() );
+
+		expect( fetcher ).toHaveBeenCalledTimes( 1 );
+		expect( fetcher.mock.calls[ 0 ]![ 1 ] ).toHaveLength( 150 );
+		expect( ( fetcher.mock.calls[ 0 ]![ 2 ] as { text: string } ).text ).toBe( '{name} ab' );
+		expect( state!.result!.notPreviewed ).toBe( 50 );
+	} );
+} );

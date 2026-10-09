@@ -15,6 +15,14 @@ export const MAX_SNACKBARS = 3;
 /** How long a snackbar with an action (Undo) stays, in ms, not counting time under the pointer or focus. */
 export const ACTION_TIMEOUT = 10000;
 
+/**
+ * Undo notices of destructive actions (Move to Trash) by id prefix: they
+ * stay until dismissed or superseded by a newer Undo, not ACTION_TIMEOUT,
+ * since History cannot put a trashed batch back. (A notice may also ask
+ * for this itself with `explicitDismiss: true`.)
+ */
+export const STICKY_UNDO_PREFIXES: readonly string[] = [ 'wc-pl-trash-' ];
+
 /** How long a plain snackbar stays, in ms (core's own snackbar timeout). */
 export const PLAIN_TIMEOUT = 6000;
 
@@ -32,11 +40,16 @@ function hasActions( notice: NoticeLike ): boolean {
 /**
  * How long a snackbar stays before it hides itself, or null when it stays
  * until dismissed: an error (it names what failed), or a notice its creator
- * asked to keep (`explicitDismiss: true`). A success with an Undo hides
- * after ACTION_TIMEOUT; the Undo stays reachable from History.
+ * asked to keep (`explicitDismiss: true`), or the Undo of a destructive
+ * action (STICKY_UNDO_PREFIXES). Another success with an Undo hides after
+ * ACTION_TIMEOUT; the Undo stays reachable from History.
  */
 export function snackbarTimeout( notice: NoticeLike ): number | null {
 	if ( notice.explicitDismiss === true || notice.status === 'error' ) {
+		return null;
+	}
+
+	if ( hasActions( notice ) && STICKY_UNDO_PREFIXES.some( ( prefix ) => notice.id.startsWith( prefix ) ) ) {
 		return null;
 	}
 

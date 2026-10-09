@@ -121,6 +121,27 @@ describe( 'reference help text', () => {
 
 		expect( formFor( fields, [ item ] ).get( 'i18n:se.name' ).description ).toBe( 'Default: Saga' );
 	} );
+
+	it( 'names the fallback text the shop shows now before the default', () => {
+		// As fieldFromDeclarative builds it from the value's container (`effective` + `shownLabel`).
+		const fields = coreFields().map( ( f ) =>
+			f.id === 'i18n:se.name'
+				? {
+						...f,
+						shownReference: ( row: ProductListItem ) => {
+							const entry = ( row as unknown as { i18n?: { se?: { name?: { effective?: string; shownLabel?: string } } } } ).i18n?.se?.name;
+
+							return entry?.effective && entry.shownLabel ? { label: entry.shownLabel, text: entry.effective } : null;
+						},
+				  }
+				: f
+		);
+		const item = simple( 1, { i18n: { se: { name: { value: '', source: 'Saga FI', effective: 'Saga EN', effectiveLang: 'en', shownLabel: 'Shown now (English fallback)' } } } } );
+
+		expect( formFor( fields, [ item ] ).get( 'i18n:se.name' ).description ).toBe( 'Shown now (English fallback): Saga EN · Default: Saga FI' );
+		// Bulk over several rows keeps the plain default line.
+		expect( formFor( fields, [ item, simple( 2, { i18n: { se: { name: { value: '', source: 'Saga FI' } } } } ) ] ).get( 'i18n:se.name' ).description ).toBe( 'Default: Saga FI' );
+	} );
 } );
 
 describe( 'variation shipping class', () => {

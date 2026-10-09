@@ -2,8 +2,9 @@
  * The expand/collapse control and the name cell that hosts it.
  *
  * Rendered by the `name` field inside DataViews, so it reads the
- * HierarchyViewContext that HierarchicalDataViews provides and nothing
- * else. Plain elements, no component library: the cell renders up to a
+ * hierarchy view that HierarchicalDataViews provides and nothing else,
+ * through per-row subscriptions (`useHierarchyRowView`): expanding one
+ * parent re-renders that parent's cell, not every name cell of the page. Plain elements, no component library: the cell renders up to a
  * thousand times per page and must stay cheap.
  */
 import { Icon, chevronRightSmall } from '@wordpress/icons';
@@ -11,7 +12,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from 'react';
 import { getItemId, isPlaceholderRow } from '../types/product';
 import type { ProductListItem } from '../types/product';
-import { useHierarchyView } from './context';
+import { useHierarchyRowView, useHierarchyViewGetter } from './context';
 import type { HierarchyViewValue } from './context';
 import type { ChildrenState } from './flatten';
 
@@ -28,14 +29,13 @@ function stop( event: MouseEvent | KeyboardEvent ): void {
 }
 
 export function Chevron( { item }: { item: ProductListItem } ) {
-	const view = useHierarchyView();
+	const { view, expanded, state } = useHierarchyRowView( item.id );
+	const current = useHierarchyViewGetter();
 
 	if ( ! view || ! view.getItemHasChildren( item ) ) {
 		return <span className="wc-pl-chevron wc-pl-chevron--spacer" aria-hidden="true" />;
 	}
 
-	const expanded = view.expandedItemIds.includes( item.id );
-	const state = view.childrenState?.get( item.id );
 	const loading = expanded && ( ! state || state.status === 'idle' || state.status === 'loading' );
 	const count = state?.status === 'loaded' ? Math.max( state.total, state.items.length ) : item._childCount;
 	const label = expanded
@@ -52,16 +52,16 @@ export function Chevron( { item }: { item: ProductListItem } ) {
 
 	const toggle = ( event: MouseEvent | KeyboardEvent ) => {
 		stop( event );
-		set( view, item.id, ! expanded );
+		set( current() ?? view, item.id, ! expanded );
 	};
 
 	const onKeyDown = ( event: KeyboardEvent< HTMLButtonElement > ) => {
 		if ( event.key === 'ArrowRight' && ! expanded ) {
 			stop( event );
-			set( view, item.id, true );
+			set( current() ?? view, item.id, true );
 		} else if ( event.key === 'ArrowLeft' && expanded ) {
 			stop( event );
-			set( view, item.id, false );
+			set( current() ?? view, item.id, false );
 		}
 	};
 
@@ -118,7 +118,10 @@ export interface NameCellProps {
  * placeholder content for loading/error/"more" rows.
  */
 export function NameCell( { item, children }: NameCellProps ) {
-	const view = useHierarchyView();
+	const { view, expanded, state, searchMatch, variationFilterActive } = useHierarchyRowView( item.id );
+	// Handlers read the value at click time: the cell re-renders only when its own row changes.
+	const current = useHierarchyViewGetter();
+	const latest = () => current() ?? view;
 	const level = item._level ?? 0;
 
 	if ( isPlaceholderRow( item ) ) {
@@ -135,7 +138,7 @@ export function NameCell( { item, children }: NameCellProps ) {
 						className="wc-pl-name__retry"
 						onClick={ ( event ) => {
 							stop( event );
-							view.onRetryChildren?.( item._parentId as number );
+							latest()?.onRetryChildren?.( item._parentId as number );
 						} }
 					>
 						{ __( 'Retry', 'wp-woocommerce-products-list' ) }
@@ -145,7 +148,7 @@ export function NameCell( { item, children }: NameCellProps ) {
 		);
 	}
 
-	const isSearchMatch = level > 0 && view?.searchMatchIds?.has( item.id ) === true;
+	const isSearchMatch = level > 0 && searchMatch;
 
 	return (
 		<div id={ rowDomId( item ) } className={ `wc-pl-name wc-pl-name--level-${ level }` + ( isSearchMatch ? ' is-search-match' : '' ) } style={ { '--wc-pl-level': level } as CSSProperties }>
@@ -156,7 +159,7 @@ export function NameCell( { item, children }: NameCellProps ) {
 					{ __( 'Matches search', 'wp-woocommerce-products-list' ) }
 				</span>
 			) }
-			{ level === 0 && view && <FilteredChildrenNote item={ item } view={ view } /> }
+			{ level === 0 && view && variationFilterActive && expanded && state?.status === 'loaded' && <FilteredChildrenNote item={ item } view={ view } state={ state } latest={ latest } /> }
 			{ item._noLongerMatches && (
 				<span className="wc-pl-name__stale" title={ __( 'Edited here; it no longer matches the filters and leaves the list when the view changes.', 'wp-woocommerce-products-list' ) }>
 					{ __( 'No longer matches', 'wp-woocommerce-products-list' ) }
@@ -180,17 +183,7 @@ export function NameCell( { item, children }: NameCellProps ) {
  * variations match · Show all", or, once opened up, "All 15 variations ·
  * Only matching".
  */
-function FilteredChildrenNote( { item, view }: { item: ProductListItem; view: HierarchyViewValue } ) {
-	if ( ! view.variationFilterActive || ! view.expandedItemIds.includes( item.id ) ) {
-		return null;
-	}
-
-	const state = view.childrenState?.get( item.id );
-
-	if ( state?.status !== 'loaded' ) {
-		return null;
-	}
-
+function FilteredChildrenNote( { item, view, state, latest }: { item: ProductListItem; view: HierarchyViewValue; state: ChildrenState; latest: () => HierarchyViewValue | null } ) {
 	const all = Math.max( item._childCount, state.filtered ? 0 : state.total );
 
 	if ( state.filtered ) {
@@ -216,7 +209,7 @@ function FilteredChildrenNote( { item, view }: { item: ProductListItem; view: Hi
 						className="wc-pl-name__filtered-toggle"
 						onClick={ ( event ) => {
 							stop( event );
-							view.onShowAllChildren?.( item.id );
+							latest()?.onShowAllChildren?.( item.id );
 						} }
 					>
 						{ __( 'Show all', 'wp-woocommerce-products-list' ) }
@@ -239,7 +232,7 @@ function FilteredChildrenNote( { item, view }: { item: ProductListItem; view: Hi
 					className="wc-pl-name__filtered-toggle"
 					onClick={ ( event ) => {
 						stop( event );
-						view.onShowMatchingChildren?.( item.id );
+						latest()?.onShowMatchingChildren?.( item.id );
 					} }
 				>
 					{ __( 'Only matching', 'wp-woocommerce-products-list' ) }

@@ -191,23 +191,13 @@ export interface RawVariation extends RawSellable {
 export type PlaceholderKind = 'loading' | 'error' | 'more';
 
 /**
- * The inline editor's synthetic row: a quick edit stands in for the row it
- * edits (`targetId`), the bulk editor sits at the top of the table body.
- */
-export interface EditorRowMeta {
-	mode: 'quick' | 'bulk';
-	/** The edited row's id for a quick edit; null for the bulk editor. */
-	targetId: number | null;
-}
-
-/**
  * A row of the list. Parents are level 0, their variations level 1; a
  * placeholder row stands in for children while they load, when loading
  * failed, or for the ones beyond `limits.maxChildrenPerParent`.
  */
 export interface ListItemMeta {
-	/** 'product' for a parent row, 'variation' for a child row, 'editor' for the inline editor's row. */
-	_kind: 'product' | 'variation' | 'editor';
+	/** 'product' for a parent row, 'variation' for a child row. */
+	_kind: 'product' | 'variation';
 	_level: 0 | 1;
 	/** null for a parent, the parent's id for a variation or placeholder. */
 	_parentId: number | null;
@@ -221,8 +211,6 @@ export interface ListItemMeta {
 	_placeholder?: PlaceholderKind;
 	/** The placeholder's message (error text, "N more…"). */
 	_placeholderMessage?: string;
-	/** Set only on the inline editor's row (edit/editor-rows.ts). */
-	_editor?: EditorRowMeta;
 	/** A row edited in this view that a refetch no longer returns (it left the filter); kept on screen until the query changes. */
 	_noLongerMatches?: boolean;
 }
@@ -245,21 +233,12 @@ export function isPlaceholderRow( item: ProductListItem ): boolean {
 	return item._placeholder !== undefined;
 }
 
-/** The inline editor's row: not a product, never selected, never acted on. */
-export function isEditorRow( item: ProductListItem ): boolean {
-	return item._kind === 'editor';
-}
-
 /**
  * `getItemId` for DataViews: ids are post ids, unique across parents and
- * variations; placeholder and editor rows get a colon-separated key no post
- * id can collide with ("12:loading", "editor:12", "editor:bulk").
+ * variations; placeholder rows get a colon-separated key no post id can
+ * collide with ("12:loading").
  */
 export function getItemId( item: ProductListItem ): string {
-	if ( item._editor ) {
-		return `editor:${ item._editor.targetId ?? 'bulk' }`;
-	}
-
 	return item._placeholder ? `${ item._parentId }:${ item._placeholder }` : String( item.id );
 }
 

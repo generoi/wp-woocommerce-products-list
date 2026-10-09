@@ -600,8 +600,9 @@ describe( 'useHierarchy', () => {
 
 		expect( calls ).toHaveLength( 12 );
 		expect( result.current.rows ).toHaveLength( 12 + 36 );
-		// Nothing is published while the loads run: one emit when the last one is in.
-		expect( emits ).toHaveLength( 1 );
+		// Published in slices of about BULK_PUBLISH_ROWS rows as the waves of responses arrive, never one render per parent.
+		expect( emits.length ).toBeGreaterThanOrEqual( 1 );
+		expect( emits.length ).toBeLessThanOrEqual( 3 );
 		expect( getExpandAllProgress() ).toBeNull();
 
 		// A single expand still shows its loading marker at once.

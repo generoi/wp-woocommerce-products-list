@@ -258,6 +258,13 @@ describe( 'fieldFromDeclarative', () => {
 		expect( field.rest.toParams?.( 'other', 'is' ) ).toEqual( { stock: 'other' } );
 	} );
 
+	it( 'reads what the shop shows now (effective + shownLabel) from the value container', () => {
+		const field = fieldFromDeclarative( makeField(), settings );
+
+		expect( field.shownReference?.( product( { i18n: { se: { name: { value: '', source: 'Saga', effective: 'Saga EN', shownLabel: 'Shown now (English fallback)' } } } } ) ) ).toEqual( { label: 'Shown now (English fallback)', text: 'Saga EN' } );
+		expect( field.shownReference?.( product( { i18n: { se: { name: { value: '', source: 'Saga' } } } } ) ) ).toBeNull();
+	} );
+
 	it( 'renders the value, or the muted reference when empty', () => {
 		const field = fieldFromDeclarative( makeField( { referenceLabel: 'Suomi' } as Partial< DeclarativeFieldInput > ), settings );
 		const Render = field.render as ( props: { item: ProductListItem; field: NormalizedField< ProductListItem > } ) => JSX.Element;

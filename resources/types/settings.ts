@@ -75,6 +75,12 @@ export interface LanguageSettings {
 	others: string[];
 	labels: Record< string, string >;
 	currencies?: Record< string, string >;
+	/** Each other language's fallback chain (gds_woo_i18n/fallbacks), e.g. `{ de: [ 'de', 'en' ] }`. */
+	chains?: Record< string, string[] >;
+	/** REST paths of the translation integration: `preview` (dry run of "Edit translated text"), `terms`, `term` (with `{id}`). */
+	routes?: { preview?: string; terms?: string; term?: string };
+	/** A machine translation service is hooked (the "Machine translate" action is offered). */
+	machineTranslate?: boolean;
 }
 
 export interface Settings {

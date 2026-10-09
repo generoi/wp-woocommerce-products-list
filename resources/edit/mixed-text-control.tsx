@@ -5,7 +5,8 @@
  * separate, explicit choice: the "Clear on all rows" checkbox, which the
  * edit state turns into an empty string on Save.
  */
-import { CheckboxControl, __experimentalInputControl as InputControl } from '@wordpress/components';
+import { __experimentalInputControl as InputControl } from '@wordpress/components';
+import { CheckboxControl } from '../ui/checkbox-control';
 import { useId } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import type { ComponentType } from 'react';

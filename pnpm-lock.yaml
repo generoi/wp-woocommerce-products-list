@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@wordpress/dataviews@20.0.0': 3c804cf72d07281fc3f67cdab311414442c2f010243b0b78c10401f4c7a19ac3
+  '@wordpress/dataviews@20.0.0': 4c84c6de427ef3480d6fceb64a6e7ecbf910c439fec096ea6d1bf74273158f09
 
 importers:
 
@@ -13,7 +13,7 @@ importers:
     dependencies:
       '@wordpress/dataviews':
         specifier: 20.0.0
-        version: 20.0.0(patch_hash=3c804cf72d07281fc3f67cdab311414442c2f010243b0b78c10401f4c7a19ac3)(@emotion/is-prop-valid@1.4.0)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(lightningcss@1.33.0)(postcss@8.5.29)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(stylelint@17.16.0(supports-color@10.2.2)(typescript@5.9.3))(supports-color@10.2.2)(vite@8.3.3(@types/node@26.6.4)(sass@1.105.1)(terser@5.51.2)(yaml@2.9.1))
+        version: 20.0.0(patch_hash=4c84c6de427ef3480d6fceb64a6e7ecbf910c439fec096ea6d1bf74273158f09)(@emotion/is-prop-valid@1.4.0)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(lightningcss@1.33.0)(postcss@8.5.29)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(stylelint@17.16.0(supports-color@10.2.2)(typescript@5.9.3))(supports-color@10.2.2)(vite@8.3.3(@types/node@26.6.4)(sass@1.105.1)(terser@5.51.2)(yaml@2.9.1))
     devDependencies:
       '@eslint/js':
         specifier: ^9.39.0
@@ -10518,7 +10518,7 @@ snapshots:
       '@types/react': 18.3.31
       '@types/react-dom': 18.3.7(@types/react@18.3.31)
 
-  '@wordpress/dataviews@20.0.0(patch_hash=3c804cf72d07281fc3f67cdab311414442c2f010243b0b78c10401f4c7a19ac3)(@emotion/is-prop-valid@1.4.0)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(lightningcss@1.33.0)(postcss@8.5.29)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(stylelint@17.16.0(supports-color@10.2.2)(typescript@5.9.3))(supports-color@10.2.2)(vite@8.3.3(@types/node@26.6.4)(sass@1.105.1)(terser@5.51.2)(yaml@2.9.1))':
+  '@wordpress/dataviews@20.0.0(patch_hash=4c84c6de427ef3480d6fceb64a6e7ecbf910c439fec096ea6d1bf74273158f09)(@emotion/is-prop-valid@1.4.0)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(lightningcss@1.33.0)(postcss@8.5.29)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(stylelint@17.16.0(supports-color@10.2.2)(typescript@5.9.3))(supports-color@10.2.2)(vite@8.3.3(@types/node@26.6.4)(sass@1.105.1)(terser@5.51.2)(yaml@2.9.1))':
     dependencies:
       '@ariakit/react': 0.4.41(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@base-ui/react': 1.8.0(@date-fns/tz@1.5.0)(@types/react@18.3.31)(date-fns@4.4.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)

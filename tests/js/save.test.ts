@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareSave, runConcurrently, runSave } from '../../resources/edit/save-runner';
+import { payloadStored, prepareSave, runConcurrently, runSave, UNCERTAIN_CODE } from '../../resources/edit/save-runner';
 import type { SaveDeps } from '../../resources/edit/save-runner';
 import type { BatchResponse, ProductListItem, RawProduct, RawVariation } from '../../resources/types';
 import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
@@ -137,8 +137,98 @@ describe( 'runSave', () => {
 		// One parent with more rows than a request takes: a lane of requests one after the other.
 		const result = await runSave( d, [ variation( 41, 4 ), variation( 42, 4 ), variation( 43, 4 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
 
-		expect( events ).toEqual( [ 'optimistic:41,42,43', 'request:41', 'request:42', 'request:43', 'returned:41,42,43' ] );
+		// The optimistic render waits for the next task (after the first request went out); the responses land in one write at the end.
+		expect( events ).toEqual( [ 'request:41', 'request:42', 'request:43', 'optimistic:41,42,43', 'returned:41,42,43' ] );
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 43 ] );
+	} );
+
+	it( 'dispatches the requests before the optimistic render, and writes all responses to the cache once', async () => {
+		const events: string[] = [];
+		let release: () => void = () => {};
+		const gate = new Promise< void >( ( resolve ) => {
+			release = resolve;
+		} );
+		const d = deps( {
+			batchSize: 100,
+			patchItems: vi.fn( ( patches: Array< { id: number; echoed?: boolean } > ) => {
+				events.push( `${ patches.some( ( patch ) => patch.echoed ) ? 'returned' : 'optimistic' }:${ patches.length }` );
+			} ),
+		} );
+
+		d.batchProducts = vi.fn( async ( update: Update[] ) => {
+			events.push( `request:${ update.length }` );
+			await gate;
+
+			return { update: update.map( ( row ) => ( { ...row, echoed: true } ) ) } as BatchResponse< RawProduct >;
+		} );
+
+		const rows = Array.from( { length: 9 }, ( _, index ) => simple( 100 + index, { status: 'publish' } ) );
+		const pending = runSave( d, rows, { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		// Three requests (9 rows, 3 at a time) are out before any render.
+		await new Promise( ( resolve ) => setTimeout( resolve, 0 ) );
+		expect( events.slice( 0, 3 ) ).toEqual( [ 'request:3', 'request:3', 'request:3' ] );
+		expect( events ).toContain( 'optimistic:9' );
+
+		release();
+		await pending;
+
+		expect( events.filter( ( event ) => event.startsWith( 'returned' ) ) ).toEqual( [ 'returned:9' ] );
+	} );
+
+	it( 'reports a row as updated when the request failed but the re-read shows it was stored', async () => {
+		const d = deps( { batchSize: 100 } );
+		const stored = simple( 1, { regular_price: '11.00', date_modified_gmt: '2026-10-09T10:00:01' } );
+
+		d.batchProducts = vi.fn( async () => {
+			throw Object.assign( new Error( 'Gateway Timeout' ), { code: 'http_error', status: 504 } );
+		} );
+		d.rereadRows = vi.fn( async () => new Map( [ [ 1, stored ], [ 2, simple( 2, { regular_price: '20', date_modified_gmt: '2026-10-09T09:00:00' } ) ] ] ) );
+
+		const result = await runSave(
+			d,
+			[ simple( 1, { regular_price: '10', date_modified_gmt: '2026-10-09T09:00:00' } ), simple( 2, { regular_price: '20', date_modified_gmt: '2026-10-09T09:00:00' } ) ],
+			{ regular_price: { operation: 'increase', value: '10', percent: true } },
+			fields,
+			settings,
+			{ applyToVariations: false, source: 'bulk' }
+		);
+
+		expect( d.rereadRows ).toHaveBeenCalledTimes( 1 );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
+		// Row 2 holds its old price and was not touched: a plain failure, safe to retry.
+		expect( result.errors ).toEqual( [ expect.objectContaining( { id: 2, code: 'http_error' } ) ] );
+		// The rows show what is stored, not the pre-save snapshot.
+		const last = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.at( -1 )?.[ 0 ] as Array< Record< string, unknown > >;
+
+		expect( last.find( ( patch ) => patch.id === 1 )?.regular_price ).toBe( '11.00' );
+	} );
+
+	it( 'marks rows uncertain when the re-read fails too, and never re-reads after a 4xx', async () => {
+		const d = deps( { batchSize: 100 } );
+
+		d.batchProducts = vi.fn( async () => {
+			throw Object.assign( new Error( 'Network down' ), { code: 'fetch_error', status: 0 } );
+		} );
+		d.rereadRows = vi.fn( async () => {
+			throw new Error( 'still down' );
+		} );
+
+		const result = await runSave( d, [ simple( 1, { regular_price: '10' } ) ], { regular_price: { operation: 'increase', value: '1' } }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( result.errors ).toEqual( [ expect.objectContaining( { id: 1, code: UNCERTAIN_CODE } ) ] );
+
+		const refused = deps( { batchSize: 100 } );
+
+		refused.batchProducts = vi.fn( async () => {
+			throw Object.assign( new Error( 'Bad request' ), { code: 'rest_invalid_param', status: 400 } );
+		} );
+		refused.rereadRows = vi.fn( async () => new Map() );
+
+		const second = await runSave( refused, [ simple( 1, { regular_price: '10' } ) ], { regular_price: { operation: 'increase', value: '1' } }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( refused.rereadRows ).not.toHaveBeenCalled();
+		expect( second.errors[ 0 ]?.code ).toBe( 'rest_invalid_param' );
 	} );
 
 	it( 'patches optimistically, then with the returned rows', async () => {
@@ -333,5 +423,16 @@ describe( 'runSave concurrency', () => {
 			1
 		);
 		expect( order ).toEqual( [ 1, 2, 3 ] );
+	} );
+} );
+
+describe( 'payloadStored', () => {
+	it( 'compares prices as numbers, nested objects leaf by leaf and terms by id', () => {
+		expect( payloadStored( { regular_price: '21.90' }, { regular_price: '21.9' } ) ).toBe( true );
+		expect( payloadStored( { regular_price: '20' }, { regular_price: '21.9' } ) ).toBe( false );
+		expect( payloadStored( { i18n: { se: { name: 'Saga', slug: 'saga' } } }, { i18n: { se: { name: 'Saga' } } } ) ).toBe( true );
+		expect( payloadStored( { categories: [ { id: 2 }, { id: 1 } ] }, { categories: [ { id: 1 }, { id: 2 } ] } ) ).toBe( true );
+		expect( payloadStored( { sale_price: '' }, { sale_price: '' } ) ).toBe( true );
+		expect( payloadStored( { stock_quantity: 4 }, { inventory_delta: -1 } ) ).toBeNull();
 	} );
 } );

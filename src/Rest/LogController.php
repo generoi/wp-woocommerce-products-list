@@ -158,8 +158,8 @@ final class LogController
     /**
      * POST /log/skipped: record the items a save left out on the client
      * (moved to the Trash meanwhile, no stock management, ...) as `skipped`
-     * rows of the batch, one per intended field (or one row without a
-     * field). Only the user's own batch: a batch id that already holds
+     * rows of the batch, one per item: `field` is the intended field when
+     * there is one, the context's `fields` lists them all. Only the user's own batch: a batch id that already holds
      * another user's rows is refused.
      */
     public function skipped(WP_REST_Request $request): WP_REST_Response|WP_Error
@@ -196,19 +196,20 @@ final class LogController
             ))));
             $isVariation = $post !== null && $post->post_type === 'product_variation';
 
-            foreach ($fields !== [] ? $fields : [''] as $field) {
-                $rows[] = [
-                    'batch_id' => $batchId,
-                    'source' => (string) $request['source'],
-                    'object_type' => $isVariation ? 'variation' : 'product',
-                    'object_id' => $id,
-                    'parent_id' => $isVariation ? (int) $post->post_parent : 0,
-                    'field' => $field,
-                    'status' => Logger::STATUS_SKIPPED,
-                    'message' => $message,
-                    'context' => ['reason' => $reason],
-                ];
-            }
+            // One row per item, not per field: a 600-variation sale that
+            // skips the ones already on sale is 600 rows, not 2400. The
+            // fields are in the context (and in `field` when there is one).
+            $rows[] = [
+                'batch_id' => $batchId,
+                'source' => (string) $request['source'],
+                'object_type' => $isVariation ? 'variation' : 'product',
+                'object_id' => $id,
+                'parent_id' => $isVariation ? (int) $post->post_parent : 0,
+                'field' => count($fields) === 1 ? $fields[0] : '',
+                'status' => Logger::STATUS_SKIPPED,
+                'message' => $message,
+                'context' => ['reason' => $reason] + ($fields !== [] ? ['fields' => $fields] : []),
+            ];
 
             $logged[] = $id;
         }
@@ -304,12 +305,13 @@ final class LogController
         $page = max(1, (int) $request['page']);
         $perPage = min(self::PER_PAGE_MAX, max(1, (int) $request['per_page']));
 
+        // Source: a bulk edit that also staged an action (a language tool) is a bulk edit, so `action` is the source only when nothing else is (MIN() would pick it first).
         // The same rule as Revert::plan(): a batch is revertable when an ok row with a field is not a trash/restore/delete/duplicate/create row.
         $notRevertable = implode(',', array_map(static fn (string $action): string => "'".esc_sql($action)."'", Revert::NOT_REVERTABLE));
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $total = (int) $wpdb->get_var($this->prepare("SELECT COUNT(DISTINCT batch_id) FROM {$table} WHERE {$where}", $values));
         $rows = $wpdb->get_results($this->prepare(
-            "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, MIN(source) AS source,
+            "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, COALESCE(MIN(IF(source <> 'action', source, NULL)), MIN(source)) AS source,
                 SUM(status <> 'skipped') AS row_count, COUNT(DISTINCT IF(status <> 'skipped', object_id, NULL)) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
                 SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
                 SUM(status = 'error') AS errors,
@@ -321,7 +323,8 @@ final class LogController
                 MAX(reverts) AS reverts,
                 MIN(IF(action NOT IN ('update', 'create'), id, NULL)) AS action_row,
                 GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context), JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
-                GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields
+                GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields,
+                GROUP_CONCAT(DISTINCT IF(status <> 'skipped' AND source <> 'action' AND action IN ('update', 'create'), field, NULL) ORDER BY field SEPARATOR ',') AS update_fields
              FROM {$table} WHERE {$where}
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
             array_merge($values, [$perPage, ($page - 1) * $perPage])
@@ -346,6 +349,8 @@ final class LogController
                 'users' => (int) $row['user_count'],
                 'fields' => array_values(array_filter(explode(',', (string) $row['fields']), static fn (string $field): bool => $field !== '')),
                 'actions' => array_values(array_filter(explode(',', (string) $row['actions']), static fn (string $action): bool => $action !== '')),
+                // The fields of the batch's own field edits (update and create rows not written by an action).
+                'update_fields' => array_values(array_filter(explode(',', (string) $row['update_fields']), static fn (string $field): bool => $field !== '')),
                 'products' => (int) $row['product_count'],
                 'variations' => (int) $row['variation_count'],
                 'parents' => (int) $row['parent_count'],
@@ -361,11 +366,14 @@ final class LogController
 
             $actionRow = $actionRows[(int) ($row['action_row'] ?? 0)] ?? null;
             $index = array_key_last($items);
-            $items[$index]['summary'] = self::batchSummary(
+            $actionSummary = self::batchSummary(
                 $actionRow !== null ? (string) $actionRow['action'] : null,
                 $actionRow !== null ? $actionRow['context'] : [],
                 $items[$index]
             );
+            // The action's own name ("Edit translated text: Svenska Name"), also when the batch edited fields besides.
+            $items[$index]['action_summary'] = $actionSummary;
+            $items[$index]['summary'] = self::mixedSummary($actionSummary, $items[$index]['update_fields']);
         }
 
         return $this->paged($items, $total, $perPage);
@@ -440,6 +448,44 @@ final class LogController
         $summary = apply_filters(self::FILTER_BATCH_SUMMARY, $summary, $action, is_array($context['args'] ?? null) ? $context['args'] : [], $batch);
 
         return is_string($summary) && $summary !== '' ? $summary : null;
+    }
+
+    /** How many field names a mixed batch's summary lists before "+N more". */
+    public const SUMMARY_FIELDS = 4;
+
+    /**
+     * The summary of a batch that may mix field edits with an action (a
+     * bulk edit that also staged a language tool): the action's name alone
+     * would hide the edited fields, so they come first ("Sale price, Date
+     * on sale from + Edit translated text: Svenska Name"). Null for a batch
+     * without an action: History lists its fields itself.
+     *
+     * @param  array<int, string>  $updateFields
+     */
+    public static function mixedSummary(?string $actionSummary, array $updateFields): ?string
+    {
+        if ($actionSummary === null || $updateFields === []) {
+            return $actionSummary;
+        }
+
+        $labels = array_values(array_unique(array_map([Revert::class, 'fieldLabel'], $updateFields)));
+        $fields = implode(', ', array_slice($labels, 0, self::SUMMARY_FIELDS));
+
+        if (count($labels) > self::SUMMARY_FIELDS) {
+            $fields = sprintf(
+                /* translators: 1: the first field names, 2: how many more */
+                __('%1$s +%2$d more', 'wp-woocommerce-products-list'),
+                $fields,
+                count($labels) - self::SUMMARY_FIELDS
+            );
+        }
+
+        return sprintf(
+            /* translators: 1: the edited fields ("Sale price, Date on sale from"), 2: the action's name ("Edit translated text: Svenska Name") */
+            __('%1$s + %2$s', 'wp-woocommerce-products-list'),
+            $fields,
+            $actionSummary
+        );
     }
 
     /**
@@ -709,12 +755,23 @@ final class LogController
                 continue;
             }
 
+            // A skipped row of several fields has them in its context (`fields`).
+            $skippedOf = $param === 'field' ? " OR (status = 'skipped' AND field = '' AND context LIKE %s)" : '';
+
             if (str_contains($value, '*')) {
-                $where[] = "{$param} LIKE %s";
+                $where[] = "({$param} LIKE %s{$skippedOf})";
                 $values[] = str_replace('*', '%', $this->escapeLike($value));
+
+                if ($skippedOf !== '') {
+                    $values[] = '%"fields":[%"'.str_replace('*', '%', $this->escapeLike(trim((string) wp_json_encode($value), '"'))).'"%';
+                }
             } else {
-                $where[] = "{$param} = %s";
+                $where[] = "({$param} = %s{$skippedOf})";
                 $values[] = $value;
+
+                if ($skippedOf !== '') {
+                    $values[] = '%"fields":[%'.$this->escapeLike((string) wp_json_encode($value)).'%';
+                }
             }
         }
 
@@ -889,10 +946,30 @@ final class LogController
                 'related' => $this->related($row),
                 'reverts' => ($row['reverts'] ?? '') !== '' ? (string) $row['reverts'] : null,
                 'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
+                'skipped_fields' => $this->skippedFields($row),
             ];
         }
 
         return $items;
+    }
+
+    /**
+     * The fields a skipped row without a `field` left out (its context's
+     * `fields`), so History can name them; [] for every other row.
+     *
+     * @param  array<string, mixed>  $row
+     * @return list<string>
+     */
+    private function skippedFields(array $row): array
+    {
+        if ((string) $row['status'] !== 'skipped' || (string) $row['field'] !== '') {
+            return [];
+        }
+
+        $context = json_decode((string) ($row['context'] ?? ''), true);
+        $fields = is_array($context) && is_array($context['fields'] ?? null) ? $context['fields'] : [];
+
+        return array_values(array_filter(array_map(static fn ($field): string => is_string($field) ? $field : '', $fields), static fn (string $field): bool => $field !== ''));
     }
 
     /**

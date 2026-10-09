@@ -1,4 +1,4 @@
-/* The quick/bulk edit form, inline in the table (edit/inline-editor.tsx). */
+/* The quick/bulk edit form, in the slide-in editor panel (edit/inline-editor.tsx, edit/editor-panel.tsx). */
 .wc-pl-edit {
 	display: flex;
 	flex-direction: column;
@@ -15,9 +15,11 @@
 		border-radius: 4px;
 	}
 
+	// The language tabs wrap onto a second line in the panel rather than scroll it sideways.
 	&__tabs {
 		display: flex;
-		gap: 4px;
+		flex-wrap: wrap;
+		gap: 0 4px;
 		border-bottom: 1px solid var( --wp-components-color-gray-300, #ddd );
 
 		[role='tab'] {
@@ -123,86 +125,6 @@
 	}
 }
 
-// The editor row: its host cell spans the row (editor-context.tsx sets colSpan
-// and hides the sibling cells); the row reads as a panel, not as a product.
-.wc-products-list .dataviews-view-table tr.wc-pl-editor-row,
-.wc-products-list .dataviews-view-table tr:has( .wc-pl-inline-edit-host ) {
-	background: #f6f7f7;
-
-	> td {
-		vertical-align: top;
-		border-top: 2px solid var( --wp-admin-theme-color, #3858e9 );
-		border-bottom: 2px solid var( --wp-admin-theme-color, #3858e9 );
-	}
-
-	> td[hidden],
-	> td:not( :has( .wc-pl-inline-edit-host ) ) {
-		display: none;
-	}
-
-	&:hover {
-		background: #f6f7f7;
-	}
-}
-
-.wc-products-list .dataviews-view-table td.wc-pl-editor-cell {
-	padding: 16px 20px 20px;
-
-	// The primary column's media slot (the thumbnail of a product row) has no image here.
-	.dataviews-column-primary__media {
-		display: none;
-	}
-
-	// The primary column's Stack (media + title) must not lay the editor out as a flex child of fixed width.
-	> div,
-	.dataviews-view-table__primary-column-content,
-	.dataviews-title-field {
-		display: block;
-		width: 100%;
-		max-width: none;
-	}
-}
-
-// Every box between the cell and the editor lets it stick (an `overflow: hidden`
-// ancestor would become its scroll container and pin it to nothing).
-.wc-products-list .dataviews-view-table td.wc-pl-editor-cell,
-.wc-products-list .dataviews-view-table td.wc-pl-editor-cell div:has( .wc-pl-inline-edit-host ) {
-	overflow: visible;
-}
-
-// Sized to the visible width of the table's scrolling wrapper and stuck to its
-// left edge (editor-context.tsx measures it): the three columns stay on screen
-// whatever the table's own width, and focusing a field never scrolls sideways.
-.wc-products-list .dataviews-view-table td.wc-pl-editor-cell .wc-pl-inline-edit-host.is-fitted {
-	position: sticky;
-	left: var( --wc-pl-editor-left, 0 );
-	box-sizing: border-box;
-	width: var( --wc-pl-editor-width );
-	max-width: var( --wc-pl-editor-width );
-}
-
-.wc-pl-inline-edit-host {
-	width: 100%;
-	box-sizing: border-box;
-	// The table's cells keep their text on one line (DataViews sets nowrap on them); the editor is prose and
-	// controls: its notices (the running-sale warning above all) wrap inside the row instead of running off it.
-	white-space: normal;
-
-	.components-notice__content,
-	.wc-pl-edit__notice,
-	.wc-pl-edit__errors,
-	.wc-pl-edit__warnings {
-		white-space: normal;
-		overflow-wrap: break-word;
-		min-width: 0;
-	}
-
-	// A variation's quick edit keeps the row's indentation.
-	&.is-level-1 {
-		padding-inline-start: 24px;
-	}
-}
-
 .wc-pl-inline-edit {
 	outline: 0;
 
@@ -239,23 +161,35 @@
 		min-width: 0;
 	}
 
-	// Bulk: the selected items on the left, the form on the right.
-	&.is-bulk {
-		display: grid;
-		grid-template-columns: minmax( 220px, 320px ) minmax( 0, 1fr );
-		gap: 24px;
-		align-items: start;
-
-		@media ( max-width: 960px ) {
-			grid-template-columns: minmax( 0, 1fr );
-		}
-	}
-
 	&__items {
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
 		min-width: 0;
+	}
+
+	// Bulk: the selected items, a collapsible section at the top of the panel's body.
+	&__selection {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+
+		> summary {
+			cursor: pointer;
+			font-size: 13px;
+			font-weight: 500;
+			padding: 2px 0;
+
+			&:focus-visible {
+				outline: 2px solid var( --wp-admin-theme-color, #3858e9 );
+				outline-offset: 2px;
+				border-radius: 2px;
+			}
+		}
+
+		&[open] > summary {
+			margin-bottom: 8px;
+		}
 	}
 
 	&__whole,
@@ -269,7 +203,7 @@
 		margin: 0;
 		padding: 0;
 		list-style: none;
-		max-height: 60vh;
+		max-height: min( 32vh, 280px );
 		overflow: auto;
 		border: 1px solid var( --wp-components-color-gray-300, #ddd );
 		border-radius: 4px;
@@ -392,16 +326,6 @@
 
 	&.is-done {
 		visibility: hidden;
-	}
-}
-
-// While an editor is open the snackbars sit bottom-right, off its Update / Cancel / Update & next buttons.
-html.wc-pl-editing .wc-products-list__notices {
-	right: 24px;
-	left: auto;
-
-	@media (max-width: 782px) {
-		right: 16px;
 	}
 }
 
@@ -654,37 +578,6 @@ html.wc-pl-editing .wc-products-list__notices {
 	margin: 0 0 8px;
 }
 
-// Outside the table layout (an editor opened in Grid or List) the editor is a
-// full-width block, not a card of the grid's column width: its card spans the
-// grid row and drops the card chrome (media, fields, selection checkbox).
-.wc-products-list .dataviews-view-grid__card:has( .wc-pl-inline-edit-host ) {
-	grid-column: 1 / -1;
-
-	.dataviews-view-grid__media,
-	.dataviews-view-grid__media-actions,
-	.dataviews-view-grid__badge-fields,
-	.dataviews-view-grid__fields,
-	.dataviews-view-grid__title-actions > :not( .dataviews-title-field ) {
-		display: none;
-	}
-}
-
-.wc-products-list .dataviews-view-list__item-wrapper:has( .wc-pl-inline-edit-host ) {
-	.dataviews-view-list__media-wrapper,
-	.dataviews-view-list__fields,
-	.dataviews-view-list__item-actions {
-		display: none;
-	}
-}
-
-.wc-products-list .dataviews-view-grid__card .wc-pl-inline-edit-host,
-.wc-products-list .dataviews-view-list__item-wrapper .wc-pl-inline-edit-host {
-	width: 100%;
-	padding: 16px;
-	background: #f6f7f7;
-	border: 2px solid var( --wp-admin-theme-color, #3858e9 );
-}
-
 .wc-pl-language-tools__confirm {
 	margin-top: 8px;
 	padding: 12px;
@@ -739,4 +632,470 @@ html.wc-pl-editing .wc-products-list__notices {
 	font-family: inherit;
 	font-size: 11px;
 	opacity: 0.75;
+}
+
+// The slide-in editor panel (edit/editor-panel.tsx). The Catalog becomes a
+// split view: the panel is fixed to the right under the admin bar, full
+// height, and the list makes room for it (`--wc-pl-panel-inset` on the list, set once
+// per open or resize; only the panel itself animates). Below 960px it lies
+// over the list as a drawer, without a backdrop: the list stays usable.
+// Registered as not inherited, and set (edit/editor-panel.tsx applyPanelWidth) only on the elements that
+// read them: the panel, the list and the snackbars. A custom property on <html> is inherited by every row
+// of the list, so changing it there restyled the whole document (~100 ms with 600 rows) on each open.
+@property --wc-pl-panel-width {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 480px;
+}
+
+@property --wc-pl-panel-inset {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 480px;
+}
+
+@keyframes wc-pl-panel-in {
+	from {
+		transform: translateX( 100% );
+	}
+
+	to {
+		transform: none;
+	}
+}
+
+.wc-pl-editor-panel {
+	position: fixed;
+	top: var( --wp-admin--admin-bar--height, 32px );
+	right: 0;
+	bottom: 0;
+	z-index: 9991;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	// The width editor-panel.tsx worked out (about half the window, 480px to 75 %, refitted on resize), never
+	// wider than the window: `100%` of a fixed box is the window without its scrollbar, where `vw` would
+	// include the scrollbar and push the right edge off screen.
+	width: min( var( --wc-pl-panel-width ), 100% );
+	max-width: 100%;
+	background: #fff;
+	border-left: 1px solid var( --wp-components-color-gray-300, #ddd );
+	outline: 0;
+	// Text and controls wrap inside the panel (the list's cells keep theirs on one line).
+	white-space: normal;
+	overflow-wrap: break-word;
+
+	&.is-sliding {
+		animation: wc-pl-panel-in 0.2s cubic-bezier( 0.2, 0, 0, 1 );
+
+		@media ( prefers-reduced-motion: reduce ) {
+			animation: none;
+		}
+	}
+
+	// A drawer over the whole window on a narrow screen (admin menu included): a shadow instead of a backdrop.
+	@media ( max-width: 959px ) {
+		left: 0;
+		width: auto;
+		box-shadow: -8px 0 24px rgba( 0, 0, 0, 0.12 );
+	}
+
+	// The admin bar is taller, and scrolls away, on a phone-sized screen.
+	@media ( max-width: 782px ) {
+		top: var( --wp-admin--admin-bar--height, 46px );
+	}
+
+	// The left edge: drag (or arrow keys) to resize.
+	&__resize {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: -4px;
+		z-index: 3;
+		width: 8px;
+		cursor: col-resize;
+		touch-action: none;
+
+		&::after {
+			content: "";
+			position: absolute;
+			top: 0;
+			bottom: 0;
+			left: 3px;
+			width: 2px;
+			background: transparent;
+			transition: background-color 0.1s ease;
+		}
+
+		&:hover::after,
+		&:focus-visible::after {
+			background: var( --wp-admin-theme-color, #3858e9 );
+		}
+
+		&:focus-visible {
+			outline: 0;
+		}
+
+		// Nothing to resize in drawer mode.
+		@media ( max-width: 959px ) {
+			display: none;
+		}
+	}
+
+	// Title, item count, loading line and the close button: pinned above the scrolling body.
+	&__header {
+		position: relative;
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		flex: none;
+		padding: 14px 12px 12px 20px;
+		border-bottom: 1px solid var( --wp-components-color-gray-300, #ddd );
+	}
+
+	&__heading {
+		flex: 1;
+		min-width: 0;
+
+		// The panel's own title stands in until the editor's heading arrives, then steps aside.
+		> .wc-pl-editor-panel__title:not( :only-child ) {
+			display: none;
+		}
+	}
+
+	&__title,
+	.wc-pl-inline-edit__title {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+		margin: 0;
+		// "Quick edit" stays on one line; the product name after it ellipsises.
+		white-space: nowrap;
+		font-size: 15px;
+		font-weight: 600;
+		line-height: 1.4;
+	}
+
+	.wc-pl-inline-edit__head {
+		display: flex;
+		flex-direction: column;
+		flex-wrap: nowrap;
+		align-items: stretch;
+		gap: 2px;
+		min-width: 0;
+
+		.wc-pl-edit__summary {
+			margin: 0;
+		}
+
+		.wc-pl-inline-edit__loading {
+			min-height: 20px;
+		}
+	}
+
+	&__close {
+		flex: none;
+	}
+
+	// "Back to the list": shown when it has keyboard focus.
+	&__skip {
+		position: absolute;
+		top: 4px;
+		left: 20px;
+		z-index: 4;
+		padding: 4px 8px;
+		background: #fff;
+		box-shadow: 0 0 0 2px var( --wp-admin-theme-color, #3858e9 );
+		border-radius: 2px;
+		font-size: 13px;
+
+		&:not( :focus ) {
+			clip-path: inset( 50% );
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			overflow: hidden;
+			white-space: nowrap;
+		}
+	}
+
+	// The scrolling part; the editor's buttons stick to its foot.
+	&__body {
+		flex: 1;
+		min-height: 0;
+		overflow-x: hidden;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		padding: 16px 20px 0;
+		// A field focused or scrolled to stays clear of the sticky Update / Cancel footer.
+		scroll-padding-block: 8px 88px;
+
+		.wc-pl-inline-edit {
+			display: flex;
+			flex-direction: column;
+			gap: 16px;
+		}
+
+		.wc-pl-edit__footer {
+			position: sticky;
+			bottom: 0;
+			z-index: 1;
+			margin: 0 -20px;
+			padding: 12px 20px 16px;
+			background: #fff;
+		}
+	}
+}
+
+// Dragging the edge: no text selection, and nothing animates under the pointer.
+html.wc-pl-panel-resizing {
+	cursor: col-resize;
+	user-select: none;
+
+	.wc-pl-editor-panel {
+		animation: none;
+	}
+}
+
+// Split view: the list makes room for the panel where both fit.
+@media ( min-width: 960px ) {
+	html.wc-pl-panel-open .wc-products-list {
+		// The panel's width (already clamped to leave the list room) plus a 16px gap.
+		margin-inline-end: calc( var( --wc-pl-panel-inset ) + 16px );
+	}
+}
+
+// The snackbars stay left of the panel, off its buttons.
+html.wc-pl-panel-open .wc-products-list__notices {
+	// Left of the panel: the window less the panel, the admin menu and the gaps.
+	max-width: max( 240px, calc( 100vw - var( --wc-pl-panel-width ) - 208px ) );
+
+	@media ( max-width: 959px ) {
+		left: 16px;
+		max-width: none;
+	}
+}
+
+// The quick-edited row (edit/editor-panel.tsx useEditedRowMark): an attribute on the row element, in any layout.
+.wc-products-list :is(.dataviews-view-grid__card, .dataviews-view-list__item-wrapper)[data-wc-pl-edited] {
+	background: var(--wc-pl-edited-row-bg, #f0f6fc);
+	box-shadow: inset 4px 0 0 var(--wp-admin-theme-color, #3858e9);
+}
+
+// In the table the cells carry the colour (opaque: the sticky actions cell must still hide the columns
+// scrolled under it) and the first cell the accent bar.
+.wc-products-list tr[data-wc-pl-edited] {
+	> td {
+		background: var(--wc-pl-edited-row-bg, #f0f6fc);
+	}
+
+	> td:first-child {
+		box-shadow: inset 4px 0 0 var(--wp-admin-theme-color, #3858e9);
+	}
+}
+
+// HTML fields (edit/html-text-control.tsx): a formatted-text editor with a Visual / Code switch.
+.wc-pl-html-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+
+	&__head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		min-height: 24px;
+	}
+
+	&__label {
+		font-size: 11px;
+		font-weight: 500;
+		line-height: 1.4;
+		text-transform: uppercase;
+	}
+
+	&__modes {
+		display: inline-flex;
+		gap: 2px;
+	}
+
+	&__toolbar {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 2px;
+		padding: 2px;
+		border: 1px solid var( --wp-components-color-gray-600, #949494 );
+		border-bottom: 0;
+		border-radius: 2px 2px 0 0;
+		background: #f6f7f7;
+	}
+
+	&__link {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		padding: 6px;
+		border: 1px solid var( --wp-components-color-gray-600, #949494 );
+		border-bottom: 0;
+		background: #fff;
+
+		input {
+			flex: 1 1 200px;
+			min-width: 0;
+		}
+	}
+
+	&__visual {
+		box-sizing: border-box;
+		width: 100%;
+		max-height: 60vh;
+		overflow: auto;
+		padding: 8px 12px;
+		border: 1px solid var( --wp-components-color-gray-600, #949494 );
+		border-radius: 0 0 2px 2px;
+		background: #fff;
+		font-size: 13px;
+		line-height: 1.6;
+		overflow-wrap: anywhere;
+		cursor: text;
+
+		&:focus {
+			outline: 0;
+			border-color: var( --wp-admin-theme-color, #3858e9 );
+			box-shadow: 0 0 0 0.5px var( --wp-admin-theme-color, #3858e9 );
+		}
+
+		> :first-child {
+			margin-top: 0;
+		}
+
+		> :last-child {
+			margin-bottom: 0;
+		}
+
+		p {
+			margin: 0 0 0.8em;
+		}
+
+		ul,
+		ol {
+			margin: 0 0 0.8em 1.4em;
+			padding: 0;
+		}
+
+		ul {
+			list-style: disc;
+		}
+
+		ol {
+			list-style: decimal;
+		}
+
+		img {
+			max-width: 100%;
+			height: auto;
+		}
+	}
+
+	&__code {
+		box-sizing: border-box;
+		width: 100%;
+		font-family: Menlo, Consolas, monaco, monospace;
+		font-size: 12px;
+	}
+
+	&__note,
+	&__help {
+		margin: 0;
+		font-size: 12px;
+		font-style: normal;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+	}
+}
+
+// "Translate product by product": a spreadsheet of one language's name and short description.
+.wc-pl-translate {
+	margin: 0 0 16px;
+	padding: 8px 12px;
+	border: 1px solid #dcdcde;
+	border-radius: 2px;
+
+	> summary {
+		cursor: pointer;
+		font-weight: 600;
+	}
+
+	&__help {
+		margin: 8px 0;
+		color: #757575;
+	}
+
+	&__scroll {
+		max-width: 100%;
+		max-height: 60vh;
+		margin-top: 8px;
+		overflow: auto;
+	}
+
+	&__table {
+		width: 100%;
+		border-collapse: collapse;
+		table-layout: fixed;
+
+		th,
+		td {
+			padding: 4px 6px;
+			border-bottom: 1px solid #f0f0f1;
+			vertical-align: top;
+			text-align: start;
+		}
+
+		thead th {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			background: #fff;
+			font-size: 11px;
+			font-weight: 500;
+			text-transform: uppercase;
+		}
+
+		thead th:first-child {
+			width: 28%;
+		}
+
+		thead th:nth-child(2) {
+			width: 30%;
+		}
+	}
+
+	&__name {
+		font-weight: 400;
+		overflow-wrap: anywhere;
+	}
+
+	&__input {
+		box-sizing: border-box;
+		width: 100%;
+		min-height: 32px;
+		font-size: 13px;
+	}
+
+	textarea.wc-pl-translate__input {
+		resize: vertical;
+	}
+
+	&__reference {
+		display: block;
+		margin-top: 2px;
+		overflow: hidden;
+		color: #757575;
+		font-size: 12px;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 }

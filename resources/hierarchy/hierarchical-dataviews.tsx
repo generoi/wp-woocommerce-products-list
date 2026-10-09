@@ -17,18 +17,17 @@
  * - names a variation's checkbox after its parent too ("Aylla Chiri — 38",
  *   not just "38"), so a screen reader hears which product it selects;
  * - shift-click on a checkbox selects (or clears) the range from the last
- *   one clicked, as in WordPress's own lists;
- * - hosts the inline editor: for an editor row (edit/editor-rows.ts) the
- *   title field renders the editor cell and every other field nothing, so
- *   the editor spans the row (edit/editor-context.tsx widens its cell).
+ *   one clicked, as in WordPress's own lists.
+ *
+ * Quick and bulk edit are not part of the table: they open in the
+ * slide-in panel beside it (edit/editor-panel.tsx).
  *
  * Migration: see docs/hierarchy-upstream.md.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from '@wordpress/element';
 import { DataViews } from '../dataviews';
-import type { DataViewRenderFieldProps, DataViewsProps, Field } from '../dataviews';
-import { InlineEditorCell } from '../edit/editor-context';
-import { isEditorRow, isPlaceholderRow } from '../types/product';
+import type { DataViewsProps, Field } from '../dataviews';
+import { isPlaceholderRow } from '../types/product';
 import type { ProductListItem } from '../types/product';
 import { HierarchyViewProvider } from './context';
 import type { HierarchyViewValue } from './context';
@@ -38,39 +37,9 @@ export type HierarchicalDataViewsProps = DataViewsProps< ProductListItem > & Hie
 
 const neverClickable = () => false;
 
-/** Selection ids of placeholder and editor rows look like "12:loading" / "editor:12"; real ids are numeric. */
+/** Selection ids of placeholder rows look like "12:loading"; real ids are numeric. */
 export function withoutPlaceholderIds( ids: string[] ): string[] {
 	return ids.filter( ( id ) => ! id.includes( ':' ) );
-}
-
-type RenderProps = DataViewRenderFieldProps< ProductListItem >;
-
-/**
- * The same fields with their `render` aware of the editor row: the host
- * field (the view's title field) renders the editor cell into it, the
- * others nothing. Fields without a `render` are left alone (DataViews'
- * default renders the editor row's empty value). Memoised per `fields`
- * and host so DataViews' row memo keeps working.
- */
-export function withEditorRenders< F extends Field< ProductListItem > >( fields: F[], hostFieldId: string | undefined ): F[] {
-	return fields.map( ( field ) => {
-		const Original = field.render;
-		const isHost = field.id === hostFieldId;
-
-		if ( ! Original && ! isHost ) {
-			return field;
-		}
-
-		const render = ( props: RenderProps ) => {
-			if ( isEditorRow( props.item ) ) {
-				return isHost ? <InlineEditorCell item={ props.item } /> : null;
-			}
-
-			return Original ? <Original { ...props } /> : <>{ field.getValue?.( { item: props.item } ) as string }</>;
-		};
-
-		return { ...field, render };
-	} );
 }
 
 /**
@@ -114,7 +83,7 @@ export function rangeSelection( data: ProductListItem[], getItemId: ( item: Prod
 	}
 
 	const target = ( added[ 0 ] ?? removed[ 0 ] ) as string;
-	const ids = data.filter( ( item ) => ! isPlaceholderRow( item ) && ! isEditorRow( item ) ).map( getItemId );
+	const ids = data.filter( ( item ) => ! isPlaceholderRow( item ) ).map( getItemId );
 	const from = ids.indexOf( anchor );
 	const to = ids.indexOf( target );
 
@@ -169,8 +138,7 @@ export function HierarchicalDataViews( props: HierarchicalDataViewsProps ) {
 		...dataViewsProps
 	} = props;
 
-	const hostFieldId = props.view.titleField ?? props.view.fields?.[ 0 ];
-	const editorFields = useMemo( () => withVariationTitles( withEditorRenders( fields, hostFieldId ), props.view.titleField ), [ fields, hostFieldId, props.view.titleField ] );
+	const titledFields = useMemo( () => withVariationTitles( fields, props.view.titleField ), [ fields, props.view.titleField ] );
 
 	const viewValue = useMemo< HierarchyViewValue >(
 		() => ( { getItemParentId, getItemHasChildren, expandedItemIds, onChangeExpandedItemIds, childrenState, onRetryChildren, searchMatchIds, variationFilterActive, onShowAllChildren, onShowMatchingChildren } ),
@@ -222,7 +190,7 @@ export function HierarchicalDataViews( props: HierarchicalDataViewsProps ) {
 		<HierarchyViewProvider value={ viewValue }>
 			<DataViews< ProductListItem >
 				{ ...( dataViewsProps as DataViewsProps< ProductListItem > ) }
-				fields={ editorFields }
+				fields={ titledFields }
 				getItemLevel={ getItemLevel }
 				isItemClickable={ isItemClickable }
 				selection={ cleanSelection }
@@ -234,5 +202,5 @@ export function HierarchicalDataViews( props: HierarchicalDataViewsProps ) {
 
 /** True for rows DataViews should not offer actions on. */
 export function isActionableRow( item: ProductListItem ): boolean {
-	return ! isPlaceholderRow( item ) && ! isEditorRow( item );
+	return ! isPlaceholderRow( item );
 }

@@ -19,7 +19,8 @@ import type {
 	RawVariation,
 	VariationUpdate,
 } from '../types';
-import { ApiError, toApiError } from './errors';
+import { ApiError, isAbortError, toApiError } from './errors';
+import { recordBootRequest, takePrefetched } from './prefetch';
 
 export { ApiError } from './errors';
 
@@ -109,6 +110,8 @@ export interface LogRow {
 	reverts?: string | null;
 	/** The latest revert of this row's batch, or null. */
 	reverted_by?: RevertedBy | null;
+	/** A skipped row without a `field`: the fields it left out (its context's `fields`). */
+	skipped_fields?: string[];
 }
 
 /** Who reverted a batch, and when (`reverted_by` on log rows, batches and plans). */
@@ -143,6 +146,10 @@ export interface LogBatch {
 	skipped_reasons?: string[];
 	/** A readable name for an action batch ("Moved to trash", "Copy translations (Suomi → Svenska): Name"); null for field edits. */
 	summary?: string | null;
+	/** Fields of the batch's own update/create rows (not those an action wrote). */
+	update_fields?: string[];
+	/** The name of the batch's action when it has one ("Mark as featured"); `summary` joins it with the field labels for a mixed batch. */
+	action_summary?: string | null;
 	/** The batch this one reverted, when it is a revert. */
 	reverts?: string | null;
 	/** The latest revert of this batch. */
@@ -281,8 +288,49 @@ function isStaleNonce( error: unknown ): boolean {
 	return error instanceof ApiError && error.code === 'rest_cookie_invalid_nonce';
 }
 
+function abortedError(): ApiError {
+	return new ApiError( 'Request aborted', 'abort', 0 );
+}
+
+/**
+ * The response the page's inline prefetch script started for this path
+ * (api/prefetch.ts), as a list result; null when there is none, it failed
+ * or it is not a list, so the caller asks the server itself.
+ */
+async function prefetchedList< Raw >( path: string, signal?: AbortSignal ): Promise< ListResult< Raw > | null > {
+	const pending = takePrefetched( path );
+
+	if ( ! pending ) {
+		return null;
+	}
+
+	const response = await pending.catch( () => null );
+
+	if ( signal?.aborted ) {
+		throw abortedError();
+	}
+
+	if ( ! response?.ok || ! Array.isArray( response.data ) ) {
+		return null;
+	}
+
+	const items = response.data as Raw[];
+	const total = Number( response.headers?.total );
+	const totalPages = Number( response.headers?.totalPages );
+
+	return { items, total: Number.isFinite( total ) && total > 0 ? total : items.length, totalPages: Number.isFinite( totalPages ) && totalPages > 0 ? totalPages : 1 };
+}
+
 /** A GET that keeps the X-WP-Total headers. */
 async function list< Raw >( path: string, options?: RequestOptions, retried = false ): Promise< ListResult< Raw > > {
+	if ( ! retried ) {
+		const prefetched = await prefetchedList< Raw >( path, options?.signal );
+
+		if ( prefetched ) {
+			return prefetched;
+		}
+	}
+
 	let response: Response;
 
 	try {
@@ -351,7 +399,11 @@ const PRODUCTS = '/wc/v3/products';
 const OWN = '/wc-products-list/v1';
 
 export async function listProducts( query: QueryParams, options?: RequestOptions ): Promise< ListResult< ProductListItem > > {
-	const result = await list< RawProduct >( addQueryArgs( PRODUCTS, query ), options );
+	const path = addQueryArgs( PRODUCTS, query );
+	const result = await list< RawProduct >( path, options );
+
+	// The next load of this admin URL can start the same request before the bundle runs.
+	recordBootRequest( 'list', path );
 
 	return { ...result, items: result.items.map( toProductRow ) };
 }
@@ -372,6 +424,74 @@ export async function getVariations(
 	const result = await list< RawVariation >( addQueryArgs( `${ PRODUCTS }/${ parentId }/variations`, query ), options );
 
 	return { ...result, items: result.items.map( ( raw ) => toVariationRow( raw, parentId ) ) };
+}
+
+/** The cross-parent variations read (docs/contracts.md, "Cross-parent variation reads"). */
+export const VARIATIONS_ACROSS_ROUTE = `${ OWN }/variations`;
+
+/** Null until a request says; false once the server answered that it has no such route. */
+let acrossSupported: boolean | null = null;
+
+/** Tests: forget (or force) what the server said about the cross-parent route. */
+export function resetVariationsAcrossSupport( value: boolean | null = null ): void {
+	acrossSupported = value;
+}
+
+export function variationsAcrossSupported(): boolean | null {
+	return acrossSupported;
+}
+
+function parentOfRawVariation( raw: RawVariation ): number {
+	const own = ( raw as { parent_id?: unknown } ).parent_id;
+	const enriched = ( raw as { wc_products_list?: { parent_id?: unknown } } ).wc_products_list?.parent_id;
+
+	return Number( own ?? enriched ?? 0 ) || 0;
+}
+
+/**
+ * One page of every variation of these parents (at most 100 parents, the
+ * route's limit), ordered parent by parent, as list rows under their own
+ * parent. `X-WP-Total` counts the variations of all of them. Null when the
+ * server has no cross-parent route (an older plugin build): the caller
+ * reads per parent. `params` are the variation-level filters, as the
+ * per-parent route takes them.
+ */
+export async function getVariationsAcross(
+	parentIds: number[],
+	page = 1,
+	options?: RequestOptions & { perPage?: number; fields?: string[]; params?: QueryParams }
+): Promise< ListResult< ProductListItem > | null > {
+	if ( acrossSupported === false ) {
+		return null;
+	}
+
+	const perPage = Math.min( options?.perPage ?? 100, getSettings().limits.perPageMax );
+	const fields = options?.fields?.length ? Array.from( new Set( [ ...options.fields, 'id', 'parent_id' ] ) ) : [];
+	const query: QueryParams = {
+		parent: parentIds.join( ',' ),
+		page,
+		per_page: perPage,
+		image_size: 'thumbnail',
+		...( fields.length ? { _fields: fields.join( ',' ) } : {} ),
+		...( options?.params ?? {} ),
+	};
+	let result: ListResult< RawVariation >;
+
+	try {
+		result = await list< RawVariation >( addQueryArgs( VARIATIONS_ACROSS_ROUTE, query ), options );
+	} catch ( error ) {
+		if ( acrossSupported !== true && ! isAbortError( error ) && error instanceof ApiError && ( error.code === 'rest_no_route' || error.status === 404 ) ) {
+			acrossSupported = false;
+
+			return null;
+		}
+
+		throw error;
+	}
+
+	acrossSupported = true;
+
+	return { ...result, items: result.items.map( ( raw ) => toVariationRow( raw, parentOfRawVariation( raw ) ) ) };
 }
 
 export async function getProduct( id: number, fields?: string[] ): Promise< ProductListItem > {
@@ -598,7 +718,23 @@ export async function runAction(
 }
 
 export async function getCounts( options?: RequestOptions ): Promise< Record< string, number > > {
-	return request< Record< string, number > >( { path: `${ OWN }/counts`, ...listMode( options ) } );
+	const path = `${ OWN }/counts`;
+	const pending = takePrefetched( path );
+	const prefetched = pending ? await pending.catch( () => null ) : null;
+
+	if ( options?.signal?.aborted ) {
+		throw abortedError();
+	}
+
+	if ( prefetched?.ok && prefetched.data && typeof prefetched.data === 'object' && ! Array.isArray( prefetched.data ) ) {
+		return prefetched.data as Record< string, number >;
+	}
+
+	const counts = await request< Record< string, number > >( { path, ...listMode( options ) } );
+
+	recordBootRequest( 'counts', path );
+
+	return counts;
 }
 
 export async function getTerms(

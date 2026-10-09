@@ -1,8 +1,8 @@
 /**
- * Quick edit (one row) / bulk edit (many) inline in the table: the action
- * hands the rows to the screen, which places the editor row (a quick edit
- * in the row's place, the bulk editor above the first row) and mounts the
- * editor chunk into it. DataViews' bulk footer and the row menu both call
+ * Quick edit (one row) / bulk edit (many) in the slide-in panel beside the
+ * list: the action hands the rows to the screen, which opens the editor
+ * session; the panel (edit/editor-panel.tsx) mounts the editor chunk while
+ * the table keeps its rows and selection in view. DataViews' bulk footer and the row menu both call
  * the callback; the selection bar's "Bulk edit" goes to the screen directly.
  */
 import { pencil } from '@wordpress/icons';
@@ -51,6 +51,8 @@ export const createQuickEditAction: ActionFactory = ( context ) => {
 		label: ( items ) => ( items.length > 1 ? __( 'Bulk edit', 'wp-woocommerce-products-list' ) : __( 'Quick edit', 'wp-woocommerce-products-list' ) ),
 		icon: pencil,
 		isPrimary: true,
+		// A pencil on every row, not a text button that appears on hover (style.scss keeps it visible).
+		showIcon: true,
 		supportsBulk: true,
 		isEligible: ( item ) => isRealRow( item ) && canEdit( item ),
 		// Resolves at once: DataViews' footer button shows busy until the callback settles, and the editor outlives it.

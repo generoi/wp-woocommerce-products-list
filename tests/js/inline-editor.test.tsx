@@ -8,7 +8,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EditorHost } from '../../resources/edit/editor-context';
-import type { EditorSession } from '../../resources/edit/editor-rows';
+import type { EditorSession } from '../../resources/edit/editor-session';
 import type { ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, simple, variation } from './edit-fixtures';
 
@@ -299,18 +299,14 @@ describe( 'InlineEditor', () => {
 		}
 	} );
 
-	it( 'keeps the loading line in the layout once loaded (nothing moves under a first click) and moves the snackbars aside while open', async () => {
+	it( 'keeps the loading line in the layout once loaded (nothing moves under a first click), in the heading', async () => {
 		const view = renderEditor( [ simple( 1, { name: 'One' } ), simple( 2, { name: 'Two' } ) ] );
 
-		expect( document.documentElement.classList.contains( 'wc-pl-editing' ) ).toBe( true );
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
 		await waitFor( () => expect( view.container.querySelector( '.wc-pl-inline-edit__loading.is-done' ) ).not.toBeNull() );
-		// Beside the title in the item list, not above the fields.
-		expect( view.container.querySelector( '.wc-pl-inline-edit__items .wc-pl-inline-edit__loading' ) ).not.toBeNull();
+		// Beside the title, not above the fields.
+		expect( view.container.querySelector( '.wc-pl-inline-edit__head .wc-pl-inline-edit__loading' ) ).not.toBeNull();
 		expect( view.container.querySelector( '.wc-pl-inline-edit__main .wc-pl-inline-edit__loading' ) ).toBeNull();
-
-		view.unmount();
-		expect( document.documentElement.classList.contains( 'wc-pl-editing' ) ).toBe( false );
 	} );
 
 	it( 'Escape on a dirty form asks before discarding; a clean form closes', async () => {

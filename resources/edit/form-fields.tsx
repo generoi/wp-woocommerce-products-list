@@ -27,6 +27,7 @@ import { isVariation, readFieldValue } from './field-value';
 import { mergeReference, MIXED_VALUE, hasOptionList } from './merge';
 import type { MixedState } from './merge';
 import { createMixedBooleanControl } from './mixed-boolean-control';
+import { createHtmlTextControl } from './html-text-control';
 import { createMixedTextControl } from './mixed-text-control';
 import { createTermTokensControl } from './term-tokens-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
@@ -158,6 +159,19 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 				__( 'Default: %s', 'wp-woocommerce-products-list' ),
 				referenceText( field, reference, settings )
 			);
+
+			// One row whose shop text comes from a fallback language: say what is shown now first.
+			const shown = rows.length === 1 && field.shownReference ? field.shownReference( rows[ 0 ] as ProductListItem ) : null;
+
+			if ( shown ) {
+				formField.description = sprintf(
+					/* translators: 1: "Shown now (English fallback)", 2: that text, 3: "Default: <default-language text>" */
+					__( '%1$s: %2$s · %3$s', 'wp-woocommerce-products-list' ),
+					shown.label,
+					referenceText( field, shown.text, settings ),
+					formField.description
+				);
+			}
 		}
 
 		if ( scheduleId && ids.has( scheduleId ) ) {
@@ -251,6 +265,15 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			} else {
 				formField.elements = [ mixedOption, ...( formField.elements ?? [] ) ];
 			}
+		}
+
+		// HTML (descriptions and their translations): a formatted-text editor with a Code view, not raw markup in
+		// a textarea. Not for a bulk field whose rows disagree, which keeps its "Mixed" control.
+		if ( field.html && ! kind && ! ( bulk && isMixed ) ) {
+			const edit = field.Edit as { rows?: number } | undefined;
+
+			formField.type = undefined;
+			formField.Edit = createHtmlTextControl( { rows: typeof edit === 'object' && edit && typeof edit.rows === 'number' ? edit.rows : 4 } );
 		}
 
 		if ( bulk && formField.isValid?.required ) {

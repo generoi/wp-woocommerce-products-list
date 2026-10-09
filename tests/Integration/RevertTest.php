@@ -630,10 +630,13 @@ class RevertTest extends RestTestCase
         $this->assertSame([$trashed->get_id(), $variation], $this->data($response)['logged']);
 
         $rows = array_values(array_filter($this->rows($this->batchId()), static fn (array $row): bool => $row['status'] === 'skipped'));
-        $this->assertCount(3, $rows);
-        $this->assertSame(['sale_price', 'date_on_sale_from', ''], array_column($rows, 'field'));
-        $this->assertSame(['product', 'product', 'variation'], array_column($rows, 'object_type'));
-        $this->assertSame($parent->get_id(), (int) $rows[2]['parent_id']);
+        // One row per item; its fields are in the context.
+        $this->assertCount(2, $rows);
+        $this->assertSame(['', ''], array_column($rows, 'field'));
+        $this->assertSame(['reason' => 'trashed', 'fields' => ['sale_price', 'date_on_sale_from']], json_decode($rows[0]['context'], true));
+        $this->assertSame(['reason' => 'no_stock_management'], json_decode($rows[1]['context'], true));
+        $this->assertSame(['product', 'variation'], array_column($rows, 'object_type'));
+        $this->assertSame($parent->get_id(), (int) $rows[1]['parent_id']);
         $this->assertStringContainsString('Trash', $rows[0]['message']);
         $this->assertSame('bulk', $rows[0]['source']);
 
@@ -649,7 +652,24 @@ class RevertTest extends RestTestCase
 
         // The log's own row filters find them.
         $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $trashed->get_id()]));
-        $this->assertSame(['skipped', 'skipped'], array_column($log['items'], 'status'));
+        $this->assertSame(['skipped'], array_column($log['items'], 'status'));
+
+        // The field filter finds a skipped item by any of its fields, exactly or by wildcard.
+        foreach (['date_on_sale_from', 'date_on_sale_*', 'sale_price'] as $field) {
+            $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId(), 'field' => $field, 'object_id' => $trashed->get_id()]));
+            $this->assertSame([$trashed->get_id()], array_map('intval', array_column($log['items'], 'object_id')), $field);
+            $this->assertSame([['sale_price', 'date_on_sale_from']], array_column($log['items'], 'skipped_fields'), $field);
+        }
+
+        $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId(), 'field' => 'sale']));
+        $this->assertSame([], $log['items']);
+
+        // A single intended field stays in `field`.
+        $single = $this->simpleProduct(['sku' => 'ONE']);
+        $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => [['id' => $single->get_id(), 'reason' => 'has_sale', 'fields' => ['sale_price']]]]);
+        $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $single->get_id(), 'field' => 'sale_price']));
+        $this->assertSame(['sale_price'], array_column($log['items'], 'field'));
+        $this->assertSame([[]], array_column($log['items'], 'skipped_fields'));
 
         // The revert writes only the saved item.
         $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));

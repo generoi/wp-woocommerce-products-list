@@ -267,7 +267,12 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 			...( fieldOptions.length ? { elements: fieldOptions } : {} ),
 			filterBy: { operators: [ 'is' ] },
 			getValue: ( { item } ) => item.field ?? '',
-			render: ( { item } ) => <span title={ item.field ?? '' }>{ logFieldLabel( item.field, fieldOptions ) || '—' }</span>,
+			render: ( { item } ) => {
+				const keys = item.field ? [ item.field ] : item.skipped_fields ?? [];
+				const labels = keys.map( ( key ) => logFieldLabel( key, fieldOptions ) || key );
+
+				return <span title={ keys.join( ', ' ) }>{ labels.join( ', ' ) || '—' }</span>;
+			},
 		},
 		{
 			id: 'change',

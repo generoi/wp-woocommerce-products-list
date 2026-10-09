@@ -30,6 +30,7 @@ import type { ListResult } from '../api/client';
 import { CORE_REQUEST_FIELDS } from '../api/query';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
+import { findLoadedVariation } from '../hierarchy/use-hierarchy';
 import { subscribeRemoved } from '../store/products';
 import { getItemId } from '../types';
 import type { BatchResult, ProductListItem, QueryParams } from '../types';
@@ -68,6 +69,13 @@ export interface SelectionApi {
 export interface UseSelectionOptions {
 	fetchPage?: FetchPage;
 	maxSelectAll?: number;
+	/**
+	 * A row the page does not show and the selection does not hold yet: a
+	 * loaded variation of a collapsed parent ("Select all variations" keeps
+	 * the parents beyond the row limit collapsed). Defaults to the
+	 * hierarchy's loaded variations.
+	 */
+	lookupRow?: ( id: string ) => ProductListItem | undefined;
 }
 
 type Stored = Map< string, ProductListItem >;
@@ -112,6 +120,11 @@ function sameKeys( a: Stored, b: Stored ): boolean {
 export function useSelection( pageRows: ProductListItem[], resetKey: string, options: UseSelectionOptions = {} ): SelectionApi {
 	const fetchPage = options.fetchPage ?? ( listProducts as FetchPage );
 	const maxSelectAll = options.maxSelectAll ?? MAX_SELECT_ALL;
+	const lookupRow = options.lookupRow ?? findLoadedVariation;
+	const lookupRef = useRef( lookupRow );
+	useLayoutEffect( () => {
+		lookupRef.current = lookupRow;
+	} );
 	const [ stored, setStored ] = useState< Stored >( () => new Map() );
 	const [ selectAllProgress, setSelectAllProgress ] = useState< SelectAllProgress | null >( null );
 	const [ selectAllError, setSelectAllError ] = useState< string | null >( null );
@@ -212,12 +225,13 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 
 	const set = useCallback( ( ids: string[] ) => {
 		const page = pageByIdRef.current;
+		const lookup = lookupRef.current;
 
 		setStored( ( current ) => {
 			const next: Stored = new Map();
 
 			for ( const id of ids ) {
-				const row = page.get( id ) ?? current.get( id );
+				const row = page.get( id ) ?? current.get( id ) ?? lookup( id );
 
 				if ( row ) {
 					next.set( id, row );

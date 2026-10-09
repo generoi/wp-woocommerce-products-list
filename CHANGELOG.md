@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Bulk edit's language tabs have "Translate product by product": a spreadsheet of each selected product's name and short description in that language, with the text the shop shows now as reference, Enter to move down the column, and saving with Update in the same History batch.
+- "Edit translated text" previews templates, set, prefix, suffix and find & replace from the server: tokens such as {name} and {brand} are resolved, and the preview says which products would take {name} from another language.
+- Market price inputs on language tabs centre their currency sign.
+- Quick edit and bulk edit open in a slide-in panel on the right of the Catalog instead of an editor row in the table: the list narrows beside it (a drawer over it below 960 px) and stays usable, the quick-edited row is highlighted, ticking or unticking rows updates a bulk edit live, and Quick edit on another row switches the panel (after the discard confirm). The panel opens at about half the window (52 %) and is resizable (drag or arrow keys, 480 px to 75 % of the window while the list keeps at least 320 px; the share is remembered); its right edge stays on the window's at every width and admin-menu state, and below 960 px it covers the window. F6 moves between list and panel, Escape and the X close it. Opening or closing it no longer re-renders the table's rows.
+- Quick edit is a pencil button on every row (no hover needed); the ⋮ menu keeps it too.
+- The name column no longer repeats the SKU on a second line (the SKU is its own column); saved views that had it are cleaned up.
+- Short description, description and their translations edit as formatted text (Bold, Italic, lists, links) with a Code view for the HTML, instead of raw markup with `&amp;` and `<br />` in a textarea. Nothing is rewritten unless edited, text stored without paragraph tags keeps that form, and HTML the visual editor cannot keep (scripts, embeds, block comments) opens in Code.
+- A click on the label of the editor's first checkbox ("Apply price and sale fields to all variations") no longer ticks every row of the list (the editor's checkboxes shared an id with the list's select-all checkbox).
+
 ## 0.1.0 - 2026-10-09
 
 First release. Products → Catalog: a DataViews product list for WooCommerce 11 with variations inline under their parents, in-place quick edit and bulk edit (scheduled sales on simple products and on all variations of variable products, numeric and percent operations with rounding, mixed-value state, server-side relative stock), optimistic saves with per-item errors and Undo, a change log with a batch History screen and revert, and a declarative PHP plus JavaScript extension API (used by gds-woo-i18n for per-language columns and tools).

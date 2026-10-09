@@ -7,12 +7,14 @@ use GeneroWP\ProductsList\Rest\CountsController;
 use GeneroWP\ProductsList\Rest\ListQuery;
 use GeneroWP\ProductsList\Rest\Rows;
 use GeneroWP\ProductsList\Rest\TermsController;
+use GeneroWP\ProductsList\Rest\VariationsReadController;
 
 /**
  * The read side of the REST plumbing: the list-mode query parameters, the
- * row enrichment and the wc-products-list/v1 counts and terms routes. The
- * write side (the save hook and the change log, the actions route) is
- * registered by the Log and Actions modules.
+ * row enrichment and the wc-products-list/v1 counts, terms and
+ * cross-parent variations routes. The write side (the save hook and the
+ * change log, the actions route) is registered by the Log and Actions
+ * modules.
  */
 class Rest implements Module
 {
@@ -35,6 +37,7 @@ class Rest implements Module
     {
         (new CountsController)->register_routes();
         (new TermsController)->register_routes();
+        (new VariationsReadController)->register();
     }
 
     public function listQuery(): ListQuery

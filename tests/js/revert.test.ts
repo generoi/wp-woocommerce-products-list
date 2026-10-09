@@ -16,6 +16,38 @@ function response( results: ActionResponse[ 'results' ] ): ActionResponse {
 }
 
 describe( 'runRevert', () => {
+	it( 'sends at most 3 chunks at once and keeps the results in chunk order', async () => {
+		let inFlight = 0;
+		let peak = 0;
+		const resolvers: Array< () => void > = [];
+		const post = vi.fn( ( _batch: string, options?: { ids?: number[] } ) => {
+			inFlight += 1;
+			peak = Math.max( peak, inFlight );
+
+			return new Promise< ActionResponse >( ( resolve ) => {
+				resolvers.push( () => {
+					inFlight -= 1;
+					resolve( response( ( options?.ids ?? [] ).map( ( id ) => ( { id, ok: true } ) ) ) );
+				} );
+			} );
+		} );
+		const run = runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ], [ 3 ], [ 4 ], [ 5 ] ] }, {}, post );
+
+		await Promise.resolve();
+		expect( post ).toHaveBeenCalledTimes( 3 );
+		// Finish out of order: the later chunks still land after the earlier ones.
+		while ( resolvers.length ) {
+			( resolvers.pop() as () => void )();
+			await new Promise( ( resolve ) => setTimeout( resolve, 0 ) );
+		}
+
+		const outcome = await run;
+
+		expect( peak ).toBe( 3 );
+		expect( post ).toHaveBeenCalledTimes( 5 );
+		expect( outcome.ok ).toBe( 5 );
+	} );
+
 	it( 'posts one request per chunk under one revert batch id, with progress, and sorts the results', async () => {
 		const post = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) =>
 			response( ( options?.ids ?? [] ).map( ( id ) => ( id === 3 ? { id, ok: false, code: 'conflict', fields: [ 'regular_price' ] } : id === 5 ? { id, ok: false, code: 'rest_invalid_param', message: 'Bad' } : { id, ok: true } ) ) )

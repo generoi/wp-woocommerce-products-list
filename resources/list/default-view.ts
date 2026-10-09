@@ -74,7 +74,6 @@ export const DEFAULT_LAYOUTS: SupportedLayouts = {
 	list: {
 		titleField: 'name',
 		mediaField: 'images',
-		descriptionField: 'sku',
 		showMedia: true,
 	},
 };

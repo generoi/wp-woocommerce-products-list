@@ -9,7 +9,7 @@ import { rangeSelection, withVariationTitles } from '../../resources/hierarchy/h
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { getChildrenState, getVariationFilter, resetHierarchyStore, useHierarchy } from '../../resources/hierarchy/use-hierarchy';
 import type { FetchVariations } from '../../resources/hierarchy/use-hierarchy';
-import { isBulkEditShortcut, selectMatchingVariations, tableViewOf } from '../../resources/list/products-screen';
+import { isBulkEditShortcut, selectMatchingVariations } from '../../resources/list/products-screen';
 import { setSettings } from '../../resources/settings';
 import { getItemId } from '../../resources/types';
 import type { ProductField, ProductListItem, ProductRow, QueryParams, RawVariation, Settings } from '../../resources/types';
@@ -306,15 +306,6 @@ describe( 'screen helpers', () => {
 		expect( isBulkEditShortcut( { ...base, code: 'KeyB', key: '∫' } ) ).toBe( true );
 		expect( isBulkEditShortcut( { ...base, code: 'KeyB', key: 'b', ctrlKey: true } ) ).toBe( false );
 		expect( isBulkEditShortcut( { ...base, altKey: false, code: 'KeyB', key: 'b' } ) ).toBe( false );
-	} );
-
-	it( 'switches a grid or list view to the table for the inline editor', () => {
-		const grid = { type: 'grid', page: 2, perPage: 20, fields: [ 'name' ], layout: { previewSize: 160 } } as unknown as View;
-		const table = tableViewOf( grid );
-
-		expect( table.type ).toBe( 'table' );
-		expect( table.page ).toBe( 2 );
-		expect( ( table as { layout?: { density?: string } } ).layout?.density ).toBe( 'balanced' );
 	} );
 
 	it( 'Select matching variations expands the page and adds the loaded variations', async () => {

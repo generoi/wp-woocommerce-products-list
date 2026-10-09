@@ -1,5 +1,5 @@
 diff --git a/build-wp/index.js b/build-wp/index.js
-index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8c8b6bdeb 100644
+index b3e31039996f12156966c56829aaab7102350269..55af0fb4d52e06539acc26b3771e3c0f2d32da9a 100644
 --- a/build-wp/index.js
 +++ b/build-wp/index.js
 @@ -21000,7 +21000,7 @@ function DataViewsSelectionCheckbox({
@@ -11,7 +11,124 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
          );
        },
        ...extraProps
-@@ -22187,6 +22187,8 @@ function useSelectionProps({
+@@ -21040,6 +21040,22 @@ function ButtonTrigger({
+   variant
+ }) {
+   const label = typeof action.label === "string" ? action.label : action.label(items);
++  if (action.icon && action.showIcon) {
++    return /* @__PURE__ */ jsx96(
++      button_default,
++      {
++        disabled: !!action.disabled,
++        accessibleWhenDisabled: true,
++        size: "compact",
++        variant,
++        onClick,
++        icon: action.icon,
++        label,
++        showTooltip: true,
++        className: "dataviews-primary-action-button"
++      }
++    );
++  }
+   return /* @__PURE__ */ jsx96(
+     button_default,
+     {
+@@ -21120,7 +21136,8 @@ function ActionsMenuGroup({
+     renderActionGroup(regularActions)
+   ] });
+ }
+-function ItemActions({
++var ItemActions = /* @__PURE__ */ memo(ItemActionsBase);
++function ItemActionsBase({
+   item,
+   actions,
+   isCompact
+@@ -21183,6 +21200,7 @@ function ItemActions({
+     }
+   );
+ }
++var MENU_HOVER_INTENT_MS = 120;
+ function CompactItemActions({
+   item,
+   actions,
+@@ -21192,6 +21210,58 @@ function CompactItemActions({
+   const [activeModalAction, setActiveModalAction] = useState(
+     null
+   );
++  const [menuMounted, setMenuMounted] = useState(false);
++  const openOnMountRef = useRef(false);
++  const hoverTimerRef = useRef(void 0);
++  const triggerRef = useRef(null);
++  useEffect(() => () => clearTimeout(hoverTimerRef.current), []);
++  useLayoutEffect(() => {
++    if (!menuMounted || !openOnMountRef.current) {
++      return;
++    }
++    openOnMountRef.current = false;
++    const trigger = triggerRef.current;
++    if (trigger) {
++      trigger.focus();
++      trigger.click();
++    }
++  }, [menuMounted]);
++  if (!menuMounted) {
++    const mountAndOpen = () => {
++      clearTimeout(hoverTimerRef.current);
++      openOnMountRef.current = true;
++      setMenuMounted(true);
++    };
++    return /* @__PURE__ */ jsx96(
++      button_default,
++      {
++        size: isSmall ? "small" : "compact",
++        icon: more_vertical_default,
++        label: __24("Actions"),
++        showTooltip: false,
++        accessibleWhenDisabled: true,
++        disabled: !actions.length,
++        className: "dataviews-all-actions-button",
++        "aria-haspopup": "menu",
++        "aria-expanded": false,
++        onClick: mountAndOpen,
++        onKeyDown: (event) => {
++          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
++            event.preventDefault();
++            mountAndOpen();
++          }
++        },
++        onPointerEnter: (event) => {
++          if (event.pointerType !== "mouse") {
++            return;
++          }
++          clearTimeout(hoverTimerRef.current);
++          hoverTimerRef.current = setTimeout(() => setMenuMounted(true), MENU_HOVER_INTENT_MS);
++        },
++        onPointerLeave: () => clearTimeout(hoverTimerRef.current)
++      }
++    );
++  }
+   return /* @__PURE__ */ jsxs25(Fragment6, { children: [
+     /* @__PURE__ */ jsxs25(menu_exports.Root, { children: [
+       /* @__PURE__ */ jsx96(
+@@ -21201,6 +21271,7 @@ function CompactItemActions({
+           render: /* @__PURE__ */ jsx96(
+             button_default,
+             {
++              ref: triggerRef,
+               size: isSmall ? "small" : "compact",
+               icon: more_vertical_default,
+               label: __24("Actions"),
+@@ -22047,7 +22118,7 @@ function ColumnPrimary({
+     )
+   ] });
+ }
+-var column_primary_default = ColumnPrimary;
++var column_primary_default = /* @__PURE__ */ memo(ColumnPrimary);
+ 
+ // src/components/dataviews-layouts/table/use-scroll-state.ts
+ import { isRTL as isRTL10 } from "@wordpress/i18n";
+@@ -22187,6 +22258,8 @@ function useSelectionProps({
    const selectableIdSet = new Set(selectableIds);
    const hasSelectableItems = selectableIds.length > 0;
    const hasRangeGesture = hasSelectableItems && isMultiselect;
@@ -20,7 +137,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
    const getSelectionProps = (id) => {
      const isSelectable = selectableIdSet.has(id);
      return {
-@@ -22195,6 +22197,7 @@ function useSelectionProps({
+@@ -22195,6 +22268,7 @@ function useSelectionProps({
        // reach here: `onClickCapture` stops them.
        ...shouldSelectOnClick && {
          onClick: () => {
@@ -28,7 +145,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
            if (allowDeselect && selection.includes(id)) {
              onChangeSelection(
                selection.filter((itemId) => id !== itemId)
-@@ -22208,11 +22211,13 @@ function useSelectionProps({
+@@ -22208,11 +22282,13 @@ function useSelectionProps({
          }
        },
        onMouseDown: (event) => {
@@ -42,7 +159,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
          if (!hasRangeGesture) {
            return;
          }
-@@ -22420,7 +22425,25 @@ function TableColumnField({
+@@ -22420,7 +22496,25 @@ function TableColumnField({
    });
    return /* @__PURE__ */ jsx102("div", { className, children: /* @__PURE__ */ jsx102(field.render, { item, field }) });
  }
@@ -69,7 +186,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
    hasBulkActions,
    item,
    level,
-@@ -22441,9 +22464,9 @@ function TableRow({
+@@ -22441,9 +22535,9 @@ function TableRow({
    onMouseDown,
    onClickCapture,
    isActionsColumnSticky,
@@ -81,7 +198,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
    const hasPossibleBulkAction = useHasAPossibleBulkAction(actions, item);
    const isSelected = hasPossibleBulkAction && selection.includes(id);
    const {
-@@ -22461,7 +22484,7 @@ function TableRow({
+@@ -22461,7 +22555,7 @@ function TableRow({
          "is-selected": hasPossibleBulkAction && isSelected,
          "has-bulk-actions": hasPossibleBulkAction
        }),
@@ -90,7 +207,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
        "aria-posinset": posinset,
        role: infiniteScrollEnabled ? "article" : void 0,
        onClickCapture,
-@@ -22561,7 +22584,7 @@ function ViewTable({
+@@ -22561,7 +22655,7 @@ function ViewTable({
    className,
    empty
  }) {
@@ -99,7 +216,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
    const isDelayedLoading = useDelayedLoading(isLoading);
    const groupField = view.groupBy?.field ? fields.find((f) => f.id === view.groupBy?.field) : null;
    const dataByGroup = groupField ? getDataByGroup(data, groupField) : null;
-@@ -22836,6 +22859,7 @@ function ViewTable({
+@@ -22836,6 +22930,7 @@ function ViewTable({
                      selection,
                      getItemId,
                      onChangeSelection,
@@ -107,7 +224,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
                      ...getSelectionProps(id),
                      onClickItem,
                      renderItemLink,
-@@ -22865,6 +22889,7 @@ function ViewTable({
+@@ -22865,6 +22960,7 @@ function ViewTable({
                  selection,
                  getItemId,
                  onChangeSelection,
@@ -115,7 +232,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
                  ...getSelectionProps(id),
                  onClickItem,
                  renderItemLink,
-@@ -31944,13 +31969,25 @@ function useData({
+@@ -31944,13 +32040,25 @@ function useData({
      selection,
      getItemId
    ]);
@@ -146,7 +263,7 @@ index b3e31039996f12156966c56829aaab7102350269..ecaaa4754ad6a2ea7d0c4228eb14bdd8
        paginationInfo: isLoading && previousDataRef.current?.length ? previousPaginationInfoRef.current : paginationInfo,
        hasInitiallyLoaded,
        setVisibleEntries: void 0
-@@ -32261,15 +32298,18 @@ function DataViews({
+@@ -32261,15 +32369,18 @@ function DataViews({
    const containerRef = useRef(null);
    const [containerWidth, resizeObserverRef] = useContainerWidth();
    const [openedFilter, setOpenedFilter] = useState(null);

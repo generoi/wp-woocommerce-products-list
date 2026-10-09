@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defaultColumnStyle } from '../../resources/extensions/declarative';
 import { createProductFields } from '../../resources/fields/registry';
-import { columnStyles, createDefaultView, DEFAULT_TABLE_FIELDS } from '../../resources/list/default-view';
+import { columnStyles, createDefaultView, DEFAULT_LAYOUTS, DEFAULT_TABLE_FIELDS } from '../../resources/list/default-view';
 import { setSettings } from '../../resources/settings';
 import { mergeTableLayout, sanitizePersisted } from '../../resources/store/view';
 import type { DeclarativeField, ProductField, Settings } from '../../resources/types';
@@ -89,5 +89,19 @@ describe( 'column styles in the view', () => {
 
 		expect( mergeTableLayout( undefined, undefined ) ).toEqual( { styles: {} } );
 		expect( mergeTableLayout( { styles: { a: 1 } }, { styles: { b: 2 } } ) ).toEqual( { styles: { a: 1, b: 2 } } );
+	} );
+
+	it( 'never puts the SKU on a second line under the name: it is its own column', () => {
+		const defaults = createDefaultView( settings, fields );
+		const saved = { type: 'table' as const, titleField: 'name', descriptionField: 'sku', showDescription: true, fields: [ 'sku' ] };
+		const persisted = sanitizePersisted( saved as never, defaults, fields );
+
+		expect( persisted.descriptionField ).toBeUndefined();
+		expect( ( persisted as { showDescription?: boolean } ).showDescription ).toBeUndefined();
+		expect( persisted.fields ).toEqual( [ 'sku' ] );
+
+		for ( const layout of Object.values( DEFAULT_LAYOUTS ) ) {
+			expect( layout === true ? undefined : layout?.descriptionField ).toBeUndefined();
+		}
 	} );
 } );

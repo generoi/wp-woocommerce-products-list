@@ -6,7 +6,9 @@ use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\Actions\Duplicate;
 use GeneroWP\ProductsList\Bootstrap;
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Table;
+use GeneroWP\ProductsList\Rest\LogController;
 use WC_Product;
 use WP_Error;
 use WP_REST_Request;
@@ -598,5 +600,29 @@ class ActionsTest extends RestTestCase
         // A batch of field edits has none: History lists its fields.
         $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['regular_price' => '1'], [ListMode::BATCH_HEADER => wp_generate_uuid4()]);
         $this->assertNull($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0]['summary']);
+    }
+
+    public function test_a_bulk_edit_with_a_staged_action_is_summarised_as_both(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '20']);
+        $other = $this->simpleProduct();
+
+        // One gesture: field edits (source bulk), then an action in the same batch.
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $product->get_id(), 'sale_price' => '15', 'date_on_sale_to' => '2030-01-31T23:59:59']],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+        $this->act('feature', [$other->get_id()], ['featured' => true]);
+
+        $batch = $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'][0];
+        $this->assertSame($this->batchId(), $batch['batch_id']);
+        $this->assertSame('bulk', $batch['source']);
+        $this->assertSame(['date_on_sale_to', 'sale_price'], $batch['update_fields']);
+        $this->assertSame('Mark as featured', $batch['action_summary']);
+        $this->assertSame('Date on sale to, Sale price + Mark as featured', $batch['summary']);
+
+        // An action batch alone keeps its own name.
+        $this->assertSame('Move to Trash', LogController::mixedSummary('Move to Trash', []));
+        $this->assertNull(LogController::mixedSummary(null, ['sale_price']));
+        $this->assertSame('A, B, C, D +1 more + Go', LogController::mixedSummary('Go', ['a', 'b', 'c', 'd', 'e']));
     }
 }

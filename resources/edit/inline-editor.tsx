@@ -1,8 +1,8 @@
 /**
- * Quick edit (one row) and bulk edit (many rows) inline in the table, like
- * WooCommerce's classic list: the quick editor takes the place of the row
- * it edits, the bulk editor sits above the first row (edit/editor-rows.ts
- * places it, editor-context.tsx hosts it). Edits stay local until Update;
+ * Quick edit (one row) and bulk edit (many rows) in a panel that slides in
+ * beside the list, like the quick edit of WooCommerce's DataViews product
+ * list (edit/editor-panel.tsx hosts it): the table stays in view with the
+ * edited row marked and the selection ticked. Edits stay local until Update;
  * Cancel and Escape discard after a confirm when something was typed, and
  * the same confirm guards paging, sorting, filtering and opening another
  * editor (`host.setGuard`). Update goes variations first then parents,
@@ -22,29 +22,33 @@
  * with it, the others on their first visit (six languages of descriptions
  * for a page of 100 products is over a megabyte nobody looks at).
  */
-import { Button, CheckboxControl, Notice, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { Button, Notice, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
+import { CheckboxControl } from '../ui/checkbox-control';
+import { createPortal, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
 import type { KeyboardEvent } from 'react';
-import { getVariations, logSkipped, newBatchId } from '../api/client';
+import { batchProducts, getVariations, logSkipped, newBatchId, toRow } from '../api/client';
 import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
 import { getCurrentRows } from '../store/rows';
 import type { ProductListItem, QuickEditTab, Settings } from '../types';
+import { isBatchItemError } from '../types';
 import { rowFields } from '../actions/context';
 import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { changedSinceLoaded, editFetchFields, hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
-import { hasLoadRelativeOps, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
+import { editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { getVariationsOfParents } from './variations-read';
+import { hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary, describeSiteDateTime } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
+import { measureEditorReady } from './editor-panel';
 import { fieldOfErrorCode, isGoneCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
 import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
@@ -58,9 +62,11 @@ import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
 import { canEnableStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
 import type { RowEditOptions } from './row-rules';
-import { saveEdits } from './save';
+import { saveEdits, saveFields } from './save';
+import { buildPayload } from './payload';
+import { TranslationGrid, TranslationStore } from './translation-grid';
 import type { SaveResult } from './save';
-import { planSave } from './save-runner';
+import { planSave, runConcurrently, UNCERTAIN_CODE } from './save-runner';
 import type { SavePlan } from './save-runner';
 import { undoBatch } from './undo';
 import { canUndo } from './log-access';
@@ -105,9 +111,6 @@ export function openingTab( initialTab: string | undefined | null ): string {
 
 	return initialTab ?? carried ?? GENERAL_TAB_ID;
 }
-
-/** On <html> while an editor is open: the snackbars keep clear of its buttons. */
-export const EDITING_CLASS = 'wc-pl-editing';
 
 /** How many item names a notice lists before "and N more". */
 const NAMES_SHOWN = 5;
@@ -159,8 +162,8 @@ function focusFirstControl( root: HTMLElement | null, prefer?: string ): void {
 	const preferred = prefer ? root?.querySelector< HTMLElement >( prefer ) : null;
 	const first = preferred ?? root?.querySelector< HTMLElement >( 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])' );
 
-	// The editor positions itself (scrollEditorIntoView); a focus scroll would push its title under the sticky chrome.
-	first?.focus( { preventScroll: true } );
+	// The panel's body brings the field into view (clear of its sticky footer, `scroll-padding`); the list behind it stays put.
+	first?.focus();
 }
 
 /** The Update button text for a plan: what will actually be written. */
@@ -388,54 +391,6 @@ export function revealNotice( root: HTMLElement | null, selector: string ): bool
 	return notice.ownerDocument.activeElement === notice;
 }
 
-/** The sticky chrome above the table (the admin bar, the table header when it sticks): what a scrolled-to editor must clear. */
-function stickyOffset( root: HTMLElement ): number {
-	const adminBar = document.getElementById( 'wpadminbar' );
-	const head = root.closest( 'table' )?.querySelector( 'thead' );
-	const headHeight = head && window.getComputedStyle( head ).position === 'sticky' ? head.offsetHeight : 0;
-
-	return ( adminBar?.offsetHeight ?? 0 ) + headHeight + 8;
-}
-
-/**
- * Bring the editor into view: the bulk editor to the top of the viewport
- * (under the sticky chrome); a quick editor stays where it is when it
- * already fits, else moves the least that shows it, its top first when it
- * is taller than the viewport.
- */
-/** Room kept under a quick editor's buttons when it is scrolled into view. */
-const EDITOR_BOTTOM_MARGIN = 16;
-
-export function scrollEditorIntoView( root: HTMLElement, mode: 'quick' | 'bulk' ): void {
-	if ( typeof root.getBoundingClientRect !== 'function' ) {
-		return;
-	}
-
-	const rect = root.closest( 'tr' )?.getBoundingClientRect() ?? root.getBoundingClientRect();
-
-	// Not laid out (a test DOM): nothing to scroll to.
-	if ( rect.width === 0 && rect.height === 0 ) {
-		return;
-	}
-
-	const offset = stickyOffset( root );
-	const viewport = window.innerHeight;
-
-	if ( mode === 'bulk' ) {
-		if ( rect.top < offset || rect.top > viewport / 2 ) {
-			window.scrollBy( { top: rect.top - offset, behavior: 'auto' } );
-		}
-
-		return;
-	}
-
-	if ( rect.top < offset ) {
-		window.scrollBy( { top: rect.top - offset, behavior: 'auto' } );
-	} else if ( rect.bottom > viewport - EDITOR_BOTTOM_MARGIN ) {
-		// The buttons at the editor's foot stay on screen (with a margin), unless that would push its top under the sticky header.
-		window.scrollBy( { top: Math.min( rect.bottom - viewport + EDITOR_BOTTOM_MARGIN, rect.top - offset ), behavior: 'auto' } );
-	}
-}
 
 /** The badge after an item in the bulk list: "Variation", or the product type when not simple. */
 function kindLabel( item: ProductListItem, types: Array< { value: string; label: string } > ): string | null {
@@ -494,7 +449,7 @@ export function describeRunningSales( rows: ProductListItem[], edits: Record< st
 }
 
 export function InlineEditor( { host }: InlineEditorProps ) {
-	const { session, fields: allFields, items: hostItems, close: onClose, advance: onAdvance, removeItem: onRemoveItem, setGuard, offPageCount, wholeList } = host;
+	const { session, fields: allFields, items: hostItems, close: onClose, advance: onAdvance, removeItem: onRemoveItem, setGuard, offPageCount, wholeList, headerSlot } = host;
 	const settings = getSettings();
 	const bulk = session.mode === 'bulk';
 	const mode = bulk ? 'bulk' : 'quick';
@@ -502,6 +457,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// The rows to edit: the live selection (bulk) or the one row, until the first save: from then on the rows that save had.
 	const liveRows = useMemo( () => hostItems.filter( ( item ) => ! item._placeholder ), [ hostItems ] );
 	const [ frozenRows, setFrozenRows ] = useState< ProductListItem[] | null >( null );
+	// Bulk: the list of selected items is a collapsible section at the top of the panel's body.
+	const [ itemsOpen, setItemsOpen ] = useState( true );
 	const selectedRows = frozenRows ?? liveRows;
 	const selectionKey = selectedRows.map( ( item ) => item.id ).join( ',' );
 	// The tab the editor opens on: the list's translation filter, else the one "Update & next" carried over, else General.
@@ -513,6 +470,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ loadedTabs, setLoadedTabs ] = useState< ReadonlySet< string > >( () => new Set() );
 	const [ tabLoading, setTabLoading ] = useState< string | null >( null );
 	const loadingIdsRef = useRef< Set< number > >( new Set() );
+	// The stamp of each parent of a loaded variation when it loaded: the pre-save check's baseline for that variation.
+	const parentStampsRef = useRef< Map< number, string > >( new Map() );
+	const rememberParentStamps = ( stamps: ReadonlyMap< number, string > | undefined ) => {
+		stamps?.forEach( ( stamp, id ) => parentStampsRef.current.set( id, stamp ) );
+	};
 	// Rows to drop from the list once the editor closes (gone or trashed since the list loaded, or rejected as deleted by a save).
 	const pendingRemovalRef = useRef< Set< number > >( new Set() );
 	const mountedRef = useRef( true );
@@ -526,12 +488,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	useEffect( () => {
 		mountedRef.current = true;
-		// While an editor is open the snackbars move to the other side, off its Update / Cancel buttons (edit/style.scss).
-		document.documentElement.classList.add( EDITING_CLASS );
 
 		return () => {
 			mountedRef.current = false;
-			document.documentElement.classList.remove( EDITING_CLASS );
 		};
 	}, [] );
 
@@ -554,10 +513,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		missing.forEach( ( row ) => loadingIdsRef.current.add( row.id ) );
 
 		hydrateSelection( missing, wanted )
-			.then( ( { items: full, missing: gone, trashed } ) => {
+			.then( ( { items: full, missing: gone, trashed, parentStamps } ) => {
 				if ( ! mountedRef.current ) {
 					return;
 				}
+
+				rememberParentStamps( parentStamps );
 
 				const goneSet = new Set( [ ...gone, ...trashed ] );
 				const trashedSet = new Set( trashed );
@@ -657,6 +618,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ invalidFields, setInvalidFields ] = useState< Array< { field: string; message: string } > >( [] );
 	const [ acknowledged, setAcknowledged ] = useState< string | null >( null );
 	const [ failedIds, setFailedIds ] = useState< Set< number > | null >( null );
+	// Rows an Update held back because someone else saved them meanwhile: a held-back variable parent retries with all its variations.
+	const [ heldBack, setHeldBack ] = useState< ReadonlySet< number > >( () => new Set() );
 	const [ saving, setSaving ] = useState( false );
 	const [ submitRequested, setSubmitRequested ] = useState< false | 'save' | 'next' >( false );
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
@@ -664,12 +627,22 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// Bumped when fetched variations are known to be stale (a save wrote some, someone else changed their parent): the forgotten parents load again.
 	const [ variationEpoch, setVariationEpoch ] = useState( 0 );
 	// Why the warning list is up: rows a decrease clamps at zero, or rows saved by someone else since the editor loaded them.
-	const [ warningKind, setWarningKind ] = useState< 'clamp' | 'stale' >( 'clamp' );
+	const [ warningKind, setWarningKind ] = useState< 'clamp' | 'stale' | 'uncertain' >( 'clamp' );
+	// Rows whose last write failed with an unknown outcome (it may have been stored): a relative op asks before it runs on them again.
+	const [ uncertainIds, setUncertainIds ] = useState< ReadonlySet< number > >( () => new Set() );
 	// The names of the rows a save failed on, as they were when it ran (a variation deleted meanwhile is in no list any more).
 	const [ errorNames, setErrorNames ] = useState< ReadonlyMap< number, string > >( () => new Map() );
+	// The names of the rows a warning is about, as they were when it was raised (a row taken out of the selection keeps its name).
+	const [ warningNames, setWarningNames ] = useState< ReadonlyMap< number, string > >( () => new Map() );
 	// The language tools' runs added to this Update (they save with it, in its History batch), in the order added.
 	const [ staged, setStaged ] = useState< ReadonlyMap< string, StagedTool > >( () => new Map() );
-	const stagedCount = staged.size;
+	// Texts typed into a bulk language tab's "Translate product by product" grid: saved with Update like a staged tool run.
+	const translationsRef = useRef< TranslationStore | null >( null );
+	translationsRef.current ??= new TranslationStore();
+	const translations = translationsRef.current;
+	const [ translationCount, setTranslationCount ] = useState( 0 );
+	useEffect( () => translations.subscribe( setTranslationCount ), [ translations ] );
+	const stagedCount = staged.size + translationCount;
 	const stageTool = useCallback( ( key: string, entry: StagedTool | null ) => {
 		setStaged( ( current ) => {
 			if ( ! entry && ! current.has( key ) ) {
@@ -787,18 +760,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// The form renders at once from what the rows carry (the list's columns) and the fetched values merge in: the first input is there before the request answers.
 	const formShown = visibleFields.length > 0;
 
-	// The editor comes into view and takes keyboard focus as soon as it is in the table; the first input gets it once the form is there.
+	// The editor takes keyboard focus as soon as it is in the panel; the first input gets it once the form is there.
 	useEffect( () => {
 		const root = rootRef.current;
 
-		if ( root ) {
-			scrollEditorIntoView( root, mode );
-
-			if ( ! root.contains( document.activeElement ) ) {
-				root.focus( { preventScroll: true } );
-			}
+		if ( root && ! root.contains( document.activeElement ) ) {
+			root.focus( { preventScroll: true } );
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- on mount
 	}, [] );
 
 	useEffect( () => {
@@ -817,31 +785,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			focusFirstControl( formRef.current, variationQuick ? 'input[id^="wc-pl-price-regular_price-"]:not([disabled])' : undefined );
 		}
 
-		// The form is in the row now: its height is known.
-		if ( root ) {
-			scrollEditorIntoView( root, mode );
-		}
+		// Opening took this long, from the click (performance entry `wc-products-list:editor-ready`).
+		measureEditorReady();
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- mode is fixed for the editor's life
 	}, [ formShown ] );
-
-	// The open tab's values arrive after the form is shown and can make it taller: once they are in, the
-	// editor is brought into view again so its buttons ("Update & next" walking down the list) stay on screen.
-	const scrolledOnLoadRef = useRef( false );
-
-	useEffect( () => {
-		if ( ! tabReady || scrolledOnLoadRef.current ) {
-			return;
-		}
-
-		scrolledOnLoadRef.current = true;
-
-		const root = rootRef.current;
-
-		if ( root && mode === 'quick' ) {
-			scrollEditorIntoView( root, mode );
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- mode is fixed for the editor's life
-	}, [ tabReady ] );
 
 	useEffect( () => {
 		const index = removedIndexRef.current;
@@ -943,6 +890,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			};
 
 			try {
+				// Every parent's variations across parents (a handful of requests for a page of 100), else one parent at a time.
+				// A failed cross-parent read falls back to the per-parent one (an older server, a proxy that blocks the route).
+				const across = await getVariationsOfParents( [ ...queue ], { fields: fetchFields, signal: controller.signal } ).catch( () => null );
+
+				if ( across && ! controller.signal.aborted ) {
+					across.forEach( ( rows, parentId ) => known.set( parentId, rows ) );
+					queue.length = 0;
+				}
+
 				await Promise.all( Array.from( { length: Math.min( VARIATION_FETCH_CONCURRENCY, queue.length ) }, worker ) );
 
 				if ( ! controller.signal.aborted ) {
@@ -1017,7 +973,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		for ( const [ parentId, rows ] of variations.byParent ) {
 			prefetched.set(
 				parentId,
-				rows.filter( ( row ) => failedIds.has( row.id ) )
+				heldBack.has( parentId ) ? rows : rows.filter( ( row ) => failedIds.has( row.id ) )
 			);
 		}
 
@@ -1028,7 +984,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			prefetched: prefetched as ReadonlyMap< number, ProductListItem[] >,
 			carriersOnly: new Set( retried.filter( ( item ) => ! failedIds.has( item.id ) ).map( ( item ) => item.id ) ) as ReadonlySet< number >,
 		};
-	}, [ failedIds, items, variations ] );
+	}, [ failedIds, heldBack, items, variations ] );
 
 	// What the checks, the preview and the guards look at: every row, or after a partial failure only the rows
 	// the retry sends (the saved ones are done: their new sale is not "a sale running now" to replace).
@@ -1277,6 +1233,64 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 		}
 
+		// The grid's per-product translations: one products/batch request per hundred products, three at a time.
+		const typed = translations.entries();
+
+		if ( typed.length ) {
+			const byId = new Map( rows.map( ( row ) => [ row.id, row ] ) );
+			const updates: Array< { id: number } & Record< string, unknown > > = [];
+			const keys = new Set< string >();
+
+			for ( const [ id, edits ] of typed ) {
+				const row = byId.get( id );
+
+				if ( ! row ) {
+					continue;
+				}
+
+				Object.keys( edits ).forEach( ( key ) => {
+					keys.add( key );
+					ranTabs.add( key.slice( 0, key.indexOf( '.' ) ) );
+				} );
+				updates.push( { ...buildPayload( row, edits, allFields, settings ), id } );
+			}
+
+			const size = Math.max( 1, settings.limits.batchSize );
+			const parts: Array< typeof updates > = [];
+
+			for ( let index = 0; index < updates.length; index += size ) {
+				parts.push( updates.slice( index, index + size ) );
+			}
+
+			const returned = saveFields( allFields, Object.fromEntries( Array.from( keys, ( key ) => [ key, true ] ) ) );
+
+			await runConcurrently(
+				parts.map( ( part ) => async () => {
+					try {
+						const response = await batchProducts( part, { batchId, source: 'bulk', fields: returned } );
+						const saved: number[] = [];
+						const patches: ProductListItem[] = [];
+
+						for ( const entry of response.update ?? [] ) {
+							if ( isBatchItemError( entry ) ) {
+								errors.push( { id: entry.id, message: entry.error.message } );
+							} else {
+								saved.push( entry.id );
+								patches.push( toRow( entry ) );
+							}
+						}
+
+						patchItems( patches );
+						translations.clear( saved );
+						ran += saved.length;
+					} catch ( reason ) {
+						part.forEach( ( update ) => errors.push( { id: update.id, message: reason instanceof Error ? reason.message : __( 'The translation could not be saved.', 'wp-woocommerce-products-list' ) } ) );
+					}
+				} ),
+				3
+			);
+		}
+
 		// The tabs whose values a tool changed load again if the editor stays open.
 		if ( ranTabs.size && mountedRef.current ) {
 			setLoadedTabs( ( previous ) => new Set( Array.from( previous ).filter( ( id ) => ! ranTabs.has( id ) ) ) );
@@ -1300,12 +1314,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	 */
 	const refreshStale = async ( rows: ProductListItem[] ) => {
 		const wanted = Array.from( new Set( Array.from( loadedTabs ).flatMap( ( entry ) => editFetchFields( allFields, rows, mode, { tab: entry } ) ) ) ).sort();
-		const { items: full } = await hydrateSelection( rows, wanted );
+		const { items: full, parentStamps } = await hydrateSelection( rows, wanted );
 
 		if ( ! mountedRef.current ) {
 			return;
 		}
 
+		rememberParentStamps( parentStamps );
 		patchItems( full );
 		setHydrated( ( current ) => {
 			const next = new Map( current );
@@ -1415,6 +1430,26 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 				return;
 			}
+
+			// A retry of a relative change on rows whose last write may have been stored would apply it twice: ask once.
+			const relative = Object.values( pendingEdits ).some( ( value ) => isNumericOp( value ) && isPendingOp( value ) && value.operation !== 'set' );
+			const unsure = relative ? retryTargets.items.filter( ( item ) => uncertainIds.has( item.id ) ) : [];
+			const unsureKey = `uncertain:${ unsure.map( ( item ) => item.id ).join( ',' ) }`;
+
+			if ( unsure.length && ( acknowledged !== unsureKey || implicit ) ) {
+				setWarningKind( 'uncertain' );
+				setWarningNames( new Map( unsure.map( ( item ) => [ item.id, nameOf( item ) ] ) ) );
+				reportProblems(
+					unsure.map( ( item ) => ( {
+						id: item.id,
+						message: __( 'The last Update may have been saved on it before the connection failed. It now shows its stored values; a relative change applies to those again.', 'wp-woocommerce-products-list' ),
+					} ) ),
+					'warnings'
+				);
+				setAcknowledged( unsureKey );
+
+				return;
+			}
 		}
 
 		// From here on the editor works on these rows, whatever the selection does meanwhile.
@@ -1440,20 +1475,32 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			let stale: ProductListItem[] = [];
 
 			if ( checkBases ) {
-				const check = await hydrateSelection( checkItems, [ 'id', 'status', 'date_modified_gmt' ] );
-				const goneNow = new Set( [ ...check.trashed, ...check.missing ] );
+				// One light request per hundred products (the variations' parents included), never one per parent.
+				const check = await recheckBases( checkItems, parentStampsRef.current );
+				const writing = new Set( retryTargets.items.map( ( item ) => item.id ) );
 
 				changed = { trashed: check.trashed, missing: check.missing };
-				stale = changedSinceLoaded(
-					retryTargets.items.filter( ( item ) => ! goneNow.has( item.id ) ),
-					new Map( check.items.map( ( row ) => [ row.id, row ] ) )
-				);
+				stale = check.stale.filter( ( item ) => writing.has( item.id ) );
 			} else if ( bulk ) {
 				changed = await recheckStatuses( checkItems );
 			}
 
 			const dropped = new Set( [ ...changed.trashed, ...changed.missing ] );
-			const saveItems = dropped.size ? retryTargets.items.filter( ( item ) => ! dropped.has( item.id ) ) : retryTargets.items;
+			const staleIds = new Set( stale.map( ( item ) => item.id ) );
+			const writable = dropped.size ? retryTargets.items.filter( ( item ) => ! dropped.has( item.id ) ) : retryTargets.items;
+			// Rows saved by someone else meanwhile are held back for a look; the others save now (with staged tools the Update stays whole).
+			const holdBack = staleIds.size > 0 && stagedCount === 0 && writable.some( ( item ) => ! staleIds.has( item.id ) && ! retryTargets.carriersOnly?.has( item.id ) );
+			const saveItems = holdBack ? writable.filter( ( item ) => ! staleIds.has( item.id ) ) : writable;
+			const staleWarnings = stale.map( ( item ) => ( {
+				id: item.id,
+				message: holdBack
+					? __( 'Saved by someone else since this editor loaded it, so it was not updated. The preview now uses its current values: check it, then press Update to apply the edits to it too, or Cancel to leave it.', 'wp-woocommerce-products-list' )
+					: __( 'Saved by someone else since this editor loaded it. The preview now uses its current values: check it, then press Update again.', 'wp-woocommerce-products-list' ),
+			} ) );
+
+			if ( staleIds.size && mountedRef.current ) {
+				setWarningNames( new Map( stale.map( ( item ) => [ item.id, nameOf( item ) ] ) ) );
+			}
 			const toolItems = dropped.size ? items.filter( ( item ) => ! dropped.has( item.id ) ) : items;
 
 			if ( dropped.size ) {
@@ -1470,24 +1517,21 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				}
 			}
 
-			if ( stale.length ) {
+			if ( stale.length && ! holdBack ) {
 				await refreshStale( stale );
 
 				if ( mountedRef.current ) {
 					// Nothing was written: the rows stay free to change until a save runs.
 					setFrozenRows( frozenBefore );
 					setWarningKind( 'stale' );
-					reportProblems(
-						stale.map( ( item ) => ( {
-							id: item.id,
-							message: __( 'Saved by someone else since this editor loaded it. The preview now uses its current values: check it, then press Update again.', 'wp-woocommerce-products-list' ),
-						} ) ),
-						'warnings'
-					);
+					reportProblems( staleWarnings, 'warnings' );
 				}
 
 				return;
 			}
+
+			// The held-back rows load their current values while the others save.
+			const refreshing = holdBack ? refreshStale( stale ).catch( () => {} ) : null;
 
 			// The field edits and the staged tool runs of one Update are one History batch: one Undo takes all of it back.
 			const sharedBatch = stagedCount ? newBatchId() : undefined;
@@ -1581,11 +1625,45 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					  )
 					: '';
 				const fieldsLine = runFields ? successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ) : '';
+				const heldLine = holdBack
+					? sprintf(
+							/* translators: %d: number of rows held back */
+							_n( '%d item saved by someone else meanwhile was left for you to check.', '%d items saved by someone else meanwhile were left for you to check.', staleIds.size, 'wp-woocommerce-products-list' ),
+							staleIds.size
+					  )
+					: '';
 
-				notify.success( [ fieldsLine, toolsLine ].filter( Boolean ).join( ' ' ), {
+				notify.success( [ fieldsLine, toolsLine, heldLine ].filter( Boolean ).join( ' ' ), {
 					id: SAVED_NOTICE_ID,
 					actions: savedActions.length ? savedActions : undefined,
 				} );
+
+				if ( holdBack ) {
+					// The editor stays on the held-back rows: Update applies the same edits to them on their current values.
+					await refreshing;
+
+					if ( mountedRef.current ) {
+						setFailedIds( new Set( staleIds ) );
+						setHeldBack( new Set( staleIds ) );
+						setHydrated( ( current ) => {
+							const next = new Map( current );
+
+							for ( const row of result.updated ) {
+								const known = next.get( row.id );
+
+								if ( known ) {
+									next.set( row.id, mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem );
+								}
+							}
+
+							return next;
+						} );
+						setWarningKind( 'stale' );
+						reportProblems( staleWarnings, 'warnings' );
+					}
+
+					return;
+				}
 
 				if ( advance && nextRow ) {
 					if ( mountedRef.current ) {
@@ -1650,9 +1728,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						}
 					}, 0 );
 				}
-				const failedNow = new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) );
+				const failedNow = new Set( [ ...result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ), ...( holdBack ? staleIds : [] ) ] );
 
 				setFailedIds( failedNow );
+				setUncertainIds( new Set( result.errors.filter( ( error ) => error.code === UNCERTAIN_CODE ).map( ( error ) => error.id ) ) );
+				setHeldBack( holdBack ? new Set( staleIds ) : new Set() );
+
+				if ( holdBack ) {
+					await refreshing;
+					setWarningKind( 'stale' );
+					setWarnings( staleWarnings );
+				}
 
 				// The variations fetched for the plan are stale where this save wrote some: the parents of the failed ones load
 				// again (a retry resolves its relative ops on what they hold now), and so does each such parent's row (its stamp
@@ -1948,6 +2034,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// one row goes through POST products/{id} instead (api/client.ts), several cannot.
 	const needsEditOthers = ! settings.caps.editOthers && ( items.length > 1 || applyToVariations );
 	const retryable = failedIds ? failedIds.size : 0;
+	// A warning about a row taken out of the selection meanwhile goes with it.
+	const shownWarnings = useMemo( () => {
+		const present = new Set( targetsForValidation.map( ( item ) => item.id ) );
+
+		return warnings.filter( ( warning ) => ! warning.id || present.has( warning.id ) );
+	}, [ warnings, targetsForValidation ] );
 	// Staged tools a failed Update left are still to run: Update retries them.
 	const failedButNothingToRetry = failedIds !== null && retryable === 0 && stagedCount === 0;
 	const nothingToWrite = plan !== null && plan.writes.length === 0;
@@ -1968,12 +2060,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return sprintf( _n( 'Retry %d language change', 'Retry %d language changes', stagedCount, 'wp-woocommerce-products-list' ), stagedCount );
 		}
 
+		if ( failedIds && heldBack.size && Array.from( failedIds ).every( ( id ) => heldBack.has( id ) ) ) {
+			/* translators: %d: number of rows saved by someone else meanwhile */
+			return sprintf( _n( 'Update the %d changed item too', 'Update the %d changed items too', retryable, 'wp-woocommerce-products-list' ), retryable );
+		}
+
 		if ( failedIds ) {
 			/* translators: %d: number of rows that failed */
 			return sprintf( _n( 'Retry %d failed', 'Retry %d failed', retryable, 'wp-woocommerce-products-list' ), retryable );
 		}
 
-		if ( warnings.length && warningKind === 'clamp' ) {
+		if ( shownWarnings.length && ( warningKind === 'clamp' || warningKind === 'uncertain' ) ) {
 			return __( 'Update anyway', 'wp-woocommerce-products-list' );
 		}
 
@@ -2045,6 +2142,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		</span>
 	);
 
+	// The heading (title, the bulk breakdown, the loading line): in the panel's pinned header when hosted there.
+	const head = (
+		<div className={ `wc-pl-inline-edit__head is-${ mode }` }>
+			<h2 className="wc-pl-inline-edit__title">
+				{ title }
+				{ ! bulk && items[ 0 ] ? <span className="wc-pl-inline-edit__name">{ nameOf( items[ 0 ] ) }</span> : null }
+			</h2>
+			{ bulk && items.length > 1 ? <p className="wc-pl-edit__summary">{ breakdown( items ) }</p> : null }
+			{ loadingLine }
+		</div>
+	);
+
 	return (
 		<form
 			ref={ rootRef }
@@ -2087,11 +2196,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				void save();
 			} }
 		>
+			{ headerSlot ? createPortal( head, headerSlot ) : head }
+
 			{ bulk ? (
 				<div className="wc-pl-inline-edit__items">
-					<h2 className="wc-pl-inline-edit__title">{ title }</h2>
-					{ loadingLine }
-					{ items.length > 1 ? <p className="wc-pl-edit__summary">{ breakdown( items ) }</p> : null }
 					{ wholeList ? (
 						<p className="wc-pl-inline-edit__whole">
 							{ sprintf(
@@ -2111,68 +2219,67 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 									) }
 								</p>
 							) : null }
-							<ul ref={ itemListRef } className="wc-pl-inline-edit__list" aria-label={ __( 'Selected items', 'wp-woocommerce-products-list' ) }>
-								{ listed.map( ( item, index ) => {
-									const kind = kindLabel( item, settings.productTypes );
-									const parentName = parentNameOf( item );
-									const sku = skuOf( item );
-									const label = nameOf( item );
-
-									return (
-										<li key={ item.id } className="wc-pl-inline-edit__item">
-											<span className="wc-pl-inline-edit__item-text" title={ sku ? `${ label } · ${ sku }` : label }>
-												{ parentName ? <span className="wc-pl-inline-edit__item-parent">{ parentName }</span> : null }
-												<span className="wc-pl-inline-edit__item-name">{ parentName ? shortNameOf( item ) : label }</span>
-												{ sku ? <span className="wc-pl-inline-edit__item-sku">{ sku }</span> : null }
-											</span>
-											{ kind ? <span className="wc-pl-inline-edit__item-kind">{ kind }</span> : null }
-											{ ! listFrozen ? (
-												<button
-													type="button"
-													className="wc-pl-inline-edit__item-remove"
-													aria-label={ sprintf(
-														/* translators: %s: product name */
-														__( 'Remove %s from the selection', 'wp-woocommerce-products-list' ),
-														nameOf( item )
-													) }
-													disabled={ saving }
-													onClick={ () => {
-														removedIndexRef.current = index;
-														onRemoveItem( item.id );
-													} }
-												>
-													<Icon icon={ closeSmall } size={ 20 } />
-												</button>
-											) : null }
-										</li>
-									);
-								} ) }
-							</ul>
-							{ items.length > listed.length ? (
-								<p className="wc-pl-inline-edit__more">
+							<details className="wc-pl-inline-edit__selection" open={ itemsOpen } onToggle={ ( event ) => setItemsOpen( event.currentTarget.open ) }>
+								<summary className="wc-pl-inline-edit__selection-toggle">
 									{ sprintf(
-										/* translators: %d: number of rows not listed */
-										__( '…and %d more', 'wp-woocommerce-products-list' ),
-										items.length - listed.length
+										/* translators: %d: number of selected rows */
+										__( 'Selected items (%d)', 'wp-woocommerce-products-list' ),
+										items.length
 									) }
-								</p>
-							) : null }
+								</summary>
+								<ul ref={ itemListRef } className="wc-pl-inline-edit__list" aria-label={ __( 'Selected items', 'wp-woocommerce-products-list' ) }>
+									{ listed.map( ( item, index ) => {
+										const kind = kindLabel( item, settings.productTypes );
+										const parentName = parentNameOf( item );
+										const sku = skuOf( item );
+										const label = nameOf( item );
+
+										return (
+											<li key={ item.id } className="wc-pl-inline-edit__item">
+												<span className="wc-pl-inline-edit__item-text" title={ sku ? `${ label } · ${ sku }` : label }>
+													{ parentName ? <span className="wc-pl-inline-edit__item-parent">{ parentName }</span> : null }
+													<span className="wc-pl-inline-edit__item-name">{ parentName ? shortNameOf( item ) : label }</span>
+													{ sku ? <span className="wc-pl-inline-edit__item-sku">{ sku }</span> : null }
+												</span>
+												{ kind ? <span className="wc-pl-inline-edit__item-kind">{ kind }</span> : null }
+												{ ! listFrozen ? (
+													<button
+														type="button"
+														className="wc-pl-inline-edit__item-remove"
+														aria-label={ sprintf(
+															/* translators: %s: product name */
+															__( 'Remove %s from the selection', 'wp-woocommerce-products-list' ),
+															nameOf( item )
+														) }
+														disabled={ saving }
+														onClick={ () => {
+															removedIndexRef.current = index;
+															onRemoveItem( item.id );
+														} }
+													>
+														<Icon icon={ closeSmall } size={ 20 } />
+													</button>
+												) : null }
+											</li>
+										);
+									} ) }
+								</ul>
+								{ items.length > listed.length ? (
+									<p className="wc-pl-inline-edit__more">
+										{ sprintf(
+											/* translators: %d: number of rows not listed */
+											__( '…and %d more', 'wp-woocommerce-products-list' ),
+											items.length - listed.length
+										) }
+									</p>
+								) : null }
+							</details>
 						</>
 					) }
 				</div>
 			) : null }
 
 			<div className="wc-pl-inline-edit__main">
-				{ ! bulk ? (
-					<div className="wc-pl-inline-edit__head">
-						<h2 className="wc-pl-inline-edit__title">
-							{ title }
-							{ items[ 0 ] ? <span className="wc-pl-inline-edit__name">{ nameOf( items[ 0 ] ) }</span> : null }
-						</h2>
-						{ loadingLine }
-					</div>
-				) : null }
-
 				{ needsEditOthers ? (
 					<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice">
 						{ __( 'Saving several items at once needs the "edit others\' products" capability. Edit one item at a time, or ask an administrator.', 'wp-woocommerce-products-list' ) }
@@ -2256,6 +2363,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</div>
 				) : null }
 
+				{ /* Per-product names and short descriptions in this language, saved with Update. */ }
+				{ bulk && tab.id.includes( ':' ) && ! loading ? (
+					<TranslationGrid key={ tab.id } tabId={ tab.id } tabLabel={ tab.label } items={ items } fields={ allFields } settings={ settings } store={ translations } disabled={ saving } />
+				) : null }
 				{ /* Mounted through the tab's reload after a run, so what was typed into a tool stays. */ }
 				{ tab.id.includes( ':' ) && ! loading ? (
 					<LanguageTools
@@ -2409,24 +2520,31 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } />
 				) : null }
 
-				{ warnings.length > 0 ? (
+				{ shownWarnings.length > 0 ? (
 					<EditErrors
-						errors={ warnings }
+						errors={ shownWarnings }
 						items={ targetsForValidation }
+						names={ warningNames }
 						fieldLabels={ fieldLabels }
 						status="warning"
 						className="wc-pl-edit__warnings"
 						title={
-							warningKind === 'stale'
+							warningKind === 'uncertain'
 								? sprintf(
 										/* translators: %d: number of rows */
-										_n( '%d row changed since this editor loaded it', '%d rows changed since this editor loaded them', warnings.length, 'wp-woocommerce-products-list' ),
-										warnings.length
+										_n( '%d item may already have this change. Update anyway?', '%d items may already have this change. Update anyway?', shownWarnings.length, 'wp-woocommerce-products-list' ),
+										shownWarnings.length
+								  )
+								: warningKind === 'stale'
+								? sprintf(
+										/* translators: %d: number of rows */
+										_n( '%d row changed since this editor loaded it', '%d rows changed since this editor loaded them', shownWarnings.length, 'wp-woocommerce-products-list' ),
+										shownWarnings.length
 								  )
 								: sprintf(
 										/* translators: %d: number of rows */
-										_n( '%d row would go below zero. Update anyway?', '%d rows would go below zero. Update anyway?', warnings.length, 'wp-woocommerce-products-list' ),
-										warnings.length
+										_n( '%d row would go below zero. Update anyway?', '%d rows would go below zero. Update anyway?', shownWarnings.length, 'wp-woocommerce-products-list' ),
+										shownWarnings.length
 								  )
 						}
 					/>

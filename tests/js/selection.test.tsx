@@ -76,6 +76,18 @@ describe( 'useSelection', () => {
 		expect( result.current.selection ).toEqual( [] );
 	} );
 
+	it( 'set keeps ids of rows the page does not show but the lookup knows (variations of a collapsed parent)', () => {
+		const hidden = variation( 3001, 3 );
+		const lookupRow = ( id: string ) => ( id === '3001' ? hidden : undefined );
+		const { result } = renderHook( () => useSelection( page1, 'all', { lookupRow } ) );
+
+		act( () => result.current.set( [ '1', '3001', '404' ] ) );
+
+		expect( result.current.selection ).toEqual( [ '1', '3001' ] );
+		expect( result.current.rows ).toContain( hidden );
+		expect( result.current.offPageCount ).toBe( 1 );
+	} );
+
 	it( 'survives a bulk save, so edits chain on the same set, and drops rows a save found gone', () => {
 		const { result } = renderHook( ( { rows, tab } ) => useSelection( rows, tab ), { initialProps: { rows: page1, tab: 'all' } } );
 

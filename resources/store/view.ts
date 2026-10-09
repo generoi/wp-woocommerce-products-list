@@ -109,7 +109,15 @@ export function sanitizePersisted( persisted: Partial< PersistedView > | undefin
 	const sort = persisted.sort && ids.has( persisted.sort.field ) ? persisted.sort : base.sort;
 	const layout = type === 'table' ? mergeTableLayout( base.layout, persisted.layout ) : persisted.layout ?? base.layout;
 
-	return { ...base, ...persisted, type, perPage, fields: viewFields, sort, layout } as PersistedView;
+	const view = { ...base, ...persisted, type, perPage, fields: viewFields, sort, layout } as PersistedView;
+
+	// The SKU is a column of its own, never a second line under the name (views saved before 0.2 had it in the list layout).
+	if ( view.descriptionField === 'sku' || ( view.descriptionField && ! ids.has( view.descriptionField ) ) ) {
+		delete view.descriptionField;
+		delete ( view as { showDescription?: boolean } ).showDescription;
+	}
+
+	return view;
 }
 
 type TableLayout = { styles?: Record< string, unknown > } & Record< string, unknown >;

@@ -11,6 +11,7 @@ import { invalidateProducts, patchItems } from '../store/products';
 import { getVisibleFieldIds } from '../store/rows';
 import type { ProductField, ProductListItem } from '../types';
 import { fetchAllVariations } from './apply-to-variations';
+import { hydrateSelection } from './hydrate';
 import type { SaveDeps, SaveOptions, SaveResult } from './save-runner';
 import { runSave } from './save-runner';
 
@@ -30,6 +31,13 @@ function realDeps(): SaveDeps {
 		newBatchId,
 		batchSize: settings.limits.batchSize,
 		normalizeRow: toRow,
+		// After a request failed with an unknown outcome: what the rows hold now (by id; deleted rows absent).
+		rereadRows: async ( items, fields ) => {
+			const { items: rows, missing } = await hydrateSelection( items, fields );
+			const gone = new Set( missing );
+
+			return new Map( rows.filter( ( row ) => ! gone.has( row.id ) ).map( ( row ) => [ row.id, row ] ) );
+		},
 	};
 }
 

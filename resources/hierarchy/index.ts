@@ -47,8 +47,8 @@ export {
 	VARIATION_BASE_FIELDS,
 } from './use-hierarchy';
 export type { Hierarchy, HierarchyOptions, ExpandAllLimit, ExpandAllPlan, ExpandAllProgress, FetchVariations, VariationsResult } from './use-hierarchy';
-export { HierarchyProvider, useHierarchyContext, useOptionalHierarchyContext, HierarchyViewProvider, useHierarchyView } from './context';
-export type { HierarchyViewValue } from './context';
+export { HierarchyProvider, useHierarchyContext, useOptionalHierarchyContext, HierarchyViewProvider, useHierarchyView, useHierarchyRowView, useHierarchyViewGetter } from './context';
+export type { HierarchyViewValue, HierarchyRowView } from './context';
 export { HierarchicalDataViews, withoutPlaceholderIds, isActionableRow } from './hierarchical-dataviews';
 export type { HierarchicalDataViewsProps } from './hierarchical-dataviews';
 export { Chevron, NameCell, rowDomId, ROW_ID_PREFIX } from './chevron';

@@ -22,6 +22,7 @@ import { isPlainObject } from './field-value';
 import { fieldsOfTab, GENERAL_TAB_ID, tabOf } from './form-layouts';
 import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
+import { getVariationsByIds } from './variations-read';
 
 /** Always fetched: what the row identity, the actions and the summary need. */
 /** `date_modified_gmt` is the baseline a save compares against: a row saved by someone else meanwhile has a newer one. */
@@ -93,9 +94,14 @@ export function tabFetchFields( fields: ProductField[], items: ProductListItem[]
 export interface HydrateDeps {
 	listProducts: typeof listProducts;
 	getVariations: typeof getVariations;
+	/** Variations of any parents in one request (variations-read.ts); null when the server has no such route. Per parent when missing. */
+	getVariationsByIds?: typeof getVariationsByIds;
 }
 
-const DEFAULT_DEPS: HydrateDeps = { listProducts, getVariations };
+/** Read when called, not on import: a module that imports this file for one helper never touches the client. */
+function defaultDeps(): HydrateDeps {
+	return { listProducts, getVariations, getVariationsByIds };
+}
 
 export interface HydratedSelection {
 	/** The rows with the fetched values merged in, row order and hierarchy keys kept; missing rows left as they were. */
@@ -104,6 +110,14 @@ export interface HydratedSelection {
 	missing: number[];
 	/** Ids whose row was not in the trash when the list loaded but is now (trashed since). */
 	trashed: number[];
+	/**
+	 * With `date_modified_gmt` among the fields: the stamp of every parent of
+	 * a hydrated variation, read in the same round. WooCommerce stamps a parent
+	 * whenever one of its variations saves, so it is the baseline the pre-save
+	 * check compares a variation against (one request per hundred parents
+	 * instead of one per parent).
+	 */
+	parentStamps: Map< number, string >;
 }
 
 /** The top-level keys a `_fields` list asks for (`i18n.se.name` → `i18n`). */
@@ -149,11 +163,11 @@ export function mergeHydrated< Row extends Record< string, unknown > >( cached: 
  * hierarchy keys kept). Rows the server no longer returns stay as they
  * are; `hydrateSelection` also names them.
  */
-export async function hydrateItems( items: ProductListItem[], fields: string[], deps: HydrateDeps = DEFAULT_DEPS, chunk = 100 ): Promise< ProductListItem[] > {
+export async function hydrateItems( items: ProductListItem[], fields: string[], deps: HydrateDeps = defaultDeps(), chunk = 100 ): Promise< ProductListItem[] > {
 	return ( await hydrateSelection( items, fields, deps, chunk ) ).items;
 }
 
-export async function hydrateSelection( items: ProductListItem[], fields: string[], deps: HydrateDeps = DEFAULT_DEPS, chunk = 100 ): Promise< HydratedSelection > {
+export async function hydrateSelection( items: ProductListItem[], fields: string[], deps: HydrateDeps = defaultDeps(), chunk = 100 ): Promise< HydratedSelection > {
 	const limit = createLimiter( 4 );
 	const byId = new Map< number, ProductListItem >();
 	const products: number[] = [];
@@ -179,6 +193,8 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	// `status` tells a row trashed since the list loaded apart from one picked on the Trash tab.
 	const wanted = fields.includes( 'status' ) ? fields : [ ...fields, 'status' ];
 	const _fields = wanted.join( ',' );
+	const parentStamps = new Map< number, string >();
+	const wantsStamps = wanted.includes( 'date_modified_gmt' );
 
 	for ( let i = 0; i < products.length; i += chunk ) {
 		const ids = products.slice( i, i + chunk );
@@ -192,21 +208,89 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 		);
 	}
 
-	for ( const [ parentId, ids ] of variations ) {
-		for ( let i = 0; i < ids.length; i += chunk ) {
-			const slice = ids.slice( i, i + chunk );
+	// The parents' stamps (the pre-save check's baseline for their variations): those not hydrated above, light.
+	const selectedProducts = new Set( products );
+	const stampOnly = wantsStamps ? Array.from( variations.keys() ).filter( ( id ) => ! selectedProducts.has( id ) ) : [];
 
-			jobs.push(
-				limit( async () => {
-					const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ) } } );
+	for ( let i = 0; i < stampOnly.length; i += chunk ) {
+		const ids = stampOnly.slice( i, i + chunk );
 
-					result.items.forEach( ( row ) => byId.set( row.id, row ) );
-				} )
-			);
+		jobs.push(
+			limit( async () => {
+				const result = await deps.listProducts( { include: ids.join( ',' ), per_page: ids.length, include_status: ANY_STATUS, _fields: 'id,date_modified_gmt' } );
+
+				result.items.forEach( ( row ) => {
+					const stamp = ( row as { date_modified_gmt?: unknown } ).date_modified_gmt;
+
+					if ( typeof stamp === 'string' && stamp !== '' ) {
+						parentStamps.set( row.id, stamp );
+					}
+				} );
+			} )
+		);
+	}
+
+	const perParent = ( entries: Iterable< [ number, number[] ] > ) => {
+		for ( const [ parentId, ids ] of entries ) {
+			for ( let i = 0; i < ids.length; i += chunk ) {
+				const slice = ids.slice( i, i + chunk );
+
+				jobs.push(
+					limit( async () => {
+						const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ) } } );
+
+						result.items.forEach( ( row ) => byId.set( row.id, row ) );
+					} )
+				);
+			}
 		}
+	};
+
+	if ( variations.size && deps.getVariationsByIds ) {
+		// Across parents: a page of 100 expanded parents is a handful of requests, not one per parent.
+		const parentOf = new Map< number, number >();
+
+		for ( const [ parentId, ids ] of variations ) {
+			ids.forEach( ( id ) => parentOf.set( id, parentId ) );
+		}
+
+		const across = deps.getVariationsByIds;
+
+		jobs.push(
+			( async () => {
+				// A failed cross-parent read falls back to the per-parent one (an older server, a proxy that blocks the route).
+				const rows = await across( Array.from( parentOf.keys() ), parentOf, { fields: wanted } ).catch( () => null );
+
+				if ( rows === null ) {
+					// No cross-parent route on this server: one read per parent, as before.
+					const fallback: Array< Promise< void > > = [];
+					const start = jobs.length;
+
+					perParent( variations );
+					fallback.push( ...jobs.slice( start ) );
+					await Promise.all( fallback );
+
+					return;
+				}
+
+				rows.forEach( ( row ) => byId.set( row.id, row ) );
+			} )()
+		);
+	} else {
+		perParent( variations );
 	}
 
 	await Promise.all( jobs );
+
+	if ( wantsStamps ) {
+		for ( const parentId of variations.keys() ) {
+			const stamp = ( byId.get( parentId ) as { date_modified_gmt?: unknown } | undefined )?.date_modified_gmt;
+
+			if ( typeof stamp === 'string' && stamp !== '' ) {
+				parentStamps.set( parentId, stamp );
+			}
+		}
+	}
 
 	const missing: number[] = [];
 	const trashed: number[] = [];
@@ -224,7 +308,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 		return full ? ( mergeHydrated( item as Record< string, unknown >, full as Record< string, unknown > ) as ProductListItem ) : item;
 	} );
 
-	return { items: merged, missing, trashed };
+	return { items: merged, missing, trashed, parentStamps };
 }
 
 export interface StatusChanges {
@@ -241,7 +325,7 @@ export interface StatusChanges {
  * pays a few dozen milliseconds. Variations are left out: they have no
  * Trash of their own.
  */
-export async function recheckStatuses( items: ProductListItem[], deps: Pick< HydrateDeps, 'listProducts' > = DEFAULT_DEPS, chunk = 100 ): Promise< StatusChanges > {
+export async function recheckStatuses( items: ProductListItem[], deps: Pick< HydrateDeps, 'listProducts' > = defaultDeps(), chunk = 100 ): Promise< StatusChanges > {
 	const products = items.filter( ( item ) => ! item._placeholder && ! isVariation( item ) && item.status !== 'trash' );
 	const seen = new Map< number, string | undefined >();
 	const limit = createLimiter( 4 );
@@ -277,4 +361,71 @@ export function changedSinceLoaded( known: ProductListItem[], fresh: ReadonlyMap
 
 		return typeof before === 'string' && before !== '' && typeof now === 'string' && now !== '' && now !== before;
 	} );
+}
+
+export interface BaseCheck extends StatusChanges {
+	/** Rows saved by someone else since the editor loaded them (a variation: its parent was). */
+	stale: ProductListItem[];
+}
+
+/**
+ * The check before a save that holds a relative op: which products were
+ * trashed or deleted meanwhile, and which rows someone else saved since the
+ * editor loaded them. One `_fields=id,status,date_modified_gmt` request per
+ * hundred products, the parents of the variations included: WooCommerce
+ * stamps a parent whenever one of its variations saves, so a variation is
+ * stale when its parent's stamp moved from the one read with it
+ * (`parentStamps`, from `hydrateSelection`). No per-parent variation reads:
+ * a 600-variation save no longer pays fifty round trips before its first
+ * write. A row whose baseline is unknown is never reported.
+ */
+export async function recheckBases( items: ProductListItem[], parentStamps: ReadonlyMap< number, string >, deps: Pick< HydrateDeps, 'listProducts' > = defaultDeps(), chunk = 100 ): Promise< BaseCheck > {
+	const rows = items.filter( ( item ) => ! item._placeholder );
+	const products = rows.filter( ( item ) => ! isVariation( item ) );
+	const ids = new Set< number >( products.map( ( item ) => item.id ) );
+
+	for ( const item of rows ) {
+		if ( isVariation( item ) && parentIdOf( item ) > 0 ) {
+			ids.add( parentIdOf( item ) );
+		}
+	}
+
+	const list = Array.from( ids );
+	const seen = new Map< number, { status?: string; stamp?: string } >();
+	const limit = createLimiter( 4 );
+
+	await Promise.all(
+		Array.from( { length: Math.ceil( list.length / chunk ) }, ( _, index ) => list.slice( index * chunk, ( index + 1 ) * chunk ) ).map( ( slice ) =>
+			limit( async () => {
+				const result = await deps.listProducts( { include: slice.join( ',' ), per_page: slice.length, include_status: ANY_STATUS, _fields: 'id,status,date_modified_gmt' } );
+
+				result.items.forEach( ( row ) => {
+					const stamp = ( row as { date_modified_gmt?: unknown } ).date_modified_gmt;
+
+					seen.set( row.id, { status: row.status, stamp: typeof stamp === 'string' ? stamp : undefined } );
+				} );
+			} )
+		)
+	);
+
+	const live = products.filter( ( item ) => item.status !== 'trash' );
+	const trashed = live.filter( ( item ) => seen.get( item.id )?.status === 'trash' ).map( ( item ) => item.id );
+	const missing = live.filter( ( item ) => ! seen.has( item.id ) ).map( ( item ) => item.id );
+	const gone = new Set( [ ...trashed, ...missing ] );
+	const moved = ( before: unknown, now: string | undefined ) => typeof before === 'string' && before !== '' && typeof now === 'string' && now !== '' && now !== before;
+	const stale = rows.filter( ( item ) => {
+		if ( gone.has( item.id ) ) {
+			return false;
+		}
+
+		if ( isVariation( item ) ) {
+			const parentId = parentIdOf( item );
+
+			return moved( parentStamps.get( parentId ), seen.get( parentId )?.stamp );
+		}
+
+		return moved( ( item as { date_modified_gmt?: unknown } ).date_modified_gmt, seen.get( item.id )?.stamp );
+	} );
+
+	return { trashed, missing, stale };
 }

@@ -862,3 +862,60 @@ export function hasLoadRelativeOps( edits: Record< string, unknown > ): boolean 
 		( [ id, value ] ) => isNumericOp( value ) && isPendingOp( value ) && ( value.operation === 'increase' || value.operation === 'decrease' || value.operation === 'regular_minus' ) && leafOf( id ) !== 'stock_quantity'
 	);
 }
+
+/**
+ * Spreadsheet shorthand typed into a bulk numeric field's value box, as an
+ * operation: `+5%` / `-10%` (percent of the current value, money only),
+ * `+2` / `-2` (by an amount), `=49.90` or a plain number (change to), and on
+ * a sale price `-20% of regular` / `r-20%` / `r-5` (the regular price minus).
+ * The number part stays as typed (the store's decimal mark is fine), so the
+ * op validates and computes exactly like one built with the select.
+ *
+ * Null when the text names no operation of its own (a bare number while an
+ * increase is chosen keeps the increase: the caller decides), or names one
+ * the field does not have (a percent on a stock count).
+ */
+export function parseShorthand( text: string, kind: NumericKind, salePrice = false ): Pick< NumericOp, 'operation' | 'value' | 'percent' > | null {
+	const input = text.trim();
+	const match = /^(r(?:egular)?\s*)?([+\-−=])?\s*([0-9][0-9\s.,']*|[.,][0-9]+)?\s*(%)?\s*(of\s+(?:the\s+)?r(?:egular)?(?:\s*price)?)?$/i.exec( input );
+
+	if ( ! match || input === '' ) {
+		return null;
+	}
+
+	const [ , regularPrefix, sign, number = '', percentMark, regularSuffix ] = match;
+	const value = number.replace( /\s+/g, '' );
+	const percent = Boolean( percentMark );
+	const regular = Boolean( regularPrefix || regularSuffix );
+
+	if ( percent && kind !== 'money' ) {
+		return null;
+	}
+
+	if ( regular ) {
+		// Only a sale price has "regular price minus"; "r+5" means nothing.
+		if ( ! salePrice || ( sign && sign !== '-' && sign !== '−' ) ) {
+			return null;
+		}
+
+		return { operation: 'regular_minus', value, ...( percent ? { percent: true } : {} ) };
+	}
+
+	if ( sign === '+' ) {
+		return { operation: 'increase', value, ...( percent ? { percent: true } : {} ) };
+	}
+
+	if ( sign === '-' || sign === '−' ) {
+		return { operation: 'decrease', value, ...( percent ? { percent: true } : {} ) };
+	}
+
+	if ( percent ) {
+		return null;
+	}
+
+	if ( sign === '=' ) {
+		return { operation: 'set', value };
+	}
+
+	return null;
+}

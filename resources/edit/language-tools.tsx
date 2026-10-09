@@ -16,7 +16,8 @@
  * runs on the variations of the selected variable parents when "Apply price
  * and sale fields to all variations" is ticked (`parentVariations`).
  */
-import { Button, CheckboxControl, SelectControl, TextControl } from '@wordpress/components';
+import { Button, SelectControl, TextControl } from '@wordpress/components';
+import { CheckboxControl } from '../ui/checkbox-control';
 import { useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { KeyboardEvent } from 'react';
@@ -25,6 +26,7 @@ import { formatMoney, getPath } from '../extensions/declarative';
 import type { FieldCurrency } from '../extensions/declarative';
 import { isVariableParent, isVariation, parentIdOf, readFieldValue, readReference } from './field-value';
 import { itemLabel } from './item-label';
+import { ServerPreview, serverPreviewPath, useServerPreview } from './server-preview';
 
 import { isEditorHostedAction, LANG_ARG } from './hosted-actions';
 
@@ -881,6 +883,11 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		return sent;
 	};
 
+	// The server's dry run (tokens resolved, the language {name} comes from), when the integration offers one.
+	const serverPath = missing ? null : serverPreviewPath( def, data, settings );
+	const serverPreview = useServerPreview( serverPath, ids, serverPath ? sentArgs() : null );
+	const serverFieldLabel = ( name: string ): string => fields?.find( ( field ) => field.id === `${ tabId }.${ name }` )?.label ?? name;
+
 	const go = () => {
 		setRunning( true );
 		setError( null );
@@ -1118,6 +1125,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 						</>
 					) }
 				</div>
+			) : serverPath && serverPreview.result ? (
+				<ServerPreview state={ { ...serverPreview, result: serverPreview.result } } fieldLabel={ serverFieldLabel } langLabel={ tabLabel } />
 			) : preview ? (
 				<div className="wc-pl-language-tools__preview" aria-live="polite">
 					{ preview.emptyTemplate > 0 ? (

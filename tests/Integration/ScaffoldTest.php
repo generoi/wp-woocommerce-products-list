@@ -133,4 +133,25 @@ class ScaffoldTest extends RestTestCase
         array_map('unlink', glob($dir.'/*.json') ?: []);
         rmdir($dir);
     }
+
+    public function test_the_screen_renders_a_skeleton_and_the_prefetch_script(): void
+    {
+        $this->actAs('administrator');
+
+        ob_start();
+        Plugin::getInstance()->module(AdminPage::class)->render();
+        $html = (string) ob_get_clean();
+
+        $this->assertStringContainsString('<div id="'.AdminPage::ROOT_ID.'"><style>', $html);
+        $this->assertStringContainsString('<h1 class="wp-heading-inline wc-products-list__title">All Products (New)</h1>', $html);
+        $this->assertSame(AdminPage::SKELETON_ROWS, substr_count($html, 'class="wc-pl-skeleton__row"'));
+
+        // The prefetch script comes after the root (createRoot() replaces the skeleton, not the script).
+        $script = substr($html, (int) strpos($html, '<script>'));
+        $this->assertStringContainsString(wp_create_nonce('wp_rest'), $script);
+        $this->assertStringContainsString('"key":"'.AdminPage::PREFETCH_STORAGE_KEY.'"', $script);
+        $this->assertStringContainsString('"global":"'.AdminPage::PREFETCH_GLOBAL.'"', $script);
+        $this->assertStringContainsString('"header":"X-WC-Products-List"', $script);
+        $this->assertStringNotContainsString('</script><', substr($script, 0, -9));
+    }
 }

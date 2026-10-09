@@ -90,29 +90,35 @@ export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 
 	return summary;
 }
 
-/** Post the revert chunk by chunk; `plan.chunks` or the given ids cut to the plan's chunk size. */
+/** Chunks posted at once: the server takes at most 100 objects per call, and parallel chunks of one batch do not interfere (conflicts and `reverts` are per object). */
+export const REVERT_PARALLEL = 3;
+
+/** Post the revert in chunks, REVERT_PARALLEL at a time; `plan.chunks` or the given ids cut to the plan's chunk size. Results keep the chunk order. */
 export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk' | 'chunks' >, options: RunRevertOptions = {}, post: typeof revertBatch = revertBatch ): Promise< RevertOutcome > {
 	const revertBatchId = options.revertBatchId ?? newBatchId();
-	const chunks = options.ids ? chunk( options.ids, plan.chunk || 100 ) : plan.chunks;
+	const chunks = ( options.ids ? chunk( options.ids, plan.chunk || 100 ) : plan.chunks ).filter( ( ids ) => ids.length );
 	const total = chunks.reduce( ( sum, ids ) => sum + ids.length, 0 );
-	const results: ActionResult[] = [];
+	const perChunk: ActionResult[][] = chunks.map( () => [] );
 	let done = 0;
+	let next = 0;
 
 	options.onProgress?.( 0, total );
 
-	for ( const ids of chunks ) {
-		if ( ! ids.length ) {
-			continue;
+	const worker = async () => {
+		while ( next < chunks.length ) {
+			const index = next++;
+			const ids = chunks[ index ] as number[];
+			const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ] } );
+
+			perChunk[ index ] = response.results ?? [];
+			done += ids.length;
+			options.onProgress?.( done, total );
 		}
+	};
 
-		const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ] } );
+	await Promise.all( Array.from( { length: Math.min( REVERT_PARALLEL, chunks.length ) }, worker ) );
 
-		results.push( ...( response.results ?? [] ) );
-		done += ids.length;
-		options.onProgress?.( done, total );
-	}
-
-	return { revertBatchId, ...splitResults( results ) };
+	return { revertBatchId, ...splitResults( perChunk.flat() ) };
 }
 
 /** The plan, then every chunk of it. */

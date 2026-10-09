@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Modules;
 
 use GeneroWP\ProductsList\Bootstrap;
+use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Module;
 use GeneroWP\ProductsList\Plugin;
 
@@ -92,8 +93,8 @@ class AdminPage implements Module
     {
         add_submenu_page(
             'edit.php?post_type=product',
-            __('Catalog', 'wp-woocommerce-products-list'),
-            __('Catalog', 'wp-woocommerce-products-list'),
+            __('All Products (New)', 'wp-woocommerce-products-list'),
+            __('All Products (New)', 'wp-woocommerce-products-list'),
             Plugin::capability(),
             Plugin::PAGE,
             [$this, 'render'],
@@ -108,9 +109,90 @@ class AdminPage implements Module
         return $hookSuffix === self::SCREEN;
     }
 
+    /** Shimmer rows the server-rendered skeleton shows until the app mounts. */
+    public const SKELETON_ROWS = 10;
+
+    /**
+     * localStorage key under which the app remembers, per admin URL query
+     * string, the GET paths of its first requests (list, counts). The
+     * prefetch script starts them while the bundle downloads.
+     */
+    public const PREFETCH_STORAGE_KEY = 'wc-products-list:prefetch';
+
+    /** The global the prefetch script fills: `{ [path]: Promise<{ok, status, headers, data}> }`. */
+    public const PREFETCH_GLOBAL = 'wcProductsListPrefetch';
+
+    /** Paths the prefetch script starts at most. */
+    public const PREFETCH_MAX = 4;
+
+    /**
+     * The screen before the 2 MB bundle has run: the title, tab bar,
+     * toolbar and grey rows (createRoot() replaces them when the app
+     * mounts), and a small inline script that starts the list requests
+     * the app made last time on this URL, so the first rows do not wait
+     * for the bundle to download and parse.
+     */
     public function render(): void
     {
-        echo '<div class="wrap wc-products-list-wrap"><div id="'.esc_attr(self::ROOT_ID).'"></div></div>';
+        echo '<div class="wrap wc-products-list-wrap"><div id="'.esc_attr(self::ROOT_ID).'">';
+        echo self::skeleton(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in skeleton()
+        echo '</div></div>';
+        echo self::prefetchScript(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- static script, JSON-encoded values
+    }
+
+    public static function skeleton(): string
+    {
+        $rows = '';
+
+        for ($i = 0; $i < self::SKELETON_ROWS; $i++) {
+            $rows .= '<div class="wc-pl-skeleton__row"><span class="wc-pl-skeleton__box"></span><span class="wc-pl-skeleton__bar" style="width:'.(28 + (($i * 17) % 30)).'%"></span><span class="wc-pl-skeleton__bar"></span><span class="wc-pl-skeleton__bar"></span></div>';
+        }
+
+        $style = '.wc-pl-skeleton__tabs,.wc-pl-skeleton__toolbar{display:flex;gap:16px;margin:12px 0}'
+            .'.wc-pl-skeleton__tab{width:72px;height:16px}.wc-pl-skeleton__search{width:240px;height:32px}.wc-pl-skeleton__button{width:96px;height:32px}'
+            .'.wc-pl-skeleton__table{background:#fff;border:1px solid #dcdcde}'
+            .'.wc-pl-skeleton__row{display:flex;align-items:center;gap:24px;height:48px;padding:0 16px;border-top:1px solid #f0f0f1}'
+            .'.wc-pl-skeleton__row:first-child{border-top:0}.wc-pl-skeleton__box{flex:none;width:32px;height:32px}'
+            .'.wc-pl-skeleton__bar{display:block;flex:none;width:12%;height:12px}'
+            .'.wc-pl-skeleton__tab,.wc-pl-skeleton__search,.wc-pl-skeleton__button,.wc-pl-skeleton__box,.wc-pl-skeleton__bar{border-radius:2px;background:linear-gradient(90deg,#f0f0f1 25%,#e6e6e8 50%,#f0f0f1 75%);background-size:200% 100%;animation:wc-pl-skeleton 1.4s ease-in-out infinite}'
+            .'@keyframes wc-pl-skeleton{from{background-position:200% 0}to{background-position:-200% 0}}'
+            .'@media (prefers-reduced-motion:reduce){.wc-pl-skeleton *{animation:none!important}}';
+
+        return '<style>'.$style.'</style>'
+            .'<div class="wc-pl-skeleton" aria-busy="true">'
+            .'<h1 class="wp-heading-inline wc-products-list__title">'.esc_html__('All Products (New)', 'wp-woocommerce-products-list').'</h1>'
+            .'<div class="wc-pl-skeleton__tabs" aria-hidden="true">'.str_repeat('<span class="wc-pl-skeleton__tab"></span>', 5).'</div>'
+            .'<div class="wc-pl-skeleton__toolbar" aria-hidden="true"><span class="wc-pl-skeleton__search"></span><span class="wc-pl-skeleton__button"></span></div>'
+            .'<div class="wc-pl-skeleton__table" aria-hidden="true">'.$rows.'</div>'
+            .'<p class="screen-reader-text">'.esc_html__('Loading products…', 'wp-woocommerce-products-list').'</p>'
+            .'</div>';
+    }
+
+    /**
+     * The inline prefetch: reads the paths the app stored for this URL's
+     * query string (`localStorage[PREFETCH_STORAGE_KEY][location.search]`,
+     * GET paths under /wc/v3/ or /wc-products-list/v1/) and fetches them
+     * with the REST nonce, the list-mode header and `_locale=user`, as
+     * apiFetch would.
+     * Nothing is fetched on a first visit, or when the app never stored
+     * paths, so it never doubles a request the app does not reuse.
+     */
+    public static function prefetchScript(): string
+    {
+        $config = [
+            'root' => esc_url_raw(rest_url()),
+            'nonce' => wp_create_nonce('wp_rest'),
+            'key' => self::PREFETCH_STORAGE_KEY,
+            'global' => self::PREFETCH_GLOBAL,
+            'max' => self::PREFETCH_MAX,
+            'header' => ListMode::HEADER,
+        ];
+
+        $script = <<<'JS'
+(function(c){try{var all=JSON.parse(window.localStorage.getItem(c.key)||'{}'),paths=all&&all[window.location.search];if(!Array.isArray(paths)){return;}var out=window[c.global]=window[c.global]||{};paths.slice(0,c.max).forEach(function(path){if(typeof path!=='string'||!/^\/(wc\/v3|wc-products-list\/v1)\//.test(path)||out[path]){return;}var full=/[?&]_locale=/.test(path)?path:path+(path.indexOf('?')>=0?'&':'?')+'_locale=user';var url=c.root.indexOf('?')>=0?c.root+full.replace('?','&'):c.root+full.replace(/^\//,'');var headers={'Accept':'application/json','X-WP-Nonce':c.nonce};headers[c.header]='1';out[path]=window.fetch(url,{credentials:'same-origin',headers:headers}).then(function(r){return r.json().then(function(data){return{ok:r.ok,status:r.status,headers:{total:r.headers.get('X-WP-Total'),totalPages:r.headers.get('X-WP-TotalPages')},data:data};});});out[path].catch(function(){});});}catch(e){}})(%s);
+JS;
+
+        return '<script>'.sprintf($script, (string) wp_json_encode($config, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_SLASHES)).'</script>';
     }
 
     public function enqueue(string $hookSuffix): void

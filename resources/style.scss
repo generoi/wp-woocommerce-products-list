@@ -39,6 +39,12 @@ $link: #2271b1;
 	.dataviews-view-table__row td {
 		vertical-align: middle;
 	}
+
+	// "Quick edit" (actions/quick-edit.tsx `showIcon`): a pencil on every row, not only the hovered or
+	// selected one (DataViews fades primary actions in on hover). Plain CSS, no per-row state.
+	.dataviews-view-table tr .dataviews-item-actions .components-button.dataviews-primary-action-button {
+		opacity: 1;
+	}
 }
 
 // Status tabs: an ARIA tablist styled like the WordPress list-table tabs.
@@ -115,8 +121,30 @@ $link: #2271b1;
 
 .wc-products-list__header {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 4px;
+}
+
+// The toolbar wraps onto a second line when the list is narrow (beside the
+// editor panel, on a small screen) instead of running under the panel.
+.wc-products-list .dataviews__view-actions {
+	flex-wrap: wrap;
+	row-gap: 8px;
+
+	// DataViews' stack does not shrink (inline flex-shrink: 0): cap it at the row instead, so the header wraps inside.
+	> :has( > .wc-products-list__header ) {
+		flex-wrap: wrap;
+		max-width: 100%;
+	}
+}
+
+// The bulk-actions footer wraps instead of running out of the list when it is
+// narrow (beside the editor panel, on a small screen).
+.wc-products-list .dataviews-footer__content,
+.wc-products-list .dataviews-bulk-actions-footer__container {
+	flex-wrap: wrap;
+	row-gap: 4px;
 }
 
 // The toolbar count replaces DataViews' footer count, which counts every
@@ -507,6 +535,17 @@ $link: #2271b1;
 .wc-products-list__price-edit-suffix {
 	padding-inline-end: 8px;
 	color: $muted;
+}
+
+// Declarative price fields (market prices): the suffix span fills the input's
+// height, so centre its text like the core price field's.
+.wc-products-list-currency-suffix {
+	display: flex;
+	align-items: center;
+	height: 100%;
+	padding-inline-end: 8px;
+	color: $muted;
+	line-height: 1;
 }
 
 .wc-products-list-action-modal__group {

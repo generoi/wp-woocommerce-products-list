@@ -174,8 +174,12 @@ export interface ProductField< Item = ProductListItem > extends Field< Item > {
 		| false;
 	/** A read-only companion value shown beside the control (e.g. the default-language name). */
 	reference?: ( item: Item ) => unknown;
+	/** What the shop shows now when that differs from `reference` (a fallback language's text), with its label ("Shown now (English fallback)"). */
+	shownReference?: ( item: Item ) => { label: string; text: string } | null;
 	/** Extension fields are tagged with their source id; core fields have 'core'. */
 	source?: string;
+	/** The value is HTML (descriptions): the editor shows it in a formatted-text editor with a Code view, not a raw textarea. */
+	html?: boolean;
 	/** True for a field that exists only to filter (no column, no edit): kept out of the column pickers. */
 	filterOnly?: boolean;
 	/** The table column's default styles (`view.layout.styles[ id ]`), applied when the user's view has none for it. */
@@ -198,6 +202,12 @@ export type ProductAction< Item = ProductListItem > = Action< Item > & {
 	/** A `Caps` key that must be true for the action to show. */
 	capability?: string;
 	source?: string;
+	/**
+	 * A primary action shown on every row as a compact icon button (its
+	 * label as the tooltip and accessible name) instead of a text button
+	 * that DataViews shows only on hover (the patched ButtonTrigger).
+	 */
+	showIcon?: boolean;
 };
 
 export interface QuickEditTab {

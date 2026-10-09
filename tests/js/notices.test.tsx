@@ -13,6 +13,9 @@ describe( 'snackbarTimeout', () => {
 		expect( snackbarTimeout( { id: 'c', status: 'info', explicitDismiss: false } ) ).toBe( PLAIN_TIMEOUT );
 		expect( snackbarTimeout( { id: 'd', status: 'success', explicitDismiss: true } ) ).toBeNull();
 		expect( snackbarTimeout( { id: 'e', status: 'error', actions: [] } ) ).toBeNull();
+		// Move to Trash: its Undo stays until dismissed (History cannot restore a trashed batch).
+		expect( snackbarTimeout( { id: 'wc-pl-trash-batch-1', status: 'success', actions: [ { label: 'Undo' } ] } ) ).toBeNull();
+		expect( snackbarTimeout( { id: 'wc-pl-trash-batch-1', status: 'success', actions: [] } ) ).toBe( PLAIN_TIMEOUT );
 	} );
 } );
 

@@ -6,14 +6,17 @@
  * The selection lives in list/selection.ts and spans pages; DataViews sees
  * the page's part of it and its bulk actions are widened to the whole.
  *
- * The inline editor is a row of the table (edit/editor-rows.ts): the
- * screen owns the session (which row, or the bulk selection), splices the
- * editor row into the data, and asks the editor's leave guard before a
+ * Quick and bulk edit open in a slide-in panel beside the list
+ * (edit/editor-panel.tsx), a split view: the list narrows and stays usable.
+ * The screen owns the session (which row, or the bulk selection; the
+ * bulk editor follows the live selection) in a store that only the panel
+ * (EditorMount) renders from, and asks the editor's leave guard before a
  * view change swaps the rows under it, a collapse removes the edited
- * variation, or another editor opens.
+ * variation, or another editor opens. Opening, switching and closing the
+ * editor re-render neither this screen nor the table.
  */
 import { __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import useProductActions from '../actions';
 import { realRows } from '../actions/context';
@@ -23,8 +26,9 @@ import { ApiError } from '../api/errors';
 import type { View } from '../dataviews';
 import { EditorHostProvider } from '../edit/editor-context';
 import type { EditorHost, LeaveGuard } from '../edit/editor-context';
-import { findEditedRow, viewChangesRows, withEditorRow } from '../edit/editor-rows';
-import type { EditorSession } from '../edit/editor-rows';
+import { markEditorOpen } from '../edit/editor-panel';
+import { findEditedRow, viewChangesRows } from '../edit/editor-session';
+import type { EditorSession } from '../edit/editor-session';
 import { captureFocusOrigin } from '../edit/focus';
 import type { FocusOrigin } from '../edit/focus';
 import { rowDomId } from '../hierarchy/chevron';
@@ -32,8 +36,8 @@ import { HierarchyProvider } from '../hierarchy/context';
 import { footerCountLabel } from '../hierarchy/footer-count';
 import { HierarchicalDataViews } from '../hierarchy/hierarchical-dataviews';
 import { useSearchReveal } from '../hierarchy/search-match';
-import { expandAllConfirmMessage, expansionSummary, getChildrenState, useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
-import type { ExpandAllPlan } from '../hierarchy/use-hierarchy';
+import { EXPAND_ALL_MAX_ROWS, expandAllConfirmMessage, expansionSummary, getChildrenState, useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
+import type { ExpandAllPlan, NextExpandPlan } from '../hierarchy/use-hierarchy';
 import { useCounts, useProductList } from '../store/products';
 import { setCurrentRows, setVisibleFieldIds } from '../store/rows';
 import { useView } from '../store/view';
@@ -86,9 +90,9 @@ export function listErrorMessage( error: Error ): { message: string; reload: boo
 
 /**
  * Where keyboard focus returns after a quick edit of `row` closes: the
- * row's place in the table body (its actions button, by position, since the
- * row itself is replaced while the editor is up), falling back to whatever
- * has focus now.
+ * row's place in the table body (its actions button, by position, since a
+ * save or a refetch may re-render the row meanwhile), falling back to
+ * whatever has focus now.
  */
 export function focusOriginForRow( row: ProductListItem, doc: Document = document ): FocusOrigin {
 	const origin = captureFocusOrigin( doc );
@@ -99,12 +103,43 @@ export function focusOriginForRow( row: ProductListItem, doc: Document = documen
 	return rowIndex >= 0 ? { ...origin, rowIndex, label: null } : origin;
 }
 
+/** The "Expand next" button's label and its description (what happens to the products open now). */
+export function expandNextLabels( next: NextExpandPlan, maxRows: number = EXPAND_ALL_MAX_ROWS ): { label: string; description: string } {
+	const label = sprintf(
+		/* translators: %d: number of products */
+		_n( 'Expand next %d', 'Expand next %d', next.count, 'wp-woocommerce-products-list' ),
+		next.count
+	);
+	const description =
+		next.replaces > 0
+			? sprintf(
+					/* translators: 1: products that open, 2: products that collapse, 3: row limit */
+					_n(
+						'Expands the next %1$d product and collapses the %2$d expanded now, so the page stays under %3$d rows. Selected variations stay selected.',
+						'Expands the next %1$d products and collapses the %2$d expanded now, so the page stays under %3$d rows. Selected variations stay selected.',
+						next.count,
+						'wp-woocommerce-products-list'
+					),
+					next.count,
+					next.replaces,
+					maxRows
+			  )
+			: sprintf(
+					/* translators: %d: number of products */
+					_n( 'Expands the next %d product.', 'Expands the next %d products.', next.count, 'wp-woocommerce-products-list' ),
+					next.count
+			  );
+
+	return { label, description };
+}
+
 /**
  * "Expand all", and while it loads "Loading variations… 37 of 100". Reads
  * the progress from its own store so the counter re-renders this button,
- * never the table.
+ * never the table. When Expand all stopped at the row limit, "17 of 100
+ * expanded" and "Expand next 49" follow it.
  */
-export function ExpandAllButton( { onClick, summary }: { onClick: () => void; summary?: { expanded: number; total: number } | null } ) {
+export function ExpandAllButton( { onClick, summary, next, onExpandNext }: { onClick: () => void; summary?: { expanded: number; total: number } | null; next?: NextExpandPlan | null; onExpandNext?: () => void } ) {
 	const progress = useExpandAllProgress();
 	// After Expand all stopped at the row limit (or a few were opened by hand): "17 of 100 expanded" stays next to the button.
 	const partial = ! progress && summary && summary.expanded > 0 && summary.expanded < summary.total ? summary : null;
@@ -134,13 +169,24 @@ export function ExpandAllButton( { onClick, summary }: { onClick: () => void; su
 					) }
 				</span>
 			) : null }
+			{ partial && next && onExpandNext ? <ExpandNextButton next={ next } onClick={ onExpandNext } /> : null }
 		</>
+	);
+}
+
+function ExpandNextButton( { next, onClick }: { next: NextExpandPlan; onClick: () => void } ) {
+	const { label, description } = expandNextLabels( next );
+
+	return (
+		<Button size="compact" variant="tertiary" onClick={ onClick } description={ description } className="wc-products-list__expand-next">
+			{ label }
+		</Button>
 	);
 }
 
 /** The screen's h1, like core admin screens: where a heading jump lands first. */
 export function CatalogTitle() {
-	return <h1 className="wp-heading-inline wc-products-list__title">{ __( 'Catalog', 'wp-woocommerce-products-list' ) }</h1>;
+	return <h1 className="wp-heading-inline wc-products-list__title">{ __( 'All Products (New)', 'wp-woocommerce-products-list' ) }</h1>;
 }
 
 /** The keyboard shortcut to the bulk edit button: Alt+B (Option+B), from anywhere on the screen but the editor and text fields. */
@@ -178,11 +224,120 @@ export async function selectMatchingVariations(
 	return rows.length;
 }
 
-/** The same view in the table layout, with the table's own layout options. */
-export function tableViewOf( view: View ): View {
-	const table = DEFAULT_LAYOUTS.table && DEFAULT_LAYOUTS.table !== true ? DEFAULT_LAYOUTS.table : undefined;
+/** The open editor session, outside React state: the screen reads it in its guards, only EditorMount renders from it. */
+export interface SessionStore {
+	get(): EditorSession | null;
+	set( next: EditorSession | null ): void;
+	subscribe( listener: () => void ): () => void;
+}
 
-	return { ...view, type: 'table', ...( table?.layout ? { layout: table.layout } : {} ) } as View;
+export function createSessionStore(): SessionStore {
+	let current: EditorSession | null = null;
+	const listeners = new Set< () => void >();
+
+	return {
+		get: () => current,
+		set( next ) {
+			if ( next === current ) {
+				return;
+			}
+
+			current = next;
+			listeners.forEach( ( listener ) => listener() );
+		},
+		subscribe( listener ) {
+			listeners.add( listener );
+
+			return () => listeners.delete( listener );
+		},
+	};
+}
+
+export interface EditorMountProps {
+	store: SessionStore;
+	fields: ProductField[];
+	/** The rows on screen (a quick edit's row is looked up here). */
+	rows: ProductListItem[];
+	childrenState: ReturnType< typeof useHierarchy >[ 'childrenState' ];
+	parents: ProductRow[];
+	selected: Pick< SelectionApi, 'rows' | 'offPageCount' >;
+	listTotal: number;
+	advance( row: ProductListItem ): void;
+	removeItem( id: number ): void;
+	setGuard( guard: LeaveGuard | null ): void;
+}
+
+/**
+ * The editor panel for the session in `store`: builds the EditorHost (the
+ * edited row, or the live selection for a bulk edit) and closes a session
+ * whose row left the list. A session change re-renders this and the
+ * panel only, never the table.
+ */
+export function EditorMount( { store, fields, rows, childrenState, parents, selected, listTotal, advance, removeItem, setGuard }: EditorMountProps ) {
+	const session = useSyncExternalStore( store.subscribe, store.get );
+	// While the editor saves, a refetch or an emptied selection never unmounts it: the save reports into it.
+	const [ busy, setBusyState ] = useState( false );
+	const setBusy = useCallback( ( next: boolean ) => setBusyState( next ), [] );
+	const close = useCallback( () => {
+		setBusyState( false );
+		store.set( null );
+	}, [ store ] );
+
+	useEffect( () => {
+		if ( ! session ) {
+			setBusyState( false );
+		}
+	}, [ session ] );
+
+	// The edited row left the list (trashed, refetched away): the editor cannot stay; an emptied bulk selection has nothing to edit.
+	// A variation whose parent is still refetching its rows is not gone yet, and a running save is never cut off.
+	const lastEditedRef = useRef< ProductListItem | null >( null );
+	useEffect( () => {
+		if ( ! session || busy ) {
+			return;
+		}
+
+		const found = session.mode === 'quick' ? findEditedRow( rows, session.id ) : undefined;
+
+		if ( found ) {
+			lastEditedRef.current = found;
+		}
+
+		const last = lastEditedRef.current;
+		const parentId = session.mode === 'quick' && last?.id === session.id ? last._parentId : null;
+		const reloading = parentId !== null && parents.some( ( parent ) => parent.id === parentId ) && childrenState.get( parentId )?.status !== 'loaded' && childrenState.get( parentId )?.status !== 'error';
+
+		if ( session.mode === 'quick' && ! found && ! reloading ) {
+			store.set( null );
+			notify.info( __( 'The product being edited is no longer in the list; the quick edit was closed.', 'wp-woocommerce-products-list' ) );
+		} else if ( session.mode === 'bulk' && selected.rows.length === 0 ) {
+			store.set( null );
+		}
+	}, [ session, busy, rows, childrenState, parents, selected.rows.length, store ] );
+
+	const editedRow = useMemo( () => ( session?.mode === 'quick' ? findEditedRow( rows, session.id ) : undefined ), [ session, rows ] );
+	const items = useMemo( () => ( session?.mode === 'bulk' ? selected.rows : editedRow ? [ editedRow ] : [] ), [ session, selected.rows, editedRow ] );
+	const host = useMemo< EditorHost | null >(
+		() =>
+			session
+				? {
+						session,
+						fields,
+						items,
+						offPageCount: session.mode === 'bulk' ? selected.offPageCount : 0,
+						// "Every product in the list": the selection is exactly this list (Select all), not a selection gathered across searches that happens to outnumber it.
+						wholeList: session.mode === 'bulk' && selected.offPageCount > 0 && listTotal > 0 && selected.rows.length === listTotal && selected.rows.length > parents.length,
+						close,
+						advance,
+						removeItem,
+						setGuard,
+						setBusy,
+				  }
+				: null,
+		[ session, fields, items, selected.offPageCount, selected.rows.length, listTotal, parents.length, close, advance, removeItem, setGuard, setBusy ]
+	);
+
+	return <EditorHostProvider value={ host } />;
 }
 
 export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
@@ -226,15 +381,15 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const selected = useSelection( hierarchy.rows, tab );
 	const { selection } = selected;
 
-	// The inline editor: one session at a time; its leave guard (the discard confirm) is asked before the rows change under it.
-	const [ session, setSession ] = useState< EditorSession | null >( null );
-	const sessionRef = useRef( session );
+	// The editor panel: one session at a time, in a store of its own so that opening, switching and
+	// closing it re-render the panel (EditorMount) and not this screen or its table. Its leave guard
+	// (the discard confirm) is asked before the rows change under it.
+	const [ sessionStore ] = useState( createSessionStore );
 	const guardRef = useRef< LeaveGuard | null >( null );
 	const viewRef = useRef( view );
 	const selectedRef = useRef( selected );
 	const rowsRef = useRef( hierarchy.rows );
 	useLayoutEffect( () => {
-		sessionRef.current = session;
 		viewRef.current = view;
 		selectedRef.current = selected;
 		rowsRef.current = hierarchy.rows;
@@ -242,27 +397,20 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const setGuard = useCallback( ( guard: LeaveGuard | null ) => {
 		guardRef.current = guard;
 	}, [] );
-	// While the editor saves, a refetch or an emptied selection never unmounts it: the save reports into it.
-	const [ editorBusy, setEditorBusy ] = useState( false );
-	const setBusy = useCallback( ( busy: boolean ) => setEditorBusy( busy ), [] );
-	const closeEditor = useCallback( () => {
-		setEditorBusy( false );
-		setSession( null );
-	}, [] );
 	/** Close the editor if it lets us (clean, or the user discards); false means it stays and the caller gives up. */
 	const leaveEditor = useCallback( async (): Promise< boolean > => {
-		if ( ! sessionRef.current ) {
+		if ( ! sessionStore.get() ) {
 			return true;
 		}
 
 		const ok = guardRef.current ? await guardRef.current() : true;
 
 		if ( ok ) {
-			setSession( null );
+			sessionStore.set( null );
 		}
 
 		return ok;
-	}, [] );
+	}, [ sessionStore ] );
 	const openEditor = useCallback(
 		( items: ProductListItem[] ) => {
 			const rows = realRows( items );
@@ -271,50 +419,52 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				return;
 			}
 
+			markEditorOpen();
+
 			void ( async () => {
-				const current = sessionRef.current;
+				const current = sessionStore.get();
 
 				if ( current?.mode === 'quick' && rows.length === 1 && current.id === rows[ 0 ]!.id ) {
 					return;
 				}
 
-				if ( current && ! ( await leaveEditor() ) ) {
+				// Switching: ask the open editor, then hand the panel the new session straight away. Closing
+				// first (session null) would unmount the panel and restyle the whole list twice for nothing.
+				if ( current && guardRef.current && ! ( await guardRef.current() ) ) {
 					return;
 				}
 
 				const initialTab = initialTabFor( viewRef.current.filters as Array< { field: string; value?: unknown } > | undefined );
 
-				// The editor is a table row: the grid and list layouts have no row to put it in.
-				if ( viewRef.current.type !== 'table' ) {
-					setView( tableViewOf( viewRef.current ) );
-				}
-
 				if ( rows.length === 1 ) {
-					setSession( { mode: 'quick', id: rows[ 0 ]!.id, initialTab, origin: focusOriginForRow( rows[ 0 ]! ) } );
+					sessionStore.set( { mode: 'quick', id: rows[ 0 ]!.id, initialTab, origin: focusOriginForRow( rows[ 0 ]! ) } );
 
 					return;
 				}
 
 				// The bulk editor edits the selection: make it these rows.
 				selectedRef.current.set( rows.map( getItemId ) );
-				setSession( { mode: 'bulk', initialTab, origin: captureFocusOrigin() } );
+				sessionStore.set( { mode: 'bulk', initialTab, origin: captureFocusOrigin() } );
 			} )();
 		},
-		[ leaveEditor, setView ]
+		[ sessionStore ]
 	);
-	const advanceEditor = useCallback( ( row: ProductListItem ) => {
-		setSession( { mode: 'quick', id: row.id, initialTab: sessionRef.current?.initialTab, origin: focusOriginForRow( row ) } );
-	}, [] );
+	const advanceEditor = useCallback(
+		( row: ProductListItem ) => {
+			sessionStore.set( { mode: 'quick', id: row.id, initialTab: sessionStore.get()?.initialTab, origin: focusOriginForRow( row ) } );
+		},
+		[ sessionStore ]
+	);
 	const removeFromSelection = useCallback( ( id: number ) => {
 		const current = selectedRef.current;
 
 		current.set( current.selection.filter( ( entry ) => entry !== String( id ) ) );
 	}, [] );
 
-	// A view change that swaps the rows (page, search, sort, filters) first closes the editor; column and layout changes leave it.
+	// A view change that swaps the rows (page, search, sort, filters) first closes the editor; column and layout changes leave it open.
 	const guardedSetView = useCallback(
 		( next: View ) => {
-			if ( ! sessionRef.current || ! viewChangesRows( viewRef.current, next ) ) {
+			if ( ! sessionStore.get() || ! viewChangesRows( viewRef.current, next ) ) {
 				setView( next );
 
 				return;
@@ -328,11 +478,11 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				}
 			} );
 		},
-		[ setView, leaveEditor, rejectViewChange ]
+		[ setView, leaveEditor, rejectViewChange, sessionStore ]
 	);
 	const guardedSetTab = useCallback(
 		( next: StatusTabId ) => {
-			if ( ! sessionRef.current ) {
+			if ( ! sessionStore.get() ) {
 				setTab( next );
 
 				return;
@@ -344,13 +494,13 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				}
 			} );
 		},
-		[ setTab, leaveEditor ]
+		[ setTab, leaveEditor, sessionStore ]
 	);
-	// Collapsing the parent of the variation being edited takes the editor row with it: ask first.
+	// Collapsing the parent of the variation being edited takes that row out of the list: ask first.
 	const { onChangeExpandedItemIds } = hierarchy;
 	const guardedSetExpanded = useCallback(
 		( ids: number[] ) => {
-			const current = sessionRef.current;
+			const current = sessionStore.get();
 			const parentId = current?.mode === 'quick' ? findEditedRow( rowsRef.current, current.id )?._parentId : null;
 
 			if ( ! parentId || ids.includes( parentId ) ) {
@@ -365,8 +515,19 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				}
 			} );
 		},
-		[ onChangeExpandedItemIds, leaveEditor ]
+		[ onChangeExpandedItemIds, leaveEditor, sessionStore ]
 	);
+	// "Expand next" may collapse the parent of the variation being edited: ask first, as for any collapse.
+	const guardedExpandNext = useCallback( async () => {
+		const current = sessionStore.get();
+		const parentId = current?.mode === 'quick' ? findEditedRow( rowsRef.current, current.id )?._parentId : null;
+
+		if ( parentId && hierarchy.nextExpand && hierarchy.nextExpand.replaces > 0 && ! ( await leaveEditor() ) ) {
+			return;
+		}
+
+		await hierarchy.expandNext?.();
+	}, [ hierarchy, leaveEditor, sessionStore ] );
 	// Every way to collapse (the chevron, Collapse all, the row action) goes through the same guard.
 	const guardedHierarchy = useMemo(
 		() => ( {
@@ -378,32 +539,6 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		} ),
 		[ hierarchy, guardedSetExpanded ]
 	);
-
-	// The edited row left the list (trashed, refetched away): the editor cannot stay; an emptied bulk selection has nothing to edit.
-	// A variation whose parent is still refetching its rows is not gone yet, and a running save is never cut off.
-	const lastEditedRef = useRef< ProductListItem | null >( null );
-	useEffect( () => {
-		if ( ! session || editorBusy ) {
-			return;
-		}
-
-		const found = session.mode === 'quick' ? findEditedRow( hierarchy.rows, session.id ) : undefined;
-
-		if ( found ) {
-			lastEditedRef.current = found;
-		}
-
-		const last = lastEditedRef.current;
-		const parentId = session.mode === 'quick' && last?.id === session.id ? last._parentId : null;
-		const reloading = parentId !== null && parents.some( ( parent ) => parent.id === parentId ) && hierarchy.childrenState.get( parentId )?.status !== 'loaded' && hierarchy.childrenState.get( parentId )?.status !== 'error';
-
-		if ( session.mode === 'quick' && ! found && ! reloading ) {
-			setSession( null );
-			notify.info( __( 'The product being edited is no longer in the list; the quick edit was closed.', 'wp-woocommerce-products-list' ) );
-		} else if ( session.mode === 'bulk' && selected.rows.length === 0 ) {
-			setSession( null );
-		}
-	}, [ session, editorBusy, hierarchy.rows, hierarchy.childrenState, parents, selected.rows.length ] );
 
 	const baseActions = useProductActions( { fields, settings, view, tab, hierarchy: guardedHierarchy, selection, onChangeSelection: selected.set, openEditor } );
 
@@ -438,30 +573,6 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const hasQuery = Boolean( view.search ) || ( view.filters?.length ?? 0 ) > 0;
 	const clearQuery = useCallback( () => guardedSetView( { ...view, search: '', filters: [], page: 1 } as View ), [ guardedSetView, view ] );
 
-	// What DataViews renders: the rows with the editor row spliced in.
-	const data = useMemo( () => withEditorRow( hierarchy.rows, session ), [ hierarchy.rows, session ] );
-	const editedRow = useMemo( () => ( session?.mode === 'quick' ? findEditedRow( hierarchy.rows, session.id ) : undefined ), [ session, hierarchy.rows ] );
-	const editorItems = useMemo( () => ( session?.mode === 'bulk' ? selected.rows : editedRow ? [ editedRow ] : [] ), [ session, selected.rows, editedRow ] );
-	const host = useMemo< EditorHost | null >(
-		() =>
-			session
-				? {
-						session,
-						fields,
-						items: editorItems,
-						offPageCount: session.mode === 'bulk' ? selected.offPageCount : 0,
-						// "Every product in the list": the selection is exactly this list (Select all), not a selection gathered across searches that happens to outnumber it.
-						wholeList: session.mode === 'bulk' && selected.offPageCount > 0 && list.total > 0 && selected.rows.length === list.total && selected.rows.length > parents.length,
-						close: closeEditor,
-						advance: advanceEditor,
-						removeItem: removeFromSelection,
-						setGuard,
-						setBusy,
-				  }
-				: null,
-		[ session, fields, editorItems, selected.offPageCount, selected.rows.length, list.total, parents.length, closeEditor, advanceEditor, removeFromSelection, setGuard, setBusy ]
-	);
-
 	const hasExpandable = parents.some( ( item ) => item._hasChildren );
 
 	// Alt+B from a row (or anywhere on the screen outside the editor and text fields) opens the editor on the selection.
@@ -477,7 +588,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 			const onScreen = target === document.body || Boolean( target?.closest?.( '.wc-products-list' ) );
 
-			if ( inField || ! onScreen || target?.closest?.( '.wc-pl-editor-row, [role="dialog"]' ) ) {
+			if ( inField || ! onScreen || target?.closest?.( '.wc-pl-editor-panel, [role="dialog"]' ) ) {
 				return;
 			}
 
@@ -526,7 +637,12 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
 			{ hasExpandable && (
 				<>
-					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } summary={ expansionSummary( parents, hierarchy.expandedItemIds ) } />
+					<ExpandAllButton
+						onClick={ () => void hierarchy.expandAll() }
+						summary={ expansionSummary( parents, hierarchy.expandedItemIds ) }
+						next={ hierarchy.nextExpand }
+						onExpandNext={ hierarchy.expandNext ? () => void guardedExpandNext() : undefined }
+					/>
 					{ hierarchy.variationFilterActive && (
 						<Button size="compact" variant="tertiary" onClick={ onSelectMatching } disabled={ selectingMatching } isBusy={ selectingMatching }>
 							{ __( 'Select matching variations', 'wp-woocommerce-products-list' ) }
@@ -558,8 +674,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 	return (
 		<HierarchyProvider value={ guardedHierarchy }>
-			<EditorHostProvider value={ host }>
-				<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }${ session ? ' has-editor' : '' }` }>
+				<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
 					<CatalogTitle />
 					<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>
 						{ __( 'Skip to products', 'wp-woocommerce-products-list' ) }
@@ -597,7 +712,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						<div id={ TABLE_ID } tabIndex={ -1 } className="wc-products-list__table-anchor" />
 						<ErrorBoundary context="table">
 						<HierarchicalDataViews
-							data={ data }
+							data={ hierarchy.rows }
 							fields={ fields }
 							view={ shownView }
 							onChangeView={ guardedSetView }
@@ -629,7 +744,18 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 					</div>
 					<Notices />
 				</div>
-			</EditorHostProvider>
+			<EditorMount
+				store={ sessionStore }
+				fields={ fields }
+				rows={ hierarchy.rows }
+				childrenState={ hierarchy.childrenState }
+				parents={ parents }
+				selected={ selected }
+				listTotal={ list.total }
+				advance={ advanceEditor }
+				removeItem={ removeFromSelection }
+				setGuard={ setGuard }
+			/>
 		</HierarchyProvider>
 	);
 }

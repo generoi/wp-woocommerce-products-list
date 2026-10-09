@@ -334,6 +334,33 @@ class SaveHookTest extends RestTestCase
         $this->assertSame([$termId], wc_get_product($good->get_id())->get_category_ids());
     }
 
+    public function test_clearing_brands_empties_them_logs_and_reverts(): void
+    {
+        $brand = wp_insert_term('Saga', 'product_brand');
+        $brandId = (int) $brand['term_id'];
+        $product = $this->simpleProduct(['sku' => 'BRANDS']);
+        wp_set_object_terms($product->get_id(), [$brandId], 'product_brand');
+
+        $response = $this->request('PUT', '/wc/v3/products/'.$product->get_id(), ['brands' => []], [], ['_fields' => 'id,brands']);
+        $this->assertStatus(200, $response);
+        $this->assertSame([], $this->data($response)['brands']);
+        $this->assertSame([], wp_get_object_terms($product->get_id(), 'product_brand', ['fields' => 'ids']));
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame('brands', $rows[0]['field']);
+        $this->assertSame([['id' => $brandId]], json_decode((string) $rows[0]['old_value'], true));
+        $this->assertSame([], json_decode((string) $rows[0]['new_value'], true));
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', [], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $this->assertSame([$brandId], array_map('intval', wp_get_object_terms($product->get_id(), 'product_brand', ['fields' => 'ids'])));
+
+        // Already empty: nothing to log.
+        $plain = $this->simpleProduct(['sku' => 'NOBRAND']);
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$plain->get_id(), ['brands' => []], [ListMode::BATCH_HEADER => $batch = wp_generate_uuid4()]));
+        $this->assertSame([], $this->rows($batch));
+    }
+
     public function test_a_rejected_single_save_names_the_sku_owner_and_keeps_the_values(): void
     {
         $owner = $this->simpleProduct(['sku' => 'TAKEN', 'name' => 'Owner']);
