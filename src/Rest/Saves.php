@@ -48,6 +48,7 @@ final class Saves
         self::$registered = true;
 
         Logger::register();
+        Concurrency::registerCoreChanges();
 
         add_filter('woocommerce_rest_pre_insert_product_object', [self::class, 'preInsert'], 10, 3);
         add_filter('woocommerce_rest_pre_insert_product_variation_object', [self::class, 'preInsert'], 10, 3);

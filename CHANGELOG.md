@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Clash prevention, round 5: a list save of a product the current user has open in the product editor in another tab is refused like another user's (their Update put the editor's values back over it); row actions other than Duplicate and Restore are refused while the product is open in the product editor (core's own Trash refuses that too), logged as skipped with reason `editing`; core's trash, restore and delete (wp-admin, WP-CLI) wait for a list save of the same row and the other way round, so a save can no longer publish a product trashed meanwhile or write meta for one deleted meanwhile. docs/contracts.md §3.6.
+
 ## 0.2.0 - 2026-10-09
 
 Native-revisions proof of concept behind a constant, plus the fixes from a four-round audit of the save and History path (robustness, performance, clash prevention, the background-update indicator). The default `log` mode keeps the change log as the only history and measured equal to 0.1.10 within noise.

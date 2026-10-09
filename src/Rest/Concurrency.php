@@ -660,7 +660,9 @@ final class Concurrency
      * screen is left) and core's window (`wp_check_post_lock_window`,
      * 150 s), as wp_check_post_lock() reads them; read from the database,
      * since a heartbeat may have set it after this request primed its
-     * caches. The current user's own lock (another tab) is no clash.
+     * caches. The current user's own lock counts too: their product editor
+     * in another tab would put its form's values back over the save just
+     * the same (an Update re-posts every field of the product data box).
      */
     public static function editingUser(int $id, int $parentId = 0): int
     {
@@ -678,14 +680,13 @@ final class Concurrency
 
         /** This filter is documented in wp-admin/includes/ajax-actions.php */
         $window = (int) apply_filters('wp_check_post_lock_window', 150);
-        $me = get_current_user_id();
 
         foreach (is_array($locks) ? $locks : [] as $lock) {
             $parts = explode(':', (string) $lock);
             $time = (int) $parts[0];
             $user = (int) ($parts[1] ?? 0);
 
-            if ($time > 0 && $user > 0 && $user !== $me && $time > time() - $window) {
+            if ($time > 0 && $user > 0 && $time > time() - $window) {
                 return $user;
             }
         }
@@ -697,6 +698,14 @@ final class Concurrency
     {
         $who = get_userdata($user);
 
+        if ($user === get_current_user_id()) {
+            return new WP_Error(
+                self::EDITING_ERROR,
+                __('You have this product open in the product editor (in another tab or window). Its Update would put the editor\'s values back, so nothing was saved for this item; save or close it there, then try again.', 'wp-woocommerce-products-list'),
+                ['status' => 409, 'id' => $id, 'user' => $user]
+            );
+        }
+
         return new WP_Error(
             self::EDITING_ERROR,
             sprintf(
@@ -706,6 +715,69 @@ final class Concurrency
             ),
             ['status' => 409, 'id' => $id, 'user' => $user]
         );
+    }
+
+    /** @var array<string, true> lock names taken by `lockCoreChange()`, released by `unlockCoreChange()` */
+    private static array $coreChanges = [];
+
+    /**
+     * Core's own trash, restore and delete (wp-admin, WP-CLI, another
+     * plugin) wait for a list-mode save of the same product or variation
+     * to finish, and a save that starts meanwhile waits for them, then
+     * sees the row trashed or gone (§3.6). Without it a save that passed
+     * its checks a moment before would write its loaded status back over
+     * the Trash (the product published again, its variations left in the
+     * Trash) or write meta for a post deleted under it.
+     */
+    public static function registerCoreChanges(): void
+    {
+        foreach (['pre_trash_post', 'pre_untrash_post', 'pre_delete_post'] as $filter) {
+            add_filter($filter, [self::class, 'lockCoreChange'], 10, 2);
+        }
+
+        foreach (['trashed_post', 'untrashed_post', 'deleted_post'] as $action) {
+            add_action($action, [self::class, 'unlockCoreChange'], 10, 1);
+        }
+    }
+
+    /**
+     * `pre_{trash,untrash,delete}_post`: take the object's lock (waiting
+     * up to `lockTimeout()`); on a timeout the change goes ahead as it
+     * would without the plugin. Never changes `$check`.
+     */
+    public static function lockCoreChange(mixed $check, mixed $post = null): mixed
+    {
+        if ($check !== null || ! $post instanceof \WP_Post || ! in_array($post->post_type, ['product', 'product_variation'], true)) {
+            return $check;
+        }
+
+        $name = self::lockName('o', (string) $post->ID);
+
+        if (isset(self::$held[$name])) {
+            // This process holds it already (a row action's own object lock).
+            return $check;
+        }
+
+        if (self::acquire($name, self::lockTimeout()) && isset(self::$held[$name])) {
+            self::$coreChanges[$name] = true;
+        }
+
+        // Core loaded the post before this filter, and a save may have
+        // changed it while this waited: wp_update_post() would write the
+        // cached title, content and the rest back with the new status.
+        self::forget($post->ID);
+
+        return $check;
+    }
+
+    public static function unlockCoreChange(mixed $postId): void
+    {
+        $name = self::lockName('o', (string) (int) $postId);
+
+        if (isset(self::$coreChanges[$name])) {
+            unset(self::$coreChanges[$name]);
+            self::release($name);
+        }
     }
 
     public static function trashedError(int $id): WP_Error

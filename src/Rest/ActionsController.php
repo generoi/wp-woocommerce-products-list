@@ -215,6 +215,12 @@ final class ActionsController
         }
 
         try {
+            $editing = in_array($action->id(), self::IGNORE_EDIT_LOCK, true) ? 0 : Concurrency::editingUser($id, (int) wp_get_post_parent_id($id));
+
+            if ($editing > 0) {
+                return $this->skipped($action, $id, $args, $batchId, Concurrency::editingError($id, $editing), 'editing');
+            }
+
             return $this->runLocked($action, $id, $args, $request, $batchId);
         } finally {
             Concurrency::unlockObject($id);
@@ -230,7 +236,27 @@ final class ActionsController
      */
     private function locked(Action $action, int $id, array $args, string $batchId): array
     {
-        $error = Concurrency::lockedError($id);
+        return $this->skipped($action, $id, $args, $batchId, Concurrency::lockedError($id), 'locked');
+    }
+
+    /**
+     * Actions that run while the product is open in the product editor:
+     * a copy leaves the original alone, and a product in the Trash cannot
+     * be opened in the editor. Every other action is refused there, as
+     * core's own Trash is (`wp_check_post_lock()` in edit.php): the
+     * editor's Update would put its values back over the change.
+     */
+    public const IGNORE_EDIT_LOCK = ['duplicate', 'restore'];
+
+    /**
+     * The result and the `skipped` log row of an id refused by a
+     * concurrency check (`locked`, `editing`).
+     *
+     * @param  array<string, mixed>  $args
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>, 2: null}
+     */
+    private function skipped(Action $action, int $id, array $args, string $batchId, WP_Error $error, string $reason): array
+    {
         $post = get_post($id);
         $isVariation = $post !== null && $post->post_type === 'product_variation';
 
@@ -248,7 +274,7 @@ final class ActionsController
                 'new_value' => null,
                 'status' => Logger::STATUS_SKIPPED,
                 'message' => $error->get_error_message(),
-                'context' => ['reason' => 'locked', 'args' => $args, 'code' => $error->get_error_code()],
+                'context' => ['reason' => $reason, 'args' => $args, 'code' => $error->get_error_code()],
             ]],
             null,
         ];

@@ -723,11 +723,67 @@ class ConcurrencyTest extends RestTestCase
         $this->assertArrayNotHasKey('error', $items[1]);
         $this->assertSame('', get_post_meta($v, '_sale_price', true));
 
-        // A lock past core's window, or the user's own lock (another tab), is no clash.
+        // A lock past core's window is no clash.
         update_post_meta($id, '_edit_lock', (time() - 200).':'.$other);
         $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '18']));
+
+        // The user's own lock (their product editor in another tab) is: its Update would put the form back.
         update_post_meta($id, '_edit_lock', time().':'.$me);
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '19']);
+        $this->assertStatus(409, $response);
+        $this->assertSame(Concurrency::EDITING_ERROR, $this->data($response)['code']);
+        $this->assertStringContainsString('You have this product open', $this->data($response)['message']);
+        $this->assertSame('18', get_post_meta($id, '_regular_price', true));
+        delete_post_meta($id, '_edit_lock');
         $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '19']));
+    }
+
+    public function test_row_actions_are_refused_while_the_product_is_open_in_the_editor(): void
+    {
+        $other = self::factory()->user->create(['role' => 'shop_manager']);
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        $id = $product->get_id();
+        update_post_meta($id, '_edit_lock', time().':'.$other);
+
+        foreach (['trash', 'delete'] as $action) {
+            $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/'.$action, ['ids' => [$id]]));
+            $this->assertFalse($data['results'][0]['ok'], $action);
+            $this->assertSame(Concurrency::EDITING_ERROR, $data['results'][0]['code'], $action);
+            $row = $this->rows($data['batch_id'])[0];
+            $this->assertSame(Logger::STATUS_SKIPPED, $row['status']);
+            $this->assertSame('editing', json_decode((string) $row['context'], true)['reason']);
+        }
+
+        clean_post_cache($id);
+        $this->assertSame('publish', get_post_status($id));
+        $this->assertSame([], Concurrency::heldObjects());
+
+        // A copy leaves the original alone.
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/duplicate', ['ids' => [$id]]));
+        $this->assertTrue($data['results'][0]['ok']);
+        $copy = (int) $data['results'][0]['data']['new_id'];
+        wp_delete_post($copy, true);
+    }
+
+    public function test_a_core_trash_or_delete_waits_for_a_save_of_the_row(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        $id = $product->get_id();
+        $name = Concurrency::lockName('o', (string) $id);
+        add_filter(Concurrency::FILTER_LOCK_TIMEOUT, static fn (): int => 1);
+
+        // A save in another process holds the row: core's trash waits for it (here until the timeout), then goes ahead.
+        $this->assertSame('1', (string) $this->other()->query("SELECT GET_LOCK('{$name}', 0)")->fetch_row()[0]);
+        $start = microtime(true);
+        $this->assertNotFalse(wp_trash_post($id));
+        $this->assertGreaterThanOrEqual(0.9, microtime(true) - $start);
+        $this->other()->query("SELECT RELEASE_LOCK('{$name}')");
+
+        // Free: it takes the lock for the change and lets it go after.
+        $this->assertNotFalse(wp_untrash_post($id));
+        $this->assertSame('1', (string) $this->other()->query("SELECT IS_FREE_LOCK('{$name}')")->fetch_row()[0]);
+        $this->assertNotFalse(wp_delete_post($id, true));
+        $this->assertSame('1', (string) $this->other()->query("SELECT IS_FREE_LOCK('{$name}')")->fetch_row()[0]);
     }
 
     public function test_a_revert_of_several_requests_marks_its_revert_batch_until_closed(): void

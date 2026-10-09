@@ -760,6 +760,9 @@ class RevisionsSpikeTest extends RestTestCase
             remove_action('save_post', $save, 1);
         }
 
+        // edit_post() takes the post lock; the editor is left before the undo (an open editor is skipped, reason editing).
+        delete_post_meta($id, '_edit_lock');
+
         $this->assertSame('Classic boot', get_post($id)->post_title);
         $this->assertSame('175', get_post_meta($id, '_regular_price', true));
 
