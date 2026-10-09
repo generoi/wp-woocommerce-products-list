@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- History's batch list reads only the batches on the page: it picks the page's batch ids first and aggregates their rows, instead of aggregating the whole change log for every page (same response; 424-550 ms -> 117-348 ms on the 104k-row ddev log, and no longer growing with the log).
 - Opening a large batch in History no longer stalls the site: its undo check runs three chunks at a time instead of all at once (a 24,231-variation batch fired 243 requests together, took every PHP worker for about a minute and held a storefront page for 54 s on ddev), and each chunk reads only its own log rows (about half the time per chunk on that batch).
 
 ## 0.1.10 - 2026-10-09

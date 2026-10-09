@@ -311,7 +311,16 @@ final class LogController
         $notRevertable = implode(',', array_map(static fn (string $action): string => "'".esc_sql($action)."'", Revert::NOT_REVERTABLE));
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $total = (int) $wpdb->get_var($this->prepare("SELECT COUNT(DISTINCT batch_id) FROM {$table} WHERE {$where}", $values));
-        $rows = $wpdb->get_results($this->prepare(
+        // The page's batches first, from the two columns the order needs; the
+        // aggregate below then reads those batches' rows only, not the whole
+        // table (about 1 s for 104k rows on ddev, growing with retention).
+        $pageIds = $wpdb->get_col($this->prepare(
+            "SELECT batch_id FROM {$table} WHERE {$where} GROUP BY batch_id ORDER BY MIN(created_at) DESC, MAX(id) DESC LIMIT %d OFFSET %d",
+            array_merge($values, [$perPage, ($page - 1) * $perPage])
+        ));
+        $pageIds = is_array($pageIds) ? array_map('strval', $pageIds) : [];
+        $in = $pageIds === [] ? "''" : implode(',', array_fill(0, count($pageIds), '%s'));
+        $rows = $pageIds === [] ? [] : $wpdb->get_results($this->prepare(
             "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, COALESCE(MIN(IF(source <> 'action', source, NULL)), MIN(source)) AS source,
                 SUM(status <> 'skipped') AS row_count, COUNT(DISTINCT IF(status <> 'skipped', object_id, NULL)) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
                 SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
@@ -326,9 +335,9 @@ final class LogController
                 GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context), JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped' AND source <> 'action' AND action IN ('update', 'create'), field, NULL) ORDER BY field SEPARATOR ',') AS update_fields
-             FROM {$table} WHERE {$where}
-             GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
-            array_merge($values, [$perPage, ($page - 1) * $perPage])
+             FROM {$table} WHERE ({$where}) AND batch_id IN ({$in})
+             GROUP BY batch_id ORDER BY created_at DESC, last_id DESC",
+            array_merge($values, $pageIds)
         ), ARRAY_A);
         // phpcs:enable
 
