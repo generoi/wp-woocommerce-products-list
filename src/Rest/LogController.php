@@ -4,6 +4,7 @@ namespace GeneroWP\ProductsList\Rest;
 
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
+use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Plugin;
@@ -652,15 +653,34 @@ final class LogController
             ), ['status' => 400]);
         }
 
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+        if ($ids !== null) {
+            // One chunk of a larger batch: read that chunk's rows only. The app
+            // checks every chunk of a batch, so loading the whole batch here
+            // made a 24k-row batch cost 243 x 24k rows (0.5-0.7 s each).
+            $total = $this->revertableObjectCount($batchId);
 
-        if (! is_array($rows) || $rows === []) {
-            return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
+            if ($total === null) {
+                return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
+            }
+
+            $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+            $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s AND object_id IN ({$placeholders}) ORDER BY id ASC", array_merge([$batchId], $ids)), ARRAY_A);
+            $rows = is_array($rows) ? $rows : [];
+            $checked = array_values(array_intersect(array_column(Revert::objects($rows)['objects'], 'id'), $ids));
+        } else {
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+
+            if (! is_array($rows) || $rows === []) {
+                return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
+            }
+
+            $objects = array_column(Revert::objects($rows)['objects'], 'id');
+            $total = count($objects);
+            $checked = array_slice($objects, 0, $chunk);
         }
 
-        $objects = array_column(Revert::objects($rows)['objects'], 'id');
-        $checked = $ids !== null ? array_values(array_intersect($objects, $ids)) : array_slice($objects, 0, $chunk);
         $keep = array_flip($checked);
         $rows = array_values(array_filter($rows, static fn (array $row): bool => isset($keep[(int) $row['object_id']])));
         $changed = Revert::check($rows, $batchId);
@@ -668,14 +688,35 @@ final class LogController
         return rest_ensure_response([
             'batch_id' => $batchId,
             'checked' => count($checked),
-            'objects' => count($objects),
+            'objects' => $total,
             // Every object of the batch was checked (it fits one chunk, or `ids` named the rest).
-            'complete' => count($checked) === count($objects),
+            'complete' => count($checked) === $total,
             // Items a revert would leave alone: changed since, or already put back.
             'changed' => count($changed),
             'already_reverted' => count(array_filter($changed, static fn (array $item): bool => $item['already_reverted'] !== [])),
             'items' => $changed,
         ]);
+    }
+
+    /**
+     * The number of objects a revert of the batch writes, by the rule of
+     * `Revert::plan()` (an ok row with a field, of a revertable action, not
+     * masked), counted in SQL; null when the batch has no rows at all.
+     */
+    private function revertableObjectCount(string $batchId): ?int
+    {
+        global $wpdb;
+
+        $table = Table::name();
+        $notRevertable = implode(',', array_fill(0, count(Revert::NOT_REVERTABLE), '%s'));
+        $masked = implode(',', array_fill(0, count(Recorder::MASKED_KEYS), '%s'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT IF(status = 'ok' AND field <> '' AND object_id <> 0 AND action NOT IN ({$notRevertable}) AND field NOT IN ({$masked}), object_id, NULL)) AS objects FROM {$table} WHERE batch_id = %s",
+            array_merge(Revert::NOT_REVERTABLE, Recorder::MASKED_KEYS, [$batchId])
+        ), ARRAY_A);
+
+        return is_array($row) && (int) $row['n'] > 0 ? (int) $row['objects'] : null;
     }
 
     /**

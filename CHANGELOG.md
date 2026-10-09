@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Opening a large batch in History no longer stalls the site: its undo check runs three chunks at a time instead of all at once (a 24,231-variation batch fired 243 requests together, took every PHP worker for about a minute and held a storefront page for 54 s on ddev), and each chunk reads only its own log rows (about half the time per chunk on that batch).
+
 ## 0.1.10 - 2026-10-09
 
 - Searching no longer opens products whose variations only match by name (an attribute value such as "Black x BREJD"). Only a search that matches a variation's SKU or barcode opens its product and scrolls to the variation. Searched rows carry `wc_products_list.variation_sku_match`.

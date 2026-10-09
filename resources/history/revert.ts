@@ -7,7 +7,7 @@
  * may post them again with `force`.
  */
 import { __, sprintf } from '@wordpress/i18n';
-import type { ActionResult, RevertPlan } from '../api/client';
+import type { ActionResult, RevertCheck, RevertPlan } from '../api/client';
 import { checkRevert, getRevertPlan, newBatchId, revertBatch } from '../api/client';
 
 export interface RevertOutcome {
@@ -78,10 +78,22 @@ export interface RevertCheckSummary {
  */
 export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 'chunks' >, check: typeof checkRevert = checkRevert, signal?: AbortSignal ): Promise< RevertCheckSummary > {
 	const parts = plan.chunks.length > 1 ? plan.chunks.filter( ( ids ) => ids.length ) : [ undefined ];
-	const responses = await Promise.all( parts.map( ( ids ) => check( batchId, { ids, signal } ) ) );
+	// At most REVERT_PARALLEL at a time, like the revert itself: a 24k-row batch is 243 chunks, and all
+	// of them at once took every PHP worker for about a minute (the storefront waited behind them).
+	const responses: RevertCheck[] = new Array( parts.length );
+	let next = 0;
+	const worker = async () => {
+		while ( next < parts.length && ! signal?.aborted ) {
+			const index = next++;
+
+			responses[ index ] = await check( batchId, { ids: parts[ index ], signal } );
+		}
+	};
+
+	await Promise.all( Array.from( { length: Math.min( REVERT_PARALLEL, parts.length ) }, worker ) );
 	const summary: RevertCheckSummary = { changed: 0, alreadyReverted: 0, example: null };
 
-	for ( const response of responses ) {
+	for ( const response of responses.filter( Boolean ) ) {
 		summary.changed += response.changed ?? 0;
 		summary.alreadyReverted += response.already_reverted ?? 0;
 		summary.example ??= response.items.find( ( item ) => ! item.already_reverted?.length ) ?? response.items[ 0 ] ?? null;

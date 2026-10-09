@@ -205,3 +205,25 @@ describe( 'checkRevertPlan', () => {
 		expect( fn.mock.calls[ 0 ]?.[ 1 ]?.ids ).toBeUndefined();
 	} );
 } );
+
+describe( 'checkRevertPlan', () => {
+	it( 'checks a many-chunk batch at most REVERT_PARALLEL chunks at a time and sums every chunk', async () => {
+		let inFlight = 0;
+		let most = 0;
+		const chunks = Array.from( { length: 12 }, ( _, index ) => [ index + 1 ] );
+		const check = vi.fn( async () => {
+			inFlight++;
+			most = Math.max( most, inFlight );
+			await new Promise( ( resolve ) => setTimeout( resolve, 1 ) );
+			inFlight--;
+
+			return { changed: 1, already_reverted: 0, items: [] } as never;
+		} );
+
+		const summary = await checkRevertPlan( 'b', { chunks }, check );
+
+		expect( check ).toHaveBeenCalledTimes( 12 );
+		expect( most ).toBe( 3 );
+		expect( summary.changed ).toBe( 12 );
+	} );
+} );
