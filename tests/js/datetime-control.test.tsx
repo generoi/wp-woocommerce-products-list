@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { getSettings as getDateSettings, setSettings as setDateSettings } from '@wordpress/date';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createDateTimeControl, fromInputDateTime, toInputDateTime } from '../../resources/edit/datetime-control';
+import { createDateTimeControl, fromInputDateTime, readDateTimeInputs, toInputDateTime } from '../../resources/edit/datetime-control';
 import { toFormFields } from '../../resources/edit/form-fields';
 import { mergeItems } from '../../resources/edit/merge';
 import { buildPayload } from '../../resources/edit/payload';
@@ -33,6 +33,19 @@ describe( 'toInputDateTime / fromInputDateTime', () => {
 	} );
 } );
 
+describe( 'date-only sale dates', () => {
+	it( 'reads a date without a time as the whole day: from 00:00, to 23:59', () => {
+		expect( fromInputDateTime( '2026-10-12' ) ).toBe( '2026-10-12T00:00:00' );
+		expect( fromInputDateTime( '2026-10-18', true ) ).toBe( '2026-10-18T23:59:59' );
+		expect( fromInputDateTime( '2026-10-18T10:15', true ) ).toBe( '2026-10-18T10:15:00' );
+		expect( readDateTimeInputs( { value: '2026-10-18' }, { value: '' }, true ) ).toBe( '2026-10-18T23:59:59' );
+		expect( readDateTimeInputs( { value: '2026-10-18' }, { value: '08:30' } ) ).toBe( '2026-10-18T08:30:00' );
+		expect( readDateTimeInputs( { value: '' }, { value: '' } ) ).toBe( '' );
+		expect( readDateTimeInputs( { value: '' }, { value: '08:30' } ) ).toMatch( /^invalid-date:/ );
+		expect( readDateTimeInputs( { value: '', validity: { badInput: true } }, { value: '' } ) ).toMatch( /^invalid-date:/ );
+	} );
+} );
+
 describe( 'DateTimeControl', () => {
 	it( 'is a datetime-local input named after the field, in site time', () => {
 		const Control = createDateTimeControl( settings );
@@ -48,13 +61,21 @@ describe( 'DateTimeControl', () => {
 		render( <Control data={ merged.data } field={ formField as DataFormControlProps< Record< string, unknown > >[ 'field' ] } onChange={ onChange } hideLabelFromVision={ false } /> );
 
 		const input = screen.getByLabelText( 'Sale from' ) as HTMLInputElement;
+		const time = screen.getByLabelText( 'Sale from, time (optional)' ) as HTMLInputElement;
 
-		expect( input.type ).toBe( 'datetime-local' );
-		expect( input.value ).toBe( '2026-10-12T00:00' );
+		expect( input.type ).toBe( 'date' );
+		expect( input.value ).toBe( '2026-10-12' );
+		expect( time.type ).toBe( 'time' );
+		expect( time.value ).toBe( '00:00' );
 		expect( screen.getByText( /Europe\/Helsinki/ ) ).toBeInTheDocument();
+		expect( screen.getByText( /starts at 00:00/ ) ).toBeInTheDocument();
 
-		fireEvent.change( input, { target: { value: '2026-10-18T23:59' } } );
-		expect( onChange ).toHaveBeenLastCalledWith( { date_on_sale_from: '2026-10-18T23:59:00' } );
+		fireEvent.change( time, { target: { value: '23:59' } } );
+		expect( onChange ).toHaveBeenLastCalledWith( { date_on_sale_from: '2026-10-12T23:59:00' } );
+
+		fireEvent.change( input, { target: { value: '2026-10-18' } } );
+		fireEvent.change( time, { target: { value: '' } } );
+		expect( onChange ).toHaveBeenLastCalledWith( { date_on_sale_from: '2026-10-18T00:00:00' } );
 
 		fireEvent.change( input, { target: { value: '' } } );
 		expect( onChange ).toHaveBeenLastCalledWith( { date_on_sale_from: '' } );

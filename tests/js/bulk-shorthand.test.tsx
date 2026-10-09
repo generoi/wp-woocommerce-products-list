@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { DataFormControlProps } from '../../resources/dataviews';
 import { DONT_CHANGE, parseShorthand } from '../../resources/edit/bulk-numeric';
 import type { NumericOp } from '../../resources/edit/bulk-numeric';
-import { createBulkNumericControl, opFromInput } from '../../resources/edit/bulk-numeric-control';
+import { createBulkNumericControl, opFromInput, resolvedShorthand } from '../../resources/edit/bulk-numeric-control';
 import { editSettings } from './edit-fixtures';
 
 describe( 'parseShorthand', () => {
@@ -78,5 +78,31 @@ describe( 'BulkNumericControl shorthand', () => {
 
 		fireEvent.change( select, { target: { value: 'decrease_percent' } } );
 		expect( input.value ).toBe( '5' );
+	} );
+
+	it( 'says which operation a typed sign picked, over the one chosen in the select', () => {
+		render( <Harness /> );
+
+		const input = screen.getByLabelText( 'Regular price: value' ) as HTMLInputElement;
+		const select = screen.getByLabelText( 'Regular price: operation' ) as HTMLSelectElement;
+
+		fireEvent.change( select, { target: { value: 'increase' } } );
+		fireEvent.change( input, { target: { value: '-5' } } );
+
+		expect( select.value ).toBe( 'decrease' );
+		expect( screen.getByText( /^Reads as: Decrease by 5/ ) ).toBeTruthy();
+
+		// A bare number in the chosen operation needs no explanation.
+		fireEvent.change( input, { target: { value: '7' } } );
+		expect( screen.queryByText( /^Reads as:/ ) ).toBeNull();
+	} );
+} );
+
+describe( 'resolvedShorthand', () => {
+	it( 'words the op a sign or percent made, and nothing for a bare number', () => {
+		expect( resolvedShorthand( '-5', { operation: 'decrease', value: '5' }, 'money', false, '€' ) ).toBe( 'Reads as: Decrease by 5 €' );
+		expect( resolvedShorthand( '+10%', { operation: 'increase', value: '10', percent: true }, 'money', false, '€' ) ).toBe( 'Reads as: Increase by 10%' );
+		expect( resolvedShorthand( '+3', { operation: 'increase', value: '3' }, 'integer', false, '€' ) ).toBe( 'Reads as: Increase by 3' );
+		expect( resolvedShorthand( '12', { operation: 'set', value: '12' }, 'money', false, '€' ) ).toBeNull();
 	} );
 } );

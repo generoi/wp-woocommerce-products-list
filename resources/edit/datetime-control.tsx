@@ -1,18 +1,18 @@
 /**
- * The DataForm control for the sale dates: a labelled `datetime-local`
- * input in the site's wall-clock time. DataViews' own datetime control
+ * The DataForm control for the sale dates: a labelled date input and an
+ * optional time input, in the site's wall-clock time. A date without a time
+ * is a whole day: "from" starts at 00:00, "to" ends at 23:59. DataViews' own datetime control
  * names its input "Date time" for assistive technology and converts to a
  * UTC instant; this one carries the field's label ("Sale from") and emits
  * `Y-m-d\TH:i:s` the way wc/v3 stores it, so what is typed is what the
  * shop runs.
  */
 import { dateI18n } from '@wordpress/date';
-import { useId } from '@wordpress/element';
+import { useId, useRef } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import type { ComponentType, FocusEvent } from 'react';
 import type { DataFormControlProps } from '../dataviews';
 import type { Settings } from '../types';
-import { InputControl } from '../ui';
 import type { FormData } from './bulk-numeric-control';
 import { DATE_INPUT_MAX, DATE_INPUT_MIN, invalidDate, invalidDateText, isInvalidDate } from './sale-schedule';
 
@@ -42,21 +42,51 @@ export function toInputDateTime( value: unknown ): string {
 	return match ? `${ match[ 1 ] }T${ match[ 2 ] }` : '';
 }
 
-const INPUT_DATE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?$/;
+const INPUT_DATE = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?)?$/;
+
+/** Whether a date field is the end of a range (`…date_on_sale_to`): a date without a time then means the end of that day. */
+export function isEndDateField( fieldId: string ): boolean {
+	return /date_on_sale_to$/.test( fieldId );
+}
 
 /**
  * What the input emits → the wc/v3 site-time form. Empty stays empty (clear
- * the date); anything else that is not a four-digit-year date ("202623-10-18T05:09")
- * becomes the invalid marker, never a silent "no date".
+ * the date); a date without a time is the start of that day, or its last
+ * minute (23:59:59) for an end date; anything else that is not a
+ * four-digit-year date ("202623-10-18T05:09") becomes the invalid marker,
+ * never a silent "no date".
  */
-export function fromInputDateTime( text: string ): string {
+export function fromInputDateTime( text: string, end = false ): string {
 	if ( text === '' ) {
 		return '';
 	}
 
 	const match = INPUT_DATE.exec( text );
 
-	return match ? `${ match[ 1 ] }T${ match[ 2 ] }:00` : invalidDate( text );
+	if ( ! match ) {
+		return invalidDate( text );
+	}
+
+	if ( match[ 2 ] === undefined ) {
+		return `${ match[ 1 ] }T${ end ? '23:59:59' : '00:00:00' }`;
+	}
+
+	return `${ match[ 1 ] }T${ match[ 2 ] }:00`;
+}
+
+type DateInputLike = Pick< HTMLInputElement, 'value' > & { validity?: Pick< ValidityState, 'badInput' > };
+
+/** The date and time inputs → the stored value. The time is optional; a time without a date is not a date. */
+export function readDateTimeInputs( date: DateInputLike, time: DateInputLike, end = false ): string {
+	if ( date.validity?.badInput || time.validity?.badInput ) {
+		return invalidDate( [ date.value, time.value ].filter( Boolean ).join( 'T' ) );
+	}
+
+	if ( date.value === '' ) {
+		return time.value === '' ? '' : invalidDate( `T${ time.value }` );
+	}
+
+	return fromInputDateTime( time.value === '' ? date.value : `${ date.value }T${ time.value }`, end );
 }
 
 /** The input's value as the form stores it, reading the browser's own verdict: a half-typed date reports "" with `badInput`. */
@@ -76,42 +106,83 @@ export interface DateTimeControlOptions {
 export function createDateTimeControl( settings: Pick< Settings, 'timezone' >, options: DateTimeControlOptions = {} ): ComponentType< DataFormControlProps< FormData > > {
 	function DateTimeControl( { data, field, onChange, hideLabelFromVision }: DataFormControlProps< FormData > ) {
 		const id = `wc-pl-date-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }-${ useId().replace( /:/g, '' ) }`;
+		const timeId = `${ id }-time`;
+		const helpId = `${ id }-help`;
+		const dateRef = useRef< HTMLInputElement >( null );
+		const timeRef = useRef< HTMLInputElement >( null );
 		const stored = data[ field.id ];
+		const end = isEndDateField( field.id );
 		const value = toInputDateTime( stored );
+		const [ dateValue = '', timeValue = '' ] = value.split( 'T' );
 		const problem = options.problem ? options.problem( data, field.id ) : null;
 		/* translators: %s: the site's timezone, e.g. Europe/Helsinki */
 		const zone = settings.timezone ? sprintf( __( 'Site time (%s).', 'wp-woocommerce-products-list' ), settings.timezone ) : '';
-		const store = ( next: string ) => {
+		const wholeDay = end ? __( 'Without a time the sale ends at 23:59 that day.', 'wp-woocommerce-products-list' ) : __( 'Without a time the sale starts at 00:00 that day.', 'wp-woocommerce-products-list' );
+		const help = problem ?? [ field.description, wholeDay, zone ].filter( Boolean ).join( ' ' );
+		const store = ( source: 'date' | 'time' ) => {
+			const date = dateRef.current;
+			const time = timeRef.current;
+
+			if ( ! date || ! time ) {
+				return;
+			}
+
+			// Emptying the date clears the field (the time shown is only the day's default).
+			const next = source === 'date' && date.value === '' && ! date.validity?.badInput ? '' : readDateTimeInputs( date, time, end );
+
 			if ( next !== ( typeof stored === 'string' ? stored : '' ) ) {
 				onChange( { [ field.id ]: next } );
 			}
 		};
+		/* translators: %s: the date field's label, e.g. "Sale from" */
+		const timeLabel = sprintf( __( '%s, time (optional)', 'wp-woocommerce-products-list' ), field.label );
 
 		return (
 			<div className={ `wc-pl-date-control${ problem ? ' is-invalid' : '' }` }>
-				<InputControl
-					__next40pxDefaultSize
-					id={ id }
-					type="datetime-local"
-					min={ DATE_INPUT_MIN }
-					max={ DATE_INPUT_MAX }
-					label={ field.label }
-					hideLabelFromVision={ hideLabelFromVision }
-					help={ problem ?? ( [ field.description, zone ].filter( Boolean ).join( ' ' ) || undefined ) }
-					aria-invalid={ problem ? true : undefined }
-					value={ value }
-					onChange={ ( next, extra ) => {
-						const target = ( extra as { event?: { target?: unknown } } | undefined )?.event?.target;
-
-						store( target instanceof HTMLInputElement ? readDateInput( target ) : fromInputDateTime( next ?? '' ) );
-					} }
-					// A half-typed date fires no change (the value stays ""): the browser's verdict is read when the field is left.
-					onBlur={ ( event: FocusEvent< HTMLInputElement > ) => {
-						if ( event.target.validity?.badInput || event.target.value !== value ) {
-							store( readDateInput( event.target ) );
-						}
-					} }
-				/>
+				<label htmlFor={ id } className={ `components-base-control__label wc-pl-date-control__label${ hideLabelFromVision ? ' screen-reader-text' : '' }` }>
+					{ field.label }
+				</label>
+				<div className="wc-pl-date-control__inputs" style={ { display: 'flex', gap: '8px' } }>
+					<input
+						ref={ dateRef }
+						id={ id }
+						className="components-text-control__input"
+						type="date"
+						min={ DATE_INPUT_MIN.slice( 0, 10 ) }
+						max={ DATE_INPUT_MAX.slice( 0, 10 ) }
+						aria-describedby={ help ? helpId : undefined }
+						aria-invalid={ problem ? true : undefined }
+						value={ dateValue }
+						onChange={ () => store( 'date' ) }
+						// A half-typed date fires no change (the value stays ""): the browser's verdict is read when the field is left.
+						onBlur={ ( event: FocusEvent< HTMLInputElement > ) => {
+							if ( event.target.validity?.badInput || event.target.value !== dateValue ) {
+								store( 'date' );
+							}
+						} }
+					/>
+					<input
+						ref={ timeRef }
+						id={ timeId }
+						className="components-text-control__input"
+						type="time"
+						aria-label={ timeLabel }
+						aria-describedby={ help ? helpId : undefined }
+						aria-invalid={ problem ? true : undefined }
+						value={ timeValue }
+						onChange={ () => store( 'time' ) }
+						onBlur={ ( event: FocusEvent< HTMLInputElement > ) => {
+							if ( event.target.validity?.badInput || event.target.value !== timeValue ) {
+								store( 'time' );
+							}
+						} }
+					/>
+				</div>
+				{ help ? (
+					<p id={ helpId } className="components-base-control__help">
+						{ help }
+					</p>
+				) : null }
 			</div>
 		);
 	}

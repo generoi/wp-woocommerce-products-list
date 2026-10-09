@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 - 2026-10-09
+
+Demo polish for the split view, editor input and undo.
+
+- Split view: while the editor panel is open the list hides date, type, categories, tags, brands and status and moves SKU, price and stock next to the name (capped at 240 px); translation columns stay and the rest scrolls sideways. Sort or column changes made in split view map back onto the saved view, and every column returns when the panel closes.
+- Selection bar gets a "More actions" dropdown in split view with the other bulk actions for the selection; destructive actions (Move to Trash, Delete permanently, Delete variations permanently) are listed last, in red, under a separator, here as well as in row menus and the footer.
+- Bulk save Undo snackbars (with "View in History") and Undo for status or declarative actions on more than one item stay until dismissed or replaced by a newer Undo; a quick save's Undo keeps the 10 s timeout.
+- HTML fields open in Visual every time the editor opens; Code only lasts for the panel session where it was picked (the stored mode is gone). Entities such as `&nbsp;` round-trip unchanged.
+- Sale dates are a date plus an optional time: no time means 00:00 for "from" and 23:59 for "to". A time without a date, or a half-typed date, is invalid and blocks Update.
+- Bulk numeric fields show how a typed shorthand reads ("-5", "+10%", "r-20%" become e.g. "Reads as: Decrease by 5 €"). Plain Enter in a bulk numeric field no longer saves the whole bulk edit; Cmd/Ctrl+Enter or Update do.
+
 ## 0.1.1 - 2026-10-09
 
 Changes since 0.1.0 (one feature commit, 3961c8c, plus this release commit).

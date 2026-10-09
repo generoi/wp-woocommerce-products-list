@@ -10,6 +10,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { Button } from '../ui';
 import type { ProductAction, ProductListItem, QueryParams } from '../types';
 import type { SelectionApi } from './selection';
+import { MoreActionsMenu } from './more-actions';
 
 export interface SelectionBarProps {
 	selection: SelectionApi;
@@ -25,6 +26,8 @@ export interface SelectionBarProps {
 	onEdit( rows: ProductListItem[] ): void;
 	/** The keyboard shortcut that opens the editor on the selection (announced on the button). */
 	shortcut?: string;
+	/** Split view: the bulk actions other than Bulk edit move from the footer into a "More actions" menu here. */
+	moreActions?: boolean;
 }
 
 export const BULK_EDIT_BUTTON_ID = 'wc-products-list-bulk-edit';
@@ -45,7 +48,7 @@ export function selectionLabel( count: number, offPage: number ): string {
 	) })`;
 }
 
-export function SelectionBar( { selection, total, pageProducts, query, actions, onEdit, shortcut }: SelectionBarProps ) {
+export function SelectionBar( { selection, total, pageProducts, query, actions, onEdit, shortcut, moreActions = false }: SelectionBarProps ) {
 	const canEdit = useMemo( () => actions.some( ( action ) => action.id === 'quick-edit' ), [ actions ] );
 	const count = selection.selection.length;
 	const progress = selection.selectAllProgress;
@@ -112,6 +115,7 @@ export function SelectionBar( { selection, total, pageProducts, query, actions, 
 					{ count > 1 ? __( 'Bulk edit', 'wp-woocommerce-products-list' ) : __( 'Quick edit', 'wp-woocommerce-products-list' ) }
 				</Button>
 			) }
+			{ count > 0 && moreActions && <MoreActionsMenu actions={ actions } rows={ selection.rows } /> }
 			{ count > 0 && (
 				<Button size="compact" variant="tertiary" onClick={ selection.clear }>
 					{ __( 'Clear selection', 'wp-woocommerce-products-list' ) }

@@ -390,9 +390,26 @@
 		color: var( --wp-components-color-foreground-error, #cc1818 );
 	}
 
-	.components-input-control__backdrop {
+	.components-input-control__backdrop,
+	.wc-pl-date-control__inputs input {
 		border-color: var( --wp-components-color-foreground-error, #cc1818 );
 	}
+}
+
+// The sale date: a date and an optional time side by side.
+.wc-pl-date-control__label {
+	display: block;
+	margin-bottom: 8px;
+}
+
+.wc-pl-date-control__inputs input {
+	min-height: 40px;
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.wc-pl-date-control__inputs input[type="time"] {
+	flex: 0 1 8.5em;
 }
 
 .wc-pl-edit__notice {
@@ -554,6 +571,17 @@
 }
 
 // The operation's note sits in a slot two lines high whether or not there is one, for the same reason.
+.wc-pl-bulk-numeric__resolved {
+	display: block;
+	margin-top: 4px;
+	font-size: 12px;
+	line-height: 1.4;
+
+	&:empty {
+		margin-top: 0;
+	}
+}
+
 .wc-pl-bulk-numeric__note {
 	display: block;
 	min-height: calc( 2 * 1.4em );

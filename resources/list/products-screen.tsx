@@ -53,6 +53,8 @@ import { useSelection } from './selection';
 import type { SelectionApi } from './selection';
 import { useVariationFilter } from './variation-filter';
 import { SelectionBar } from './selection-bar';
+import { fromSplitView, toSplitView } from './split-view';
+import { destructiveLast, withoutFooterBulk } from './more-actions';
 import { StatusTabs } from './status-tabs';
 import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
@@ -480,6 +482,11 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		},
 		[ setView, leaveEditor, rejectViewChange, sessionStore ]
 	);
+	// Split view: while the panel is open the table keeps name, SKU, price, stock and the translation
+	// columns readable (list/split-view.ts); the saved view keeps every column. Re-renders on open and close only.
+	const panelOpen = useSyncExternalStore( sessionStore.subscribe, () => sessionStore.get() !== null );
+	const tableView = useMemo( () => ( panelOpen ? toSplitView( shownView ) : shownView ), [ panelOpen, shownView ] );
+	const setTableView = useCallback( ( next: View ) => guardedSetView( sessionStore.get() ? fromSplitView( next, viewRef.current ) : next ), [ guardedSetView, sessionStore ] );
 	const guardedSetTab = useCallback(
 		( next: StatusTabId ) => {
 			if ( ! sessionStore.get() ) {
@@ -557,7 +564,10 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	useLayoutEffect( () => {
 		wholeRef.current = whole;
 	} );
-	const actions = useMemo( () => withWholeSelection( baseActions, () => wholeRef.current ), [ baseActions ] );
+	// Destructive actions (Move to Trash, Delete permanently) come last in row menus and the footer.
+	const actions = useMemo( () => withWholeSelection( destructiveLast( baseActions ), () => wholeRef.current ), [ baseActions ] );
+	// Split view: the footer keeps Bulk edit; the other bulk actions are in the selection bar's "More actions" menu.
+	const tableActions = useMemo( () => ( panelOpen ? withoutFooterBulk( actions ) : actions ), [ panelOpen, actions ] );
 
 	// `window.wcProductsList.getItems()` reads what is on screen.
 	useEffect( () => {
@@ -633,7 +643,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				{ countLabel }
 			</span>
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
-			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } />
+			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } moreActions={ panelOpen } />
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
 			{ hasExpandable && (
 				<>
@@ -714,9 +724,9 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						<HierarchicalDataViews
 							data={ hierarchy.rows }
 							fields={ fields }
-							view={ shownView }
-							onChangeView={ guardedSetView }
-							actions={ actions }
+							view={ tableView }
+							onChangeView={ setTableView }
+							actions={ tableActions }
 							isLoading={ list.isLoading }
 							paginationInfo={ { totalItems: list.total, totalPages: list.totalPages } }
 							defaultLayouts={ DEFAULT_LAYOUTS }

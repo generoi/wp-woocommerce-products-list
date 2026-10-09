@@ -204,6 +204,8 @@ function notifyDeclarativeSuccess( response: ActionResponse, label: string ): vo
 		changed > 0 && canUndo()
 			? {
 					id,
+					// A change to many items keeps its Undo until dismissed or replaced by a newer one.
+					...( changed > 1 ? { explicitDismiss: true } : {} ),
 					actions: [
 						{
 							label: __( 'Undo', 'wp-woocommerce-products-list' ),

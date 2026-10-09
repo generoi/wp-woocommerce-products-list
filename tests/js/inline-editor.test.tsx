@@ -827,7 +827,12 @@ describe( 'InlineEditor, round 6', () => {
 
 		const { view, operation, value } = await openDecrease();
 
-		fireEvent.keyDown( value, { key: 'Enter' } );
+		// Plain Enter in a bulk numeric value never saves (nor asks): only Cmd/Ctrl+Enter or Update does.
+		expect( fireEvent.keyDown( value, { key: 'Enter' } ) ).toBe( false );
+		await new Promise( ( resolve ) => setTimeout( resolve, 20 ) );
+		expect( screen.queryByText( '1 row would go below zero. Update anyway?' ) ).not.toBeInTheDocument();
+
+		fireEvent.keyDown( value, { key: 'Enter', metaKey: true } );
 
 		expect( ( await screen.findAllByText( '1 row would go below zero. Update anyway?' ) ).length ).toBeGreaterThan( 0 );
 		// The question takes the keyboard focus (and comes into view): it is not left below the fold.
@@ -836,8 +841,8 @@ describe( 'InlineEditor, round 6', () => {
 
 		// Enter on the next select (Tab, Tab, Enter): no save.
 		expect( fireEvent.keyDown( operation, { key: 'Enter' } ) ).toBe( false );
-		// Enter in the value field again: the question stays, no save.
-		fireEvent.keyDown( value, { key: 'Enter' } );
+		// Cmd+Enter in the value field again: the question stays, no save.
+		fireEvent.keyDown( value, { key: 'Enter', metaKey: true } );
 		await new Promise( ( resolve ) => setTimeout( resolve, 20 ) );
 		expect( saveEdits ).not.toHaveBeenCalled();
 		expect( screen.getByRole( 'button', { name: 'Update anyway' } ) ).toBeInTheDocument();

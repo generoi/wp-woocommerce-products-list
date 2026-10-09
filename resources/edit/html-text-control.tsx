@@ -161,27 +161,28 @@ export function fromVisualHtml( html: string, original: string ): string {
 		.trim();
 }
 
-const MODE_KEY = 'wc-products-list:html-editor-mode';
+/**
+ * The mode of the HTML fields in the open editor. Every editor opens in
+ * Visual (`resetHtmlEditorMode`, called as it opens); Code stays only for
+ * the editor it was picked in, never across sessions.
+ */
+let sessionMode: HtmlEditorMode = 'visual';
 
 function readMode(): HtmlEditorMode {
-	try {
-		return window.localStorage.getItem( MODE_KEY ) === 'code' ? 'code' : 'visual';
-	} catch {
-		return 'visual';
-	}
+	return sessionMode;
 }
 
 /** The mounted controls: a mode picked in one applies to every HTML field on screen. */
 const modeListeners = new Set< ( mode: HtmlEditorMode ) => void >();
 
 function writeMode( mode: HtmlEditorMode ): void {
-	try {
-		window.localStorage.setItem( MODE_KEY, mode );
-	} catch {
-		// Not remembered: the next field opens in Visual.
-	}
-
+	sessionMode = mode;
 	modeListeners.forEach( ( listener ) => listener( mode ) );
+}
+
+/** Back to Visual: for a newly opened editor. */
+export function resetHtmlEditorMode(): void {
+	sessionMode = 'visual';
 }
 
 interface VisualEditorProps {

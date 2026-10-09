@@ -64,6 +64,7 @@ import { canEnableStock, rowsWithExistingSale, saleIsActive, stockGatedRows } fr
 import type { RowEditOptions } from './row-rules';
 import { saveEdits, saveFields } from './save';
 import { buildPayload } from './payload';
+import { resetHtmlEditorMode } from './html-text-control';
 import { TranslationGrid, TranslationStore } from './translation-grid';
 import type { SaveResult } from './save';
 import { planSave, runConcurrently, UNCERTAIN_CODE } from './save-runner';
@@ -451,6 +452,12 @@ export function describeRunningSales( rows: ProductListItem[], edits: Record< st
 export function InlineEditor( { host }: InlineEditorProps ) {
 	const { session, fields: allFields, items: hostItems, close: onClose, advance: onAdvance, removeItem: onRemoveItem, setGuard, offPageCount, wholeList, headerSlot } = host;
 	const settings = getSettings();
+	// Each editor opens its HTML fields in Visual: Code stays only for the editor it was picked in (runs before the fields render).
+	useState( () => {
+		resetHtmlEditorMode();
+
+		return null;
+	} );
 	const bulk = session.mode === 'bulk';
 	const mode = bulk ? 'bulk' : 'quick';
 	const initialTab = session.initialTab;
@@ -1927,6 +1934,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		const modifier = event.metaKey || event.ctrlKey;
+
+		// Bulk: plain Enter in a numeric value box ("-5", "+10%") never saves every selected item; Cmd/Ctrl+Enter or Update does.
+		if ( bulk && ! modifier && event.target instanceof HTMLElement && event.target.closest( '.wc-pl-bulk-numeric' ) ) {
+			event.preventDefault();
+
+			return;
+		}
 
 		// Plain Enter in a single-line field updates, as in the classic quick edit; Cmd/Ctrl+Enter from anywhere (a textarea too).
 		// Shift+Enter (or Shift+Cmd+Enter) updates and moves on to the next row.

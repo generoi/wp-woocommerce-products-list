@@ -590,3 +590,16 @@ $link: #2271b1;
 .wc-pl-history__mode .components-toggle-group-control-option-base {
 	white-space: nowrap;
 }
+
+// Split view (list/split-view.ts): the name column stops taking half the narrowed table, so SKU, price and
+// stock stay beside it; the rest scrolls sideways inside the table. The name is DataViews' title column
+// (no column style reaches it), the second cell after the selection checkbox.
+html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-child(2) {
+	width: 240px;
+	max-width: 240px;
+	overflow: hidden;
+
+	* {
+		min-width: 0;
+	}
+}

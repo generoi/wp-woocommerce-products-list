@@ -179,6 +179,8 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 
 		notify.success( options.success( ok ), {
 			id: noticeId,
+			// A change to many items keeps its Undo until dismissed or replaced by a newer one.
+			...( ok > 1 && canUndo() ? { explicitDismiss: true } : {} ),
 			actions: ! canUndo() ? [] : [
 				{
 					label: __( 'Undo', 'wp-woocommerce-products-list' ),

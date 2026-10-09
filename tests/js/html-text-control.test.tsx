@@ -5,7 +5,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from '@wordpress/element';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createHtmlTextControl, fromVisualHtml, toVisualHtml, visualProblem } from '../../resources/edit/html-text-control';
+import { createHtmlTextControl, fromVisualHtml, resetHtmlEditorMode, toVisualHtml, visualProblem } from '../../resources/edit/html-text-control';
 
 const Control = createHtmlTextControl( { rows: 4 } );
 
@@ -26,6 +26,7 @@ function Harness( { initial, onChange }: { initial: string; onChange?: ( value: 
 
 afterEach( () => {
 	window.localStorage.clear();
+	resetHtmlEditorMode();
 } );
 
 describe( 'toVisualHtml / fromVisualHtml', () => {
@@ -87,7 +88,27 @@ describe( 'HtmlTextControl', () => {
 		expect( onChange ).toHaveBeenLastCalledWith( '<p>Uusi &amp; parempi</p>' );
 	} );
 
-	it( 'switches to Code and back, and remembers the choice', async () => {
+	it( 'opens in Visual in a new editor even after Code was picked in the last one, and ignores an old stored mode', () => {
+		window.localStorage.setItem( 'wc-products-list:html-editor-mode', 'code' );
+		const first = render( <Harness initial={ '<p>Yksi&nbsp;kaksi</p>' } /> );
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Code' } ) );
+		expect( ( screen.getByRole( 'textbox', { name: 'Short description' } ) as HTMLElement ).tagName ).toBe( 'TEXTAREA' );
+		first.unmount();
+
+		resetHtmlEditorMode();
+		render( <Harness initial={ '<p>Yksi&nbsp;kaksi</p>' } /> );
+
+		const box = screen.getByRole( 'textbox', { name: 'Short description' } ) as HTMLElement;
+
+		expect( box.tagName ).toBe( 'DIV' );
+		// Entities read as text in Visual, and stay entities in what is stored.
+		expect( box.textContent ).toBe( 'Yksi\u00a0kaksi' );
+		expect( fromVisualHtml( box.innerHTML, '<p>Yksi&nbsp;kaksi</p>' ) ).toBe( '<p>Yksi&nbsp;kaksi</p>' );
+		window.localStorage.removeItem( 'wc-products-list:html-editor-mode' );
+	} );
+
+	it( 'switches to Code and back', async () => {
 		render( <Harness initial={ '<p>Yksi</p>' } /> );
 
 		fireEvent.click( screen.getByRole( 'button', { name: 'Code' } ) );
@@ -96,7 +117,6 @@ describe( 'HtmlTextControl', () => {
 
 		expect( textarea.tagName ).toBe( 'TEXTAREA' );
 		expect( textarea.value ).toBe( '<p>Yksi</p>' );
-		expect( window.localStorage.getItem( 'wc-products-list:html-editor-mode' ) ).toBe( 'code' );
 
 		fireEvent.change( textarea, { target: { value: '<p>Kaksi &amp; kolme</p>' } } );
 		await act( async () => {

@@ -88,6 +88,29 @@ function hint( op: NumericOp, salePrice: boolean ): string | null {
 	return salePrice ? __( 'Relative to each row’s current sale price. Rows without a sale price are skipped; use “Regular price minus” to start a sale.', 'wp-woocommerce-products-list' ) : null;
 }
 
+/**
+ * The operation a typed value resolved to, in words ("Decrease by 5 €",
+ * "Increase by 10%"), when the value carried its own sign or percent
+ * (shorthand) and so picked the operation itself. Null otherwise.
+ */
+export function resolvedShorthand( text: string, op: NumericOp, kind: NumericKind, salePrice: boolean, symbol: string ): string | null {
+	if ( op.operation === 'dont_change' || ! /^\s*(?:r(?:egular)?\s*)?[+\-−=]|%/i.test( text ) || ! parseShorthand( text, kind, salePrice ) ) {
+		return null;
+	}
+
+	const names: Record< NumericOp[ 'operation' ], string > = {
+		dont_change: '',
+		set: __( 'Change to', 'wp-woocommerce-products-list' ),
+		increase: __( 'Increase by', 'wp-woocommerce-products-list' ),
+		decrease: __( 'Decrease by', 'wp-woocommerce-products-list' ),
+		regular_minus: __( 'Regular price minus', 'wp-woocommerce-products-list' ),
+	};
+	const value = op.value === '' ? '…' : op.value;
+	const unit = op.percent ? '%' : kind === 'money' ? ` ${ symbol }` : '';
+
+	return `${ __( 'Reads as:', 'wp-woocommerce-products-list' ) } ${ names[ op.operation ] } ${ value }${ unit }`;
+}
+
 /** What the idle note says: the value box takes shorthand. */
 export function shorthandHint( kind: NumericKind, salePrice: boolean ): string {
 	if ( kind !== 'money' ) {
@@ -210,6 +233,8 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 		const baseId = `wc-pl-bulk-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }-${ useId().replace( /:/g, '' ) }`;
 		const note = hint( op, salePrice );
 		const roundable = ! idle && op.operation !== 'set';
+		// A sign or percent typed in the value picks the operation itself: say which, before anything is saved.
+		const resolved = draft && draft.op === JSON.stringify( op ) ? resolvedShorthand( draft.text, op, kind, salePrice, currency?.symbol ?? settings.currency.symbol ) : null;
 
 		const update = ( next: NumericOp ) => onChange( { [ field.id ]: next } );
 		const shownValue = draft && draft.op === JSON.stringify( op ) ? draft.text : idle ? '' : op.value;
@@ -303,6 +328,9 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 					</HStack>
 				) : null }
 				{ /* A fixed slot: an operation's note appearing or going never moves the fields below. */ }
+				<Text className="wc-pl-bulk-numeric__resolved" aria-live="polite" weight={ 600 }>
+					{ resolved ?? '' }
+				</Text>
 				<Text variant="muted" className="wc-pl-bulk-numeric__note">
 					{ note ?? ( idle ? shorthandHint( kind, salePrice ) : '' ) }
 				</Text>
