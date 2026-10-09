@@ -8,6 +8,7 @@ import { batchProducts, batchVariations, batchVariationsAcross, getVariations, n
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
 import { invalidateProducts, patchItems } from '../store/products';
+import { finishSaveJob, markRowsSaved, startSaveJob, updateSaveJob } from '../store/save-activity';
 import { getVisibleFieldIds } from '../store/rows';
 import type { ProductField, ProductListItem } from '../types';
 import { fetchAllVariations } from './apply-to-variations';
@@ -17,7 +18,7 @@ import { runSave } from './save-runner';
 
 export type { SaveOptions, SaveResult } from './save-runner';
 
-function realDeps(): SaveDeps {
+function realDeps( jobId?: number ): SaveDeps {
 	const settings = getSettings();
 
 	return {
@@ -28,6 +29,12 @@ function realDeps(): SaveDeps {
 		fetchVariations: ( parentId, fields ) =>
 			fetchAllVariations( parentId, fields, ( id, page, fieldList ) => getVariations( id, page, { perPage: settings.limits.perPageMax, fields: fieldList } ) ),
 		patchItems,
+		// Every written row is editable again in the list as soon as its chunk is back.
+		rowsWritten: ( ids ) => {
+			if ( jobId !== undefined ) {
+				markRowsSaved( jobId, ids );
+			}
+		},
 		newBatchId,
 		batchSize: settings.limits.batchSize,
 		normalizeRow: toRow,
@@ -73,7 +80,32 @@ export function saveFields( fields: ProductField[], edits: Record< string, unkno
 export async function saveEdits( items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], options: SaveOptions ): Promise< SaveResult > {
 	// The rows a write returns are trimmed to what the list shows plus what
 	// was edited, never the full wc/v3 object (PHP Rows::trimBatchItem).
-	const result = await runSave( realDeps(), items, edits, fields, getSettings(), { fields: saveFields( fields, edits ), ...options } );
+	// The list shows this save's progress and locks the rows it has not written yet, also once the panel is closed.
+	// A variable parent stays locked until the whole save is done (its variations are written chunk by chunk).
+	const pending = new Set< number >();
+
+	items.forEach( ( item ) => {
+		pending.add( item.id );
+
+		if ( item.parent_id ) {
+			pending.add( item.parent_id );
+		}
+	} );
+	const jobId = startSaveJob( pending );
+	let result: SaveResult;
+
+	try {
+		result = await runSave( realDeps( jobId ), items, edits, fields, getSettings(), {
+			fields: saveFields( fields, edits ),
+			...options,
+			onProgress: ( done, total ) => {
+				updateSaveJob( jobId, done, total );
+				options.onProgress?.( done, total );
+			},
+		} );
+	} finally {
+		finishSaveJob( jobId );
+	}
 
 	if ( result.updated.length > 0 && changesStatus( edits ) ) {
 		invalidateProducts( { counts: true } );

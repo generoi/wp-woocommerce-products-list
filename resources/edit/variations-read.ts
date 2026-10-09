@@ -132,6 +132,8 @@ export interface AcrossOptions {
 	signal?: AbortSignal;
 	/** Requests in flight at once. */
 	concurrency?: number;
+	/** Called with the number of variations read so far, after every page. */
+	onProgress?: ( loaded: number ) => void;
 }
 
 /**
@@ -179,16 +181,25 @@ export async function getVariationsOfParents( parentIds: number[], options: Acro
 	const concurrency = options.concurrency ?? 4;
 	const parts = chunks( parentIds, ACROSS_CHUNK );
 	const query = ( part: number[], page: number ) => ( { parent: part.join( ',' ), per_page: ACROSS_CHUNK, page, _fields } );
-	const first = await attempt( query( parts[ 0 ]!, 1 ), options.signal );
+	let loaded = 0;
+	const counted = < T extends { items: unknown[] } | null >( page: T ): T => {
+		if ( page ) {
+			loaded += page.items.length;
+			options.onProgress?.( loaded );
+		}
+
+		return page;
+	};
+	const first = counted( await attempt( query( parts[ 0 ]!, 1 ), options.signal ) );
 
 	if ( first === null ) {
 		return null;
 	}
 
-	const firstPages = [ first, ...( await inParallel( parts.slice( 1 ).map( ( part ) => async () => ( await attempt( query( part, 1 ), options.signal ) ) ?? { items: [], totalPages: 1 } ), concurrency ) ) ];
+	const firstPages = [ first, ...( await inParallel( parts.slice( 1 ).map( ( part ) => async () => counted( await attempt( query( part, 1 ), options.signal ) ) ?? { items: [], totalPages: 1 } ), concurrency ) ) ];
 	const more = await inParallel(
 		parts.flatMap( ( part, index ) =>
-			Array.from( { length: Math.max( 0, ( firstPages[ index ]?.totalPages ?? 1 ) - 1 ) }, ( _, offset ) => async () => ( await attempt( query( part, offset + 2 ), options.signal ) )?.items ?? [] )
+			Array.from( { length: Math.max( 0, ( firstPages[ index ]?.totalPages ?? 1 ) - 1 ) }, ( _, offset ) => async () => counted( await attempt( query( part, offset + 2 ), options.signal ) )?.items ?? [] )
 		),
 		concurrency
 	);

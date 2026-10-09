@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.9 - 2026-10-09
+
+- "Decrease by" on Sale price (an amount or a percent) now starts from the regular price on rows that are not on sale, instead of skipping them. A running sale is still decreased from its sale price. "Increase by" on an empty sale price still skips the row.
+- Bulk updates can run in the background: the editor panel can be closed while saving ("Close, keep updating in the background"). A progress bar above the list shows rows done, percent and time left, and rows not written yet show "Updating…" and are locked until their chunk is saved. Opening the editor on rows still being updated is refused. Leaving the page during an update asks first, since the update runs in the tab.
+- Save progress in the panel is a full-width block with the count, percent and time left.
+- "Apply to all variations" counts the variations as they load ("Loading variations… 9,800 of 24,225").
+- Verified on the full catalog on ddev: 850 variable products, 24,231 variations, sale −20 %, saved in about 7 minutes with steady progress.
+
 ## 0.1.8 - 2026-10-09
 
 - Quick and bulk edit remember the last tab used (for example Svenska) when switching to another product, opening bulk edit or reloading the page. A translation filter ("Missing in Svenska") and "Update & next" still choose the tab first.

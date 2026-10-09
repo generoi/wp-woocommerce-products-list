@@ -22,7 +22,7 @@
  * with it, the others on their first visit (six languages of descriptions
  * for a page of 100 products is over a megabyte nobody looks at).
  */
-import { Button, Notice, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
+import { Button, Notice, ProgressBar, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { CheckboxControl } from '../ui/checkbox-control';
 import { createPortal, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
@@ -664,6 +664,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ submitRequested, setSubmitRequested ] = useState< false | 'save' | 'next' >( false );
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
 	const [ variations, setVariations ] = useState< VariationLoad >( IDLE_LOAD );
+	// Variations read so far while "apply to variations" loads them (the note counts up to the expected total).
+	const [ variationsLoaded, setVariationsLoaded ] = useState( 0 );
 	// Bumped when fetched variations are known to be stale (a save wrote some, someone else changed their parent): the forgotten parents load again.
 	const [ variationEpoch, setVariationEpoch ] = useState( 0 );
 	// Why the warning list is up: rows a decrease clamps at zero, or rows saved by someone else since the editor loaded them.
@@ -916,6 +918,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			getVariations( parentId, page, { perPage: settings.limits.perPageMax, fields: fieldList, signal: controller.signal } );
 
 		setVariations( { status: 'loading', ...pick() } );
+		setVariationsLoaded( 0 );
 
 		( async () => {
 			const worker = async () => {
@@ -932,7 +935,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			try {
 				// Every parent's variations across parents (a handful of requests for a page of 100), else one parent at a time.
 				// A failed cross-parent read falls back to the per-parent one (an older server, a proxy that blocks the route).
-				const across = await getVariationsOfParents( [ ...queue ], { fields: fetchFields, signal: controller.signal } ).catch( () => null );
+				const across = await getVariationsOfParents( [ ...queue ], { fields: fetchFields, signal: controller.signal, onProgress: setVariationsLoaded } ).catch( () => null );
 
 				if ( across && ! controller.signal.aborted ) {
 					across.forEach( ( rows, parentId ) => known.set( parentId, rows ) );
@@ -1893,8 +1896,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	 * paging, sorting, filtering and another editor all go through here.
 	 */
 	const requestLeave = (): Promise< boolean > => {
+		// A save in flight keeps running without the panel: the list shows its progress and locks the rows it has not
+		// written yet, and the result arrives as a snackbar.
 		if ( saving ) {
-			return Promise.resolve( false );
+			return Promise.resolve( true );
 		}
 
 		if ( ! dirty ) {
@@ -2050,9 +2055,20 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		if ( variations.status === 'loading' ) {
+			const expected = variableParents.reduce( ( sum, parent ) => sum + ( Number( parent._childCount ) || 0 ), 0 );
+
 			return (
-				<span className="wc-pl-edit__note">
-					<Spinner /> { __( 'Loading variations…', 'wp-woocommerce-products-list' ) }
+				<span className="wc-pl-edit__note wc-pl-edit__variation-loading" role="status" aria-live="polite">
+					<Spinner />{ ' ' }
+					{ variationsLoaded > 0 && expected > 0
+						? sprintf(
+								/* translators: 1: variations loaded so far, 2: variations expected */
+								__( 'Loading variations… %1$s of %2$s', 'wp-woocommerce-products-list' ),
+								variationsLoaded.toLocaleString(),
+								expected.toLocaleString()
+						  )
+						: __( 'Loading variations…', 'wp-woocommerce-products-list' ) }
+					{ variationsLoaded > 0 && expected > 0 ? <ProgressBar value={ Math.min( 100, Math.round( ( variationsLoaded / expected ) * 100 ) ) } /> : null }
 				</span>
 			);
 		}
@@ -2643,8 +2659,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					<Button type="submit" variant="primary" isBusy={ saving } aria-disabled={ saveBlocked } disabled={ saveBlocked && ! saving } __next40pxDefaultSize>
 						{ saveLabel }
 					</Button>
-					<Button type="button" variant="tertiary" onClick={ requestClose } aria-disabled={ saving } __next40pxDefaultSize>
-						{ __( 'Cancel', 'wp-woocommerce-products-list' ) }
+					<Button type="button" variant="tertiary" onClick={ requestClose } __next40pxDefaultSize>
+						{ saving ? __( 'Close, keep updating in the background', 'wp-woocommerce-products-list' ) : __( 'Cancel', 'wp-woocommerce-products-list' ) }
 					</Button>
 					{ showNext ? (
 						<Button

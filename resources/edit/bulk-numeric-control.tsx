@@ -79,6 +79,12 @@ function hint( op: NumericOp, salePrice: boolean ): string | null {
 			: __( 'Each row’s regular price minus this amount. Rows without a regular price are skipped.', 'wp-woocommerce-products-list' );
 	}
 
+	if ( salePrice && op.operation === 'decrease' ) {
+		return op.percent
+			? __( 'Percent off each row’s current sale price; rows that are not on sale start from their regular price.', 'wp-woocommerce-products-list' )
+			: __( 'Taken off each row’s current sale price; rows that are not on sale start from their regular price.', 'wp-woocommerce-products-list' );
+	}
+
 	if ( op.percent ) {
 		return salePrice
 			? __( 'Percent of each row’s current sale price. Rows without a sale price are skipped; use “Regular price minus” to start a sale.', 'wp-woocommerce-products-list' )

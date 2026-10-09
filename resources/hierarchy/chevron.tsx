@@ -15,6 +15,7 @@ import type { ProductListItem } from '../types/product';
 import { useHierarchyRowView, useHierarchyViewGetter } from './context';
 import type { HierarchyViewValue } from './context';
 import type { ChildrenState } from './flatten';
+import { useRowPending } from '../store/save-activity';
 
 export const ROW_ID_PREFIX = 'wc-pl-row-';
 
@@ -117,6 +118,18 @@ export interface NameCellProps {
  * indentation by level, the chevron (or a spacer) for level 0, the
  * placeholder content for loading/error/"more" rows.
  */
+/** "Updating…" while a save in flight has not written this row (or its variations) yet; the row is locked meanwhile (style.scss). */
+function PendingMark( { item }: { item: ProductListItem } ) {
+	const pending = useRowPending( item.id, item.parent_id );
+
+	return pending ? (
+		<span className="wc-pl-pending" role="status">
+			<span className="wc-pl-spinner" aria-hidden="true" />
+			{ __( 'Updating…', 'wp-woocommerce-products-list' ) }
+		</span>
+	) : null;
+}
+
 export function NameCell( { item, children }: NameCellProps ) {
 	const { view, expanded, state, searchMatch, variationFilterActive } = useHierarchyRowView( item.id );
 	// Handlers read the value at click time: the cell re-renders only when its own row changes.
@@ -154,6 +167,7 @@ export function NameCell( { item, children }: NameCellProps ) {
 		<div id={ rowDomId( item ) } className={ `wc-pl-name wc-pl-name--level-${ level }` + ( isSearchMatch ? ' is-search-match' : '' ) } style={ { '--wc-pl-level': level } as CSSProperties }>
 			{ level === 0 ? <Chevron item={ item } /> : <span className="wc-pl-chevron wc-pl-chevron--spacer" aria-hidden="true" /> }
 			<span className="wc-pl-name__content">{ children ?? item.name ?? '' }</span>
+			<PendingMark item={ item } />
 			{ isSearchMatch && (
 				<span className="wc-pl-name__match">
 					{ __( 'Matches search', 'wp-woocommerce-products-list' ) }

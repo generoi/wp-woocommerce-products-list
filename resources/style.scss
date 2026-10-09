@@ -616,3 +616,55 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 		min-width: 0;
 	}
 }
+
+// A save in flight (it keeps running with the editor panel closed): progress above the list.
+.wc-products-list__save-activity {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 12px 24px 0;
+	padding: 10px 12px;
+	background: #f0f6fc;
+	border: 1px solid #c5d9ed;
+	border-radius: 4px;
+	font-size: 13px;
+
+	.wc-products-list__save-activity-label {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px;
+	}
+
+	.components-progress-bar__track {
+		width: 100%;
+		max-width: none;
+		height: 8px;
+	}
+}
+
+// Rows the save has not written yet: dimmed and locked (no checkbox, no quick edit) until their chunk is back.
+.dataviews-view-table__row:has( .wc-pl-pending ) {
+	td {
+		opacity: 0.55;
+		pointer-events: none;
+	}
+
+	td:has( .wc-pl-pending ) {
+		opacity: 1;
+	}
+}
+
+.wc-pl-pending {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin-inline-start: 8px;
+	padding: 0 6px;
+	border-radius: 2px;
+	background: #f0f6fc;
+	color: #2271b1;
+	font-size: 11px;
+	font-weight: 500;
+	white-space: nowrap;
+}

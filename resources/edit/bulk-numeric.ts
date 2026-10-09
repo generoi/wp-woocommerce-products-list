@@ -502,8 +502,11 @@ export function editsForItem( item: ProductListItem, edits: Record< string, unkn
  * price nobody set by hand) the reference the shop sells at, which the
  * translation integration derives from the default price. "+10 %" on the
  * Swedish prices then raises every Swedish price, not only the manual ones.
+ * A decrease of a sale price with no sale yet starts from the regular price: "Decrease by
+ * 20 %" on a selection where only some rows are on sale puts every row 20 %
+ * under what it sells at, instead of skipping the rows that are not on sale.
  */
-export function relativeBase( field: ProductField, item: ProductListItem, op: NumericOp, settings: Settings ): string | number | null | undefined {
+export function relativeBase( field: ProductField, item: ProductListItem, op: NumericOp, settings: Settings, context: NumericContext = {} ): string | number | null | undefined {
 	const current = readFieldValue( field, item ) as string | number | null | undefined;
 
 	if ( op.operation !== 'increase' && op.operation !== 'decrease' ) {
@@ -516,7 +519,16 @@ export function relativeBase( field: ProductField, item: ProductListItem, op: Nu
 
 	const reference = readReference( field, item );
 
-	return parseNumeric( reference, settings ) !== undefined ? ( reference as string | number ) : current;
+	if ( parseNumeric( reference, settings ) !== undefined ) {
+		return reference as string | number;
+	}
+
+	// Only a decrease: raising a missing sale price from the regular price would put the sale above the price.
+	if ( op.operation === 'decrease' && isSalePriceField( field ) && parseNumeric( context.regular, settings ) !== undefined ) {
+		return context.regular as string | number;
+	}
+
+	return current;
 }
 
 /**
@@ -567,8 +579,9 @@ export function projectEdits( item: ProductListItem, edits: Record< string, unkn
 				continue;
 			}
 
-			const current = relativeBase( field, item, value, settings );
-			const next = applyNumericOp( current, value, kind, settings, contextFor( item, id, edits, byId, settings ) );
+			const context = contextFor( item, id, edits, byId, settings );
+			const current = relativeBase( field, item, value, settings, context );
+			const next = applyNumericOp( current, value, kind, settings, context );
 
 			if ( next !== null ) {
 				projected[ id ] = next;
@@ -782,8 +795,8 @@ export function projectWarnings( items: ProductListItem[], edits: Record< string
 				continue;
 			}
 
-			const current = relativeBase( field, item, value, settings );
 			const context = contextFor( item, id, own, byId, settings );
+			const current = relativeBase( field, item, value, settings, context );
 			const next = computeNumericOp( current, value, kind, settings, context );
 
 			// A row on backorder keeps the arithmetic: nothing is clamped, nothing to confirm.

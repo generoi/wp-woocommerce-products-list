@@ -58,6 +58,8 @@ import { destructiveLast, withoutFooterBulk } from './more-actions';
 import { StatusTabs } from './status-tabs';
 import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
+import { SaveActivityBar } from './save-activity-bar';
+import { isRowPending } from '../store/save-activity';
 
 export interface ProductsScreenProps {
 	fields: ProductField[];
@@ -415,7 +417,17 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	}, [ sessionStore ] );
 	const openEditor = useCallback(
 		( items: ProductListItem[] ) => {
-			const rows = realRows( items );
+			const all = realRows( items );
+			// Rows a save in flight has not written yet are locked: editing them now would race that save.
+			const rows = all.filter( ( row ) => ! isRowPending( row.id ) && ! isRowPending( row.parent_id ) );
+
+			if ( rows.length < all.length ) {
+				notify.info(
+					rows.length
+						? __( 'Some selected rows are still being updated; they were left out.', 'wp-woocommerce-products-list' )
+						: __( 'These rows are still being updated. Edit them once the update is done.', 'wp-woocommerce-products-list' )
+				);
+			}
 
 			if ( ! rows.length ) {
 				return;
@@ -703,6 +715,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						</ConfirmDialog>
 					) }
 					<StatusTabs tab={ tab } onChange={ guardedSetTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />
+					<SaveActivityBar />
 					{ staleError && (
 						<Notice
 							status="error"

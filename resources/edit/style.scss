@@ -122,6 +122,49 @@
 			max-width: 360px;
 			margin-inline-start: 8px;
 		}
+
+		// While saving: a full-width block above the buttons with the count, percent, time left and a hint.
+		.wc-pl-edit__progress.is-prominent {
+			order: -1;
+			flex: 1 1 100%;
+			max-width: none;
+			margin: 0 0 4px;
+			display: flex;
+			flex-direction: column;
+			gap: 6px;
+			padding: 10px 12px;
+			background: #f0f6fc;
+			border: 1px solid #c5d9ed;
+			border-radius: 4px;
+
+			.wc-pl-edit__progress-label {
+				font-size: 13px;
+			}
+
+			.components-progress-bar__track {
+				height: 8px;
+				width: 100%;
+				max-width: none;
+			}
+		}
+
+		.wc-pl-edit__progress-hint {
+			color: #50575e;
+			font-size: 12px;
+		}
+	}
+}
+
+.wc-pl-edit__variation-loading {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+
+	.components-progress-bar__track {
+		flex: 1 1 100%;
+		max-width: none;
+		height: 6px;
 	}
 }
 

@@ -40,6 +40,8 @@ export interface SaveDeps {
 	batchVariationsAcross?( update: Array< { id: number; parent_id: number } & Record< string, unknown > >, options: SaveRequestOptions ): Promise< BatchResponse< RawVariation > >;
 	fetchVariations: FetchVariations;
 	patchItems( items: Array< Partial< ProductListItem > & { id: number } > ): void;
+	/** These rows' writes came back from the server (not the optimistic patches): the list unlocks them. */
+	rowsWritten?( ids: number[] ): void;
 	newBatchId(): string;
 	batchSize: number;
 	/** Rows per cross-parent variations request (the server's batch limit, 100); `batchSize` when missing. */
@@ -544,6 +546,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 			queued = [];
 			deps.patchItems( patches );
+			deps.rowsWritten?.( patches.map( ( patch ) => patch.id ) );
 		}
 	};
 	const queuePatches = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {

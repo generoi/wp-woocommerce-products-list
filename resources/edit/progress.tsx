@@ -3,6 +3,7 @@
  * a bulk save. Stays mounted on partial failure so the user can fix and retry.
  */
 import { ProgressBar, Notice } from '@wordpress/components';
+import { useEffect, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ProductListItem } from '../types';
 import { itemLabel } from './item-label';
@@ -15,7 +16,43 @@ export interface SaveProgressProps {
 	label?: ( done: number, total: number ) => string;
 }
 
+/** "about 2 min left" from the rate so far; nothing until there is a rate worth trusting. */
+export function timeLeft( done: number, total: number, elapsedMs: number ): string | null {
+	if ( done < 1 || total <= done || elapsedMs < 1500 ) {
+		return null;
+	}
+
+	const seconds = Math.ceil( ( ( total - done ) * elapsedMs ) / done / 1000 );
+
+	if ( seconds < 60 ) {
+		/* translators: %d: seconds */
+		return sprintf( _n( 'about %d second left', 'about %d seconds left', seconds, 'wp-woocommerce-products-list' ), seconds );
+	}
+
+	const minutes = Math.ceil( seconds / 60 );
+
+	/* translators: %d: minutes */
+	return sprintf( _n( 'about %d minute left', 'about %d minutes left', minutes, 'wp-woocommerce-products-list' ), minutes );
+}
+
 export function SaveProgress( { done, total, saving, label }: SaveProgressProps ) {
+	const [ startedAt, setStartedAt ] = useState< number | null >( null );
+	const [ now, setNow ] = useState( () => Date.now() );
+
+	// Note when saving starts, then tick once a second so the time left keeps moving between progress updates.
+	useEffect( () => {
+		if ( ! saving ) {
+			setStartedAt( null );
+
+			return undefined;
+		}
+
+		setStartedAt( Date.now() );
+		const timer = window.setInterval( () => setNow( Date.now() ), 1000 );
+
+		return () => window.clearInterval( timer );
+	}, [ saving ] );
+
 	if ( ! saving ) {
 		return null;
 	}
@@ -23,28 +60,35 @@ export function SaveProgress( { done, total, saving, label }: SaveProgressProps 
 	// Before the plan knows how many rows: an indeterminate bar, so Save is seen to have taken.
 	if ( total === 0 ) {
 		return (
-			<div className="wc-pl-edit__progress" role="status" aria-live="polite">
+			<div className="wc-pl-edit__progress is-prominent" role="status" aria-live="polite">
+				<span className="wc-pl-edit__progress-label">{ label ? label( 0, 0 ) : __( 'Preparing the update…', 'wp-woocommerce-products-list' ) }</span>
 				<ProgressBar />
-				<span className="wc-pl-edit__progress-label">{ label ? label( 0, 0 ) : __( 'Saving…', 'wp-woocommerce-products-list' ) }</span>
 			</div>
 		);
 	}
 
 	const value = Math.round( ( done / total ) * 100 );
+	const left = startedAt === null ? null : timeLeft( done, total, now - startedAt );
+	const large = total >= 200;
 
 	return (
-		<div className="wc-pl-edit__progress" role="status" aria-live="polite">
-			<ProgressBar value={ value } />
+		<div className="wc-pl-edit__progress is-prominent" role="status" aria-live="polite">
 			<span className="wc-pl-edit__progress-label">
-				{ label
-					? label( done, total )
-					: sprintf(
-							/* translators: 1: rows saved, 2: rows in total */
-							__( 'Saving %1$d of %2$d…', 'wp-woocommerce-products-list' ),
-							done,
-							total
-					  ) }
+				<strong>
+					{ label
+						? label( done, total )
+						: sprintf(
+								/* translators: 1: rows saved, 2: rows in total */
+								__( 'Updating %1$s of %2$s…', 'wp-woocommerce-products-list' ),
+								done.toLocaleString(),
+								total.toLocaleString()
+						  ) }
+				</strong>
+				{ ` ${ value } %` }
+				{ left ? ` · ${ left }` : '' }
 			</span>
+			<ProgressBar value={ value } />
+			{ large ? <span className="wc-pl-edit__progress-hint">{ __( 'You can close this panel and keep working in the list; the update continues. Leaving the page stops it.', 'wp-woocommerce-products-list' ) }</span> : null }
 		</div>
 	);
 }

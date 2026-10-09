@@ -334,12 +334,13 @@ describe( 'runSave', () => {
 		expect( d.batchVariations ).toHaveBeenCalledWith(
 			4,
 			[
-				{ id: 41, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
-				{ id: 42, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
+				// Not on sale yet: "Decrease by 20 %" starts from their regular price (100 and 50).
+				{ id: 41, sale_price: '80.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
+				{ id: 42, sale_price: '40.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00' },
 			],
 			{ batchId: 'batch-1', source: 'bulk' }
 		);
-		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 4, status: 'publish' }, { id: 1, date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' } ], expect.anything() );
+		expect( d.batchProducts ).toHaveBeenCalledWith( [ { id: 4, status: 'publish' }, { id: 1, sale_price: '8.00', date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: '2026-11-30T00:00:00', status: 'publish' } ], expect.anything() );
 		expect( result.errors ).toEqual( [] );
 	} );
 

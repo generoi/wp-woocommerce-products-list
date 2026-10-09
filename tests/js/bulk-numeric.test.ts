@@ -254,8 +254,11 @@ describe( 'validateBulkNumericEdits', () => {
 		const noSale = [ variation( 11, 1, { regular_price: '100', sale_price: '' } ), variation( 12, 1, { regular_price: '100', sale_price: '20' } ) ];
 		const dates = { date_on_sale_from: '2026-10-12T00:00:00', date_on_sale_to: '2026-10-18T23:59:00' };
 
-		// "Decrease by 20 %" of an empty sale price leaves it empty: dates and no sale.
-		const errors = validateBulkNumericEdits( noSale, { ...dates, sale_price: op( 'decrease', '20', true ) }, fields, settings );
+		// "Decrease by 20 %" of an empty sale price starts from the regular price: every row gets a sale.
+		expect( validateBulkNumericEdits( noSale, { ...dates, sale_price: op( 'decrease', '20', true ) }, fields, settings ) ).toHaveLength( 0 );
+
+		// "Increase by 5" of an empty sale price stays empty: dates and no sale.
+		const errors = validateBulkNumericEdits( noSale, { ...dates, sale_price: op( 'increase', '5' ) }, fields, settings );
 
 		expect( errors ).toHaveLength( 1 );
 		expect( errors[ 0 ] ).toMatchObject( { id: 11, field: 'sale_price' } );
