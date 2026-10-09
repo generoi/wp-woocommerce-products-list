@@ -96,10 +96,6 @@ $link: #2271b1;
 		border-bottom-color: #1e1e1e;
 		font-weight: 600;
 	}
-
-	&.is-trash {
-		margin-inline-start: auto;
-	}
 }
 
 .wc-products-list__tab-count {
@@ -123,33 +119,52 @@ $link: #2271b1;
 
 .wc-products-list__header {
 	display: flex;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	align-items: center;
 	gap: 4px;
-	// Always its own line under the layout/settings buttons: when a selection adds "N selected ·
-	// Bulk edit · Clear selection" the header would otherwise wrap onto a new line and push the
-	// table down under the pointer, so the next checkbox click lands on another row.
-	flex-basis: 100%;
-}
+	// Beside the search box on one line that never wraps: when a selection adds "N selected ·
+	// Bulk edit · Clear selection" a wrapping header would push the table down under the pointer,
+	// so the next checkbox click lands on another row. Whatever does not fit scrolls sideways.
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow-x: auto;
+	scrollbar-width: thin;
 
-// The toolbar group that holds the header (layout and settings buttons + header) always takes the
-// full width under the search box. Otherwise it sits beside the search box until a selection makes
-// it wider, then wraps below it and pushes the table down under the pointer.
-.dataviews__view-actions > :has( > .wc-products-list__header ) {
-	flex-basis: 100%;
-}
-
-// The toolbar wraps onto a second line when the list is narrow (beside the
-// editor panel, on a small screen) instead of running under the panel.
-.wc-products-list .dataviews__view-actions {
-	flex-wrap: wrap;
-	row-gap: 8px;
-
-	// DataViews' stack does not shrink (inline flex-shrink: 0): cap it at the row instead, so the header wraps inside.
-	> :has( > .wc-products-list__header ) {
-		flex-wrap: wrap;
-		max-width: 100%;
+	> * {
+		flex-shrink: 0;
+		white-space: nowrap;
 	}
+}
+
+// One toolbar line: search and filter toggle, then the layout and settings buttons and the header,
+// left-aligned after the search box. The group holding the header takes the rest of the line.
+.wc-products-list .dataviews__view-actions {
+	flex-wrap: nowrap;
+
+	// The search box keeps its own width instead of growing into the line.
+	> .dataviews__search {
+		flex: 0 1 auto;
+	}
+
+	// DataViews' stack does not shrink (inline flex-shrink: 0, which only !important beats): let it,
+	// so the header scrolls inside.
+	> :has( > .wc-products-list__header ) {
+		flex: 1 1 auto;
+		flex-shrink: 1 !important;
+		min-width: 0;
+		flex-wrap: nowrap;
+	}
+}
+
+// Checkboxes: the bundled components draw the tick (and the indeterminate dash) with `stroke: currentColor` in a 16px box
+// (viewBox 4 4 16 16), while the core stylesheet WordPress loads sizes it for the older filled tick
+// (20px, `fill: #fff`), so the tick came out black and edge to edge on the blue box. Unscoped: the
+// editor panel and popovers (Columns, filters) render outside the list.
+svg.components-checkbox-control__checked[viewBox='4 4 16 16'],
+svg.components-checkbox-control__indeterminate[viewBox='4 4 16 16'] {
+	color: #fff;
+	width: var( --checkbox-input-size, 16px );
+	height: var( --checkbox-input-size, 16px );
 }
 
 // The bulk-actions footer wraps instead of running out of the list when it is

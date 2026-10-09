@@ -955,11 +955,21 @@ html.wc-pl-panel-resizing {
 	}
 
 	// While editing, the list keeps only what the work needs: the header links (History, Add new)
-	// and the filter chips step aside so the list column does not grow and jump as they wrap.
+	// step aside, and the filter chips stay on one line that scrolls sideways, so the list column
+	// does not grow and jump as they wrap.
 	html.wc-pl-panel-open .wc-products-list {
-		.wc-products-list__header,
-		.dataviews-filters__container {
+		.wc-products-list__header {
 			display: none;
+		}
+
+		.dataviews-filters__container {
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: thin;
+
+			> * {
+				flex-shrink: 0;
+			}
 		}
 	}
 }
