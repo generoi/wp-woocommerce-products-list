@@ -35,13 +35,18 @@ function unmatchedTokens( row: ProductListItem, tokens: string[] ): string[] {
 	return tokens.filter( ( token ) => ! text.includes( token ) );
 }
 
-/** Variable parents on the page that matched the search only through a variation's SKU. */
+/**
+ * Variable parents on the page that matched the search only through a
+ * variation's SKU. The server also finds a parent through a variation's
+ * name ("Boot - Black x BREJD, 38"), which is no reason to expand it: only
+ * parents it flags with `variation_sku_match` qualify.
+ */
 export function parentsMatchedByVariations( parents: ProductRow[], tokens: string[] ): number[] {
 	if ( ! tokens.length ) {
 		return [];
 	}
 
-	return parents.filter( ( parent ) => parent._hasChildren && ! parent._noLongerMatches && unmatchedTokens( parent, tokens ).length > 0 ).map( ( parent ) => parent.id );
+	return parents.filter( ( parent ) => parent._hasChildren && ! parent._noLongerMatches && parent.wc_products_list?.variation_sku_match === true && unmatchedTokens( parent, tokens ).length > 0 ).map( ( parent ) => parent.id );
 }
 
 /** Variation rows whose SKU contains a token their parent's own name and SKU do not. */

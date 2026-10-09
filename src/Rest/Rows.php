@@ -12,7 +12,8 @@ use WP_REST_Response;
  * What the Catalog app needs on every row beyond the wc/v3 fields: the
  * `wc_products_list` object (`variation_count`, `edit_link`, `can_edit`,
  * `can_delete`, `parent_id`, and on variable products `variation_stock`
- * and `sale_summary`, one query per page) and the integrations' keys through
+ * and `sale_summary`, one query per page; on a searched page also
+ * `variation_sku_match`) and the integrations' keys through
  * `wc_products_list/row`. Only in list mode.
  *
  * Kept cheap on purpose: a page of 100 rows must not add a query per row.
@@ -68,6 +69,18 @@ final class Rows
     private static array $summaries = [];
 
     private static ?WP_REST_Request $summariesFor = null;
+
+    /**
+     * On a searched list page: the variable parents with a variation whose
+     * SKU contains a search token, keyed by parent id, and the request they
+     * were computed for. A parent the search found only through a variation
+     * name (an attribute value) is not among them.
+     *
+     * @var array<int, true>
+     */
+    private static array $skuMatches = [];
+
+    private static ?WP_REST_Request $skuMatchesFor = null;
 
     /** @var callable|null WooCommerce Brands' own response callback, once taken over */
     private $brandsCallback = null;
@@ -440,7 +453,57 @@ final class Rows
 
         self::summaries($ids);
 
+        $vars = $query->get(ListQuery::QUERY_VAR);
+        self::primeSkuMatches($ids, is_array($vars) && is_array($vars['search'] ?? null) ? $vars['search'] : []);
+
         return $posts;
+    }
+
+    /**
+     * Which of these parents have a variation whose SKU contains one of the
+     * search tokens, in one query. Without tokens nothing is recorded and
+     * the rows carry no `variation_sku_match`.
+     *
+     * @param  array<int, int>  $ids
+     * @param  array<int, string>  $tokens
+     */
+    private static function primeSkuMatches(array $ids, array $tokens): void
+    {
+        self::$skuMatches = [];
+        self::$skuMatchesFor = null;
+
+        $ids = array_values(array_filter(array_map('intval', $ids), static fn (int $id): bool => $id > 0));
+        $tokens = array_values(array_filter(array_map(static fn ($token): string => trim((string) $token), $tokens), static fn (string $token): bool => $token !== ''));
+
+        if ($ids === [] || $tokens === [] || ! wc_product_sku_enabled()) {
+            return;
+        }
+
+        global $wpdb;
+
+        $likes = [];
+
+        foreach ($tokens as $token) {
+            $likes[] = $wpdb->prepare('l.sku LIKE %s', '%'.$wpdb->esc_like($token).'%');
+        }
+
+        $in = implode(',', $ids);
+
+        // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        $parents = $wpdb->get_col(
+            "SELECT DISTINCT v.post_parent
+            FROM {$wpdb->posts} v
+            INNER JOIN {$wpdb->wc_product_meta_lookup} l ON l.product_id = v.ID
+            WHERE v.post_parent IN ({$in}) AND v.post_type = 'product_variation'
+                AND (".implode(' OR ', $likes).')'
+        );
+        // phpcs:enable
+
+        foreach (is_array($parents) ? $parents : [] as $parent) {
+            self::$skuMatches[(int) $parent] = true;
+        }
+
+        self::$skuMatchesFor = ListMode::request();
     }
 
     /**
@@ -901,7 +964,7 @@ final class Rows
     }
 
     /**
-     * @return array{variation_count: int, edit_link: string, can_edit: bool, can_delete: bool, parent_id: int, variation_stock?: array{out_of_stock: int, total: int}|null, sale_summary?: array{on_sale: int, scheduled: int, from: ?string, to: ?string}|null}
+     * @return array{variation_count: int, edit_link: string, can_edit: bool, can_delete: bool, parent_id: int, variation_stock?: array{out_of_stock: int, total: int}|null, sale_summary?: array{on_sale: int, scheduled: int, from: ?string, to: ?string}|null, variation_sku_match?: bool}
      */
     public static function row(WC_Product $product, ?bool $isVariation = null): array
     {
@@ -926,6 +989,10 @@ final class Rows
             $summary = self::summaries([$id])[$id] ?? null;
             $row['variation_stock'] = $summary['variation_stock'] ?? null;
             $row['sale_summary'] = $summary['sale_summary'] ?? null;
+
+            if (self::$skuMatchesFor !== null && self::$skuMatchesFor === ListMode::request()) {
+                $row['variation_sku_match'] = isset(self::$skuMatches[$id]);
+            }
         }
 
         return $row;
@@ -1024,6 +1091,10 @@ final class Rows
                         'out_of_stock' => ['type' => 'integer'],
                         'total' => ['type' => 'integer'],
                     ],
+                ],
+                'variation_sku_match' => [
+                    'type' => 'boolean',
+                    'description' => 'Variable products on a searched list page: whether a variation SKU contains a search token. Absent without a search.',
                 ],
                 'sale_summary' => [
                     'type' => ['object', 'null'],

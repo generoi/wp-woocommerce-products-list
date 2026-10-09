@@ -4,8 +4,8 @@ import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/
 import { MAX_SEARCH_EXPANDS, parentsMatchedByVariations, searchTokens, useSearchReveal, variationSearchMatches } from '../../resources/hierarchy/search-match';
 import type { ProductListItem, ProductRow } from '../../resources/types';
 
-function parent( id: number, name: string, sku = '', count = 24 ): ProductRow {
-	return normalizeProduct( { id, type: 'variable', name, sku, wc_products_list: { variation_count: count, edit_link: '', can_edit: true, can_delete: true, parent_id: 0 } } );
+function parent( id: number, name: string, sku = '', count = 24, skuMatch = true ): ProductRow {
+	return normalizeProduct( { id, type: 'variable', name, sku, wc_products_list: { variation_count: count, edit_link: '', can_edit: true, can_delete: true, parent_id: 0, variation_sku_match: skuMatch } } );
 }
 
 const icono = parent( 42857, 'Be Lenka Icono', 'BL-ICONO' );
@@ -24,6 +24,16 @@ describe( 'search-match', () => {
 		expect( parentsMatchedByVariations( [ icono ], searchTokens( 'lenka' ) ) ).toEqual( [] );
 		expect( parentsMatchedByVariations( [ icono ], searchTokens( 'bl-icono' ) ) ).toEqual( [] );
 		expect( parentsMatchedByVariations( [ simple as ProductRow ], searchTokens( '8585055472542' ) ) ).toEqual( [] );
+	} );
+
+	it( 'leaves a parent found through a variation name collapsed', () => {
+		// "El Naturalista - Black x BREJD, 38": the server matched the
+		// variation's title, no variation SKU contains the token.
+		const boot = parent( 37943, 'El Naturalista Chuva Rubber NA35', '50792', 28, false );
+		const unflagged = normalizeProduct( { ...boot, wc_products_list: { variation_count: 28, edit_link: '', can_edit: true, can_delete: true, parent_id: 0 } } );
+
+		expect( parentsMatchedByVariations( [ boot ], searchTokens( 'brejd' ) ) ).toEqual( [] );
+		expect( parentsMatchedByVariations( [ unflagged ], searchTokens( 'brejd' ) ) ).toEqual( [] );
 	} );
 
 	it( 'marks the variations whose SKU carries a token the parent does not', () => {

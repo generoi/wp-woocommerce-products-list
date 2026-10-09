@@ -40,10 +40,13 @@ tests_add_filter('muplugins_loaded', function (): void {
     $woocommerce = null;
 
     foreach ($candidates as $plugins) {
-        if (file_exists($plugins.'/woocommerce/woocommerce.php')) {
-            $woocommerce = $plugins.'/woocommerce/woocommerce.php';
+        // Newer wp-env names a zip-installed plugin after the zip.
+        foreach (['woocommerce', 'woocommerce.latest-stable'] as $directory) {
+            if (file_exists($plugins.'/'.$directory.'/woocommerce.php')) {
+                $woocommerce = $plugins.'/'.$directory.'/woocommerce.php';
 
-            break;
+                break 2;
+            }
         }
     }
 

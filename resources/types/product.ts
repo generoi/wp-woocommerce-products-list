@@ -84,6 +84,12 @@ export interface ListRowMeta {
 	 * site-local ISO strings), so a campaign is visible on the parent row.
 	 */
 	sale_summary?: VariationSaleSummary | null;
+	/**
+	 * Variable parents on a searched page: whether one of their variations'
+	 * SKU contains a search token. Absent without a search, and on servers
+	 * that do not compute it yet.
+	 */
+	variation_sku_match?: boolean;
 	[ extension: string ]: unknown;
 }
 

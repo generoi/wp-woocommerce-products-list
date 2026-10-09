@@ -295,6 +295,27 @@ class ListTest extends RestTestCase
         $this->assertSame([], $this->ids(['search_name_or_sku' => 'wool loafer']));
     }
 
+    public function test_searched_rows_tell_a_variation_sku_match_from_a_name_match(): void
+    {
+        $bySku = $this->variableProduct(['38', '39']);
+        $variation = wc_get_product($bySku->get_children()[0]);
+        $variation->set_sku('SCAN-8434550670741');
+        $variation->save();
+        $byName = $this->variableProduct(['38', '39']);
+        wp_update_post(['ID' => $byName->get_children()[0], 'post_title' => $byName->get_name().' - Black x SCAN, 38']);
+
+        $rows = fn (string $search): array => array_column($this->data($this->request('GET', '/wc/v3/products', ['search_name_or_sku' => $search, 'per_page' => 100, '_fields' => 'id,wc_products_list'])), Rows::KEY, 'id');
+
+        // Both parents are found; only the SKU match is worth expanding.
+        $found = $rows('scan');
+        $this->assertTrue($found[$bySku->get_id()]['variation_sku_match']);
+        $this->assertFalse($found[$byName->get_id()]['variation_sku_match']);
+
+        // Without a search the rows carry no flag.
+        $all = $rows('');
+        $this->assertArrayNotHasKey('variation_sku_match', $all[$bySku->get_id()]);
+    }
+
     public function test_list_mode_reads_skip_the_gallery(): void
     {
         // Attachment posts with a file path and mime type are all
