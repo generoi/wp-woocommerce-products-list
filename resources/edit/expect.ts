@@ -23,13 +23,21 @@
  *   stored title has the parent's name in front), `cost_of_goods_sold`
  *   (wc/v3's `{values, total_value}` object or a number, compared by
  *   number) and `images` (the row's list, which holds only the featured
- *   image as list rows drop the gallery; `[]` when the row has none).
+ *   image as list rows drop the gallery; `[]` when the row has none),
+ *   `attributes` and `default_attributes` (wc/v3's `{id, name, options}` /
+ *   `{id, name, option}` lists; the server compares them attribute by
+ *   attribute, a term option by slug or name).
+ *
+ * - whatever a registered field's `rest.expect( item, payload )` returns
+ *   (`registerField`, docs/extension-api.md): an extension that knows the
+ *   stored form of its own field (and reads it on the server through
+ *   `wc_products_list/log_value`) gets the same conflict check.
  *
  * Not sent: the relative stock key (`inventory_delta` is applied to the
- * stock as stored, so an order meanwhile is not a conflict), `attributes`
- * and extension fields other than `i18n.*` (no stored form the client
- * knows). Those stay "last write wins" behind the server's lock and
- * fresh-state checks; the log's old value shows what was overwritten.
+ * stock as stored, so an order meanwhile is not a conflict) and extension
+ * fields other than `i18n.*` without `rest.expect` (no stored form the
+ * client knows). Those stay "last write wins" behind the server's
+ * lock and fresh-state checks; the log's old value shows what was overwritten.
  * A description whose shortcode output changes between two renders is a
  * false conflict (409, nothing written; reload and apply again).
  */
@@ -70,6 +78,45 @@ const SCALAR_KEYS: ReadonlySet< string > = new Set( [
 	'slug',
 ] );
 
+/**
+ * A registered field's expected values for one row's write: log field path
+ * => the value the row loaded, in stored form; nothing when the payload
+ * does not write the field.
+ */
+export type ExpectProvider = ( item: ProductListItem, payload: Record< string, unknown > ) => Record< string, unknown > | null | undefined;
+
+const providers = new Map< string, ExpectProvider >();
+
+/** Set (or, without a provider, drop) the expected-values hook of a registered field (`rest.expect`). */
+export function setExpectProvider( fieldId: string, provider?: ExpectProvider ): void {
+	if ( provider ) {
+		providers.set( fieldId, provider );
+	} else {
+		providers.delete( fieldId );
+	}
+}
+
+function providedValues( item: ProductListItem, payload: Record< string, unknown >, expect: Record< string, unknown > ): void {
+	for ( const provider of providers.values() ) {
+		let values: unknown;
+
+		try {
+			values = provider( item, payload );
+		} catch {
+			// An extension's bug must not stop the save: its field just goes without a check.
+			continue;
+		}
+
+		if ( isPlainObject( values ) ) {
+			for ( const [ path, value ] of Object.entries( values ) ) {
+				if ( path !== '' && value !== undefined ) {
+					expect[ path ] = value;
+				}
+			}
+		}
+	}
+}
+
 /** The request key of gds-woo-i18n's translations and market prices (`i18n: {se: {name}}`). */
 const I18N_KEY = 'i18n';
 
@@ -77,6 +124,9 @@ const I18N_KEY = 'i18n';
 const RENDERED_TEXT_KEYS: ReadonlySet< string > = new Set( [ 'description', 'short_description' ] );
 
 const TERM_KEYS: ReadonlySet< string > = new Set( [ 'categories', 'tags', 'brands' ] );
+
+/** Attribute lists, sent as loaded: the server accepts wc/v3's form as well as the stored one (`Concurrency::attributesMatch()`). */
+const ATTRIBUTE_KEYS: ReadonlySet< string > = new Set( [ 'attributes', 'default_attributes' ] );
 
 type Scalar = string | number | boolean | null;
 
@@ -190,6 +240,17 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 			continue;
 		}
 
+		// Sent as loaded (wc/v3's `{id, name, options|option}` form): the server compares them field by field.
+		if ( ATTRIBUTE_KEYS.has( key ) ) {
+			const loaded = key in row ? row[ key ] : undefined;
+
+			if ( Array.isArray( loaded ) && loaded.every( isPlainObject ) ) {
+				expect[ key ] = loaded;
+			}
+
+			continue;
+		}
+
 		if ( key === 'images' ) {
 			const ids = key in row ? ( row[ key ] === null ? [] : termIds( row[ key ] ) ) : undefined;
 
@@ -241,6 +302,10 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 				}
 			}
 		}
+	}
+
+	if ( providers.size ) {
+		providedValues( item, payload, expect );
 	}
 
 	return Object.keys( expect ).length ? expect : null;

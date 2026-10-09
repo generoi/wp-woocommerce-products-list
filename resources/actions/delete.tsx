@@ -8,7 +8,8 @@ import { Button } from '@wordpress/components';
 import { useState } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
 import { __, _n, sprintf } from '@wordpress/i18n';
-import { runAction } from '../api/client';
+import { newBatchId, runAction } from '../api/client';
+import { allFailed, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import type { RenderModalProps } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
 import { useReturnFocus } from '../edit/focus';
@@ -28,12 +29,13 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 
 	const confirm = async () => {
 		const ids = idsOf( rows );
+		const batchId = newBatchId();
 
 		setBusy( true );
 		setError( null );
 
 		try {
-			const response = await runAction( 'delete', ids, {}, { fields: [ 'id' ] } );
+			const response = await runAction( 'delete', ids, {}, { fields: [ 'id' ], batchId } );
 			const { ok, failed } = summarize( response );
 
 			if ( ok.length ) {
@@ -56,6 +58,8 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 			}
 
 			if ( failed.length ) {
+				// The ids whose request failed have no row on the server: recorded as failed (the others it logged).
+				recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action: 'delete' } );
 				setBusy( false );
 				setError( failed.map( ( failure ) => `${ failure.id }: ${ failure.message }` ).join( ' ' ) );
 
@@ -65,6 +69,7 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 			onActionPerformed?.( rows );
 			closeModal?.();
 		} catch ( caught ) {
+			recordFailedRows( batchId, 'action', allFailed( ids, errorMessage( caught ) ), { action: 'delete' } );
 			setBusy( false );
 			setError( errorMessage( caught ) );
 		}

@@ -138,6 +138,13 @@ final class LogController
                         : new WP_Error('rest_invalid_param', __('batch_id must be a UUID v4.', 'wp-woocommerce-products-list'), ['status' => 400]),
                 ],
                 'source' => ['type' => 'string', 'enum' => Table::SOURCES, 'default' => 'bulk'],
+                'action' => [
+                    'type' => 'string',
+                    'description' => 'The row action the items were left out of (a registered action id, e.g. trash); the rows are logged under it. Default: update.',
+                    'validate_callback' => static fn ($value): bool|WP_Error => is_string($value) && isset(ActionsController::handlers()[$value])
+                        ? true
+                        : new WP_Error('rest_invalid_param', __('action must be a registered action id.', 'wp-woocommerce-products-list'), ['status' => 400]),
+                ],
                 'items' => [
                     'type' => 'array',
                     'required' => true,
@@ -170,7 +177,9 @@ final class LogController
      * POST /log/skipped: record the items a save left out on the client
      * (moved to the Trash meanwhile, no stock management, ...) as `skipped`
      * rows of the batch, one per item: `field` is the intended field when
-     * there is one, the context's `fields` lists them all. Only the user's own batch: a batch id that already holds
+     * there is one, the context's `fields` lists them all. `action` (a
+     * registered action id) logs them under that row action (a failed
+     * Trash reads "Move to Trash" in History), `update` otherwise. Only the user's own batch: a batch id that already holds
      * another user's rows is refused.
      */
     public function skipped(WP_REST_Request $request): WP_REST_Response|WP_Error
@@ -182,6 +191,7 @@ final class LogController
         }
 
         $items = (array) $request['items'];
+        $action = is_string($request['action']) && $request['action'] !== '' ? (string) $request['action'] : 'update';
         $ids = array_values(array_unique(array_map(static fn ($item): int => (int) ($item['id'] ?? 0), $items)));
         _prime_post_caches($ids, false, false);
 
@@ -213,6 +223,7 @@ final class LogController
             $rows[] = [
                 'batch_id' => $batchId,
                 'source' => (string) $request['source'],
+                'action' => $action,
                 'object_type' => $isVariation ? 'variation' : 'product',
                 'object_id' => $id,
                 'parent_id' => $isVariation ? (int) $post->post_parent : 0,

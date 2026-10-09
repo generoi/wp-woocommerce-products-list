@@ -11,6 +11,7 @@ import { getRevertPlan } from '../api/client';
 import { restoreFocus } from './focus';
 import type { FocusOrigin } from './focus';
 import { describeConflict, runRevert } from '../history/revert';
+import { historyNoticeAction } from './failed-rows';
 import { invalidateLog } from '../history/use-log';
 import { invalidateProducts } from '../store/products';
 
@@ -90,7 +91,9 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 					ok,
 					failed.length,
 					failed[ 0 ]?.message ?? __( 'Some items could not be put back.', 'wp-woocommerce-products-list' )
-				)
+				),
+				// The revert batch records what was not put back (runRevert posts the unanswered chunks as failed).
+				historyNoticeAction( outcome.revertBatchId ) ? { actions: [ historyNoticeAction( outcome.revertBatchId )! ] } : undefined
 			);
 		}
 	} catch ( error ) {

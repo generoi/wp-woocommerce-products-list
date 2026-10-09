@@ -1,7 +1,8 @@
 /** Copy products through the server action (WC_Admin_Duplicate_Product); the copies are drafts. */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { copy } from '@wordpress/icons';
-import { runAction } from '../api/client';
+import { newBatchId, runAction } from '../api/client';
+import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { invalidateProducts } from '../store/products';
 import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
@@ -24,8 +25,9 @@ export const createDuplicateAction: ActionFactory = ( context ) => {
 		isEligible: ( item ) => isRealRow( item ) && canEdit( item ) && item.status !== 'trash',
 		callback: ( items, { onActionPerformed } ) => {
 			const ids = idsOf( items );
+			const batchId = newBatchId();
 
-			void runAction( 'duplicate', ids, {}, { fields: rowFields( fields ) } )
+			void runAction( 'duplicate', ids, {}, { fields: rowFields( fields ), batchId } )
 				.then( ( response ) => {
 					const { ok, failed } = summarize( response );
 					const newIds = response.results.filter( ( result ) => result.ok ).map( ( result ) => Number( result.data?.new_id ) ).filter( ( id ) => Number.isInteger( id ) && id > 0 );
@@ -46,12 +48,19 @@ export const createDuplicateAction: ActionFactory = ( context ) => {
 					}
 
 					if ( failed.length ) {
-						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be duplicated.', 'wp-woocommerce-products-list' ) );
+						// The ids whose request failed have no row on the server: recorded as failed (the others it logged).
+						recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action: 'duplicate' } );
+						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be duplicated.', 'wp-woocommerce-products-list' ), { actions: failureNoticeActions( batchId, failed ) } );
 					}
 
 						onActionPerformed?.( items );
 				} )
-				.catch( ( error: unknown ) => notify.error( errorMessage( error ) ) );
+				.catch( ( error: unknown ) => {
+					const failed = allFailed( ids, errorMessage( error ) );
+
+					recordFailedRows( batchId, 'action', failed, { action: 'duplicate' } );
+					notify.error( errorMessage( error ), { actions: failureNoticeActions( batchId, failed ) } );
+				} );
 		},
 	};
 

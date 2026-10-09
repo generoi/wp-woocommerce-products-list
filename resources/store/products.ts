@@ -338,6 +338,31 @@ export function invalidateCounts(): void {
 	cache.invalidate( COUNTS_KEY );
 }
 
+/**
+ * The row of this id as the list loaded it (any cached product or
+ * variations page, or the expanded variations), for the expected values of
+ * a write made outside the editor (`window.wcProductsList.batchUpdate`).
+ */
+export function findCachedRow( id: number ): ProductListItem | undefined {
+	for ( const key of [ ...cache.keys( PRODUCTS_PREFIX ), ...cache.keys( VARIATIONS_PREFIX ) ] ) {
+		const row = cache.get< ListResult< ProductListItem > >( key )?.data?.items.find( ( item ) => item.id === id );
+
+		if ( row ) {
+			return row;
+		}
+	}
+
+	for ( const state of getChildrenState().values() ) {
+		const row = state.items.find( ( item ) => item.id === id );
+
+		if ( row ) {
+			return row;
+		}
+	}
+
+	return undefined;
+}
+
 /** Ids of the products in any cached product page. */
 export function cachedProductIds(): Set< number > {
 	const ids = new Set< number >();

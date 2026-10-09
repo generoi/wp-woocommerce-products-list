@@ -241,12 +241,15 @@ final class ActionsController
 
     /**
      * Actions that run while the product is open in the product editor:
-     * a copy leaves the original alone, and a product in the Trash cannot
-     * be opened in the editor. Every other action is refused there, as
-     * core's own Trash is (`wp_check_post_lock()` in edit.php): the
-     * editor's Update would put its values back over the change.
+     * a copy leaves the original alone. Every other action is refused
+     * there, as core's own Trash is (`wp_check_post_lock()` in edit.php):
+     * the editor's Update would put its values back over the change.
+     * Restore is refused too: an editor opened before the product went to
+     * the Trash keeps its lock fresh (heartbeat), and its Update posts the
+     * form's status and fields, so the Undo of a Trash would behave
+     * differently from the same row's quick edit and from History's undo.
      */
-    public const IGNORE_EDIT_LOCK = ['duplicate', 'restore'];
+    public const IGNORE_EDIT_LOCK = ['duplicate'];
 
     /**
      * The result and the `skipped` log row of an id refused by a

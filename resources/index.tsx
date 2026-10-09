@@ -1,18 +1,16 @@
 import { dispatch } from '@wordpress/data';
 import domReady from '@wordpress/dom-ready';
 import { createRoot } from '@wordpress/element';
-import { doAction } from '@wordpress/hooks';
-import { batchProducts, batchVariationsAcross, newBatchId, toRow } from './api/client';
 import { installGlobalErrorReporting } from './api/report-error';
 import { App } from './app';
 import { createExtensionApi } from './extensions/api';
-import { ACTIONS } from './extensions/hooks';
+import { runBatchUpdate } from './extensions/batch-update';
+import type { BatchUpdateOptions } from './extensions/batch-update';
 import { getSettings } from './settings';
 import { cache } from './store/query-cache';
 import { COUNTS_KEY, invalidateProducts, patchItems, PRODUCTS_PREFIX, VARIATIONS_PREFIX } from './store/products';
 import { getCurrentRows } from './store/rows';
-import type { BatchItemError, BatchResult, BatchUpdate, ProductListItem } from './types';
-import { isBatchItemError } from './types';
+import type { BatchResult, BatchUpdate } from './types';
 import { createNoticesApi } from './ui/use-notices';
 import './style.scss';
 
@@ -45,52 +43,13 @@ async function refresh( options: { counts?: boolean } = {} ): Promise< void > {
 }
 
 /**
- * Save through the same path as bulk edit: variations first (one request
- * per parent), then parents, all under one batch id. edit/save.ts builds
- * on the same client calls with validation and progress on top.
+ * Save through the same runner as bulk edit (extensions/batch-update.ts):
+ * the list's indicator, row locks and leave guard while it runs, expected
+ * values from the loaded rows, the planned header and the failed rows
+ * recorded in History.
  */
-async function batchUpdate( update: BatchUpdate, options: { source?: string } = {} ): Promise< BatchResult > {
-	const batchId = newBatchId();
-	const source = ( options.source === 'bulk' || options.source === 'extension' ? options.source : 'quick' ) as 'quick' | 'bulk' | 'extension';
-	const result: BatchResult = { updated: [], errors: [], batchId };
-	const collect = ( rows: Array< ProductListItem | BatchItemError > ) => {
-		for ( const row of rows ) {
-			if ( isBatchItemError( row ) ) {
-				result.errors.push( { id: row.id, message: row.error.message, code: row.error.code } );
-			} else {
-				result.updated.push( row );
-			}
-		}
-	};
-
-	try {
-		// Every variation of every parent in one cross-parent request per 100 rows.
-		const variationRows = Object.entries( update.variations ?? {} ).flatMap( ( [ parentId, rows ] ) => rows.map( ( row ) => ( { ...row, parent_id: Number( parentId ) } ) ) );
-
-		if ( variationRows.length ) {
-			const parentOf = new Map( variationRows.map( ( row ) => [ row.id, row.parent_id ] ) );
-			const response = await batchVariationsAcross( variationRows, { batchId, source } );
-
-			collect( ( response.update ?? [] ).map( ( row ) => ( isBatchItemError( row ) ? row : toRow( row, parentOf.get( row.id ) ) ) ) );
-		}
-
-		if ( update.products?.length ) {
-			const response = await batchProducts( update.products, { batchId, source } );
-			collect( ( response.update ?? [] ).map( ( row ) => ( isBatchItemError( row ) ? row : toRow( row ) ) ) );
-		}
-	} catch ( error ) {
-		const message = error instanceof Error ? error.message : String( error );
-		const pending = [ ...( update.products ?? [] ), ...Object.values( update.variations ?? {} ).flat() ].filter( ( row ) => ! result.updated.some( ( u ) => u.id === row.id ) );
-		pending.forEach( ( row ) => result.errors.push( { id: row.id, message } ) );
-	}
-
-	if ( result.updated.length ) {
-		patchItems( result.updated );
-	}
-
-	doAction( ACTIONS.saved, result, { source } );
-
-	return result;
+function batchUpdate( update: BatchUpdate, options: BatchUpdateOptions = {} ): Promise< BatchResult > {
+	return runBatchUpdate( update, options );
 }
 
 // createExtensionApi() assigns window.wcProductsList and fires

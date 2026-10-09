@@ -1,7 +1,8 @@
 /** Restore from the Trash (wp_untrash_post → the status it had). */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { backup } from '@wordpress/icons';
-import { runAction } from '../api/client';
+import { newBatchId, runAction } from '../api/client';
+import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { invalidateProducts, removeItems } from '../store/products';
 import type { ProductAction } from '../types';
 import type { ActionFactory } from './context';
@@ -24,9 +25,11 @@ export const createRestoreAction: ActionFactory = ( { settings } ) => {
 		callback: ( items, { onActionPerformed } ) => {
 			const ids = idsOf( items );
 
+			const batchId = newBatchId();
+
 			removeItems( ids );
 
-			void runAction( 'restore', ids, {}, { fields: [ 'id', 'status' ] } )
+			void runAction( 'restore', ids, {}, { fields: [ 'id', 'status' ], batchId } )
 				.then( ( response ) => {
 					const { ok, failed } = summarize( response );
 
@@ -43,14 +46,18 @@ export const createRestoreAction: ActionFactory = ( { settings } ) => {
 					}
 
 					if ( failed.length ) {
-						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be restored.', 'wp-woocommerce-products-list' ) );
+						recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action: 'restore' } );
+						notify.error( failed[ 0 ]?.message ?? __( 'The product could not be restored.', 'wp-woocommerce-products-list' ), { actions: failureNoticeActions( batchId, failed ) } );
 					}
 
 					onActionPerformed?.( items );
 				} )
 				.catch( ( error: unknown ) => {
+					const failed = allFailed( ids, errorMessage( error ) );
+
 					invalidateProducts( { counts: true } );
-					notify.error( errorMessage( error ) );
+					recordFailedRows( batchId, 'action', failed, { action: 'restore' } );
+					notify.error( errorMessage( error ), { actions: failureNoticeActions( batchId, failed ) } );
 				} );
 		},
 	};

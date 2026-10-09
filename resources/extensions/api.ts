@@ -22,6 +22,7 @@ import type {
 	Settings,
 } from '../types';
 import { ACTIONS, FILTERS, HOOK_NAMESPACE, hookNamespace } from './hooks';
+import { setExpectProvider } from '../edit/expect';
 
 export type QueryParamsCallback = ( params: QueryParams, context: QueryContext ) => QueryParams;
 
@@ -157,8 +158,11 @@ export function getQuickEditTabs(): QuickEditTab[] {
 
 export function registerField( field: LooseProductField ): void {
 	const normalized = normalizeRegisteredField( field );
+	const expect = normalized.rest.expect;
 
 	registry.fields.set( normalized.id, normalized );
+	// Its expected values go with every write of the field (edit/expect.ts), the editor's and batchUpdate's alike.
+	setExpectProvider( normalized.id, typeof expect === 'function' ? ( item, payload ) => expect( item, payload ) : undefined );
 	bump();
 }
 
@@ -219,6 +223,7 @@ export function useRegistryVersion(): number {
 
 /** Tests: empty the registries and forget the api. */
 export function resetRegistry(): void {
+	registry.fields.forEach( ( _field, id ) => setExpectProvider( id ) );
 	registry.fields.clear();
 	registry.actions.clear();
 	registry.queryCallbacks.length = 0;

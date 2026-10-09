@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { batchProducts, batchVariationsAcross, closeBatch, REQUEST_FAILED_KEY } from '../../resources/api/client';
+import { batchProducts, batchVariationsAcross, closeBatch, logSkipped, REQUEST_FAILED_KEY } from '../../resources/api/client';
 import { hydrateSelection } from '../../resources/edit/hydrate';
 import { isRowPending } from '../../resources/store/save-activity';
 import type { ProductListItem } from '../../resources/types';
@@ -31,6 +31,7 @@ vi.mock( '../../resources/api/client', async ( importOriginal ) => {
 		batchVariationsAcross: vi.fn(),
 		closeBatch: vi.fn( async () => undefined ),
 		newBatchId: () => 'batch-x',
+		logSkipped: vi.fn( async () => undefined ),
 		toRow: ( row: unknown ) => row,
 	};
 } );
@@ -116,6 +117,46 @@ describe( 'optimisticBatch', () => {
 		// Nothing eligible: no request, no notice.
 		expect( await optimisticBatch( [ simple( 3, { featured: true } ) ], { patch: ( item ) => ( { id: item.id, featured: true } ), refetch: false, success: () => '', eligible: ( item ) => item.featured !== true } ) ).toEqual( [] );
 		expect( vi.mocked( batchProducts ) ).toHaveBeenCalledTimes( 1 );
+	} );
+
+	it( 'records rows whose request failed as failed in the batch, and offers to select them and open the batch in History', async () => {
+		setSettings( editSettings( { links: { ...editSettings().links, history: '/wp/wp-admin/admin.php?page=wc-products-list-history' } } ) );
+		vi.mocked( logSkipped ).mockClear();
+		// Enable on three variations; the one request gets no answer (TypeError "Failed to fetch"), and the re-read fails too.
+		vi.mocked( batchVariationsAcross ).mockRejectedValueOnce( Object.assign( new Error( 'Could not get a valid response from the server.' ), { code: 'fetch_error' } ) );
+		vi.mocked( hydrateSelection ).mockRejectedValue( new Error( 'offline' ) );
+
+		const ok = await optimisticBatch( [ variation( 86980, 86979, { status: 'private' } ), variation( 86981, 86979, { status: 'private' } ), variation( 86982, 86979, { status: 'private' } ) ], {
+			patch: ( item ) => ( { id: item.id, status: 'publish' } ),
+			refetch: false,
+			success: () => '',
+		} );
+
+		expect( ok ).toEqual( [] );
+		expect( logSkipped ).toHaveBeenCalledWith(
+			'batch-x',
+			'action',
+			[ 86980, 86981, 86982 ].map( ( id ) => ( { id, reason: 'failed', fields: [ 'status' ], message: expect.stringContaining( 'Could not get a valid response from the server.' ) } ) )
+		);
+
+		const [ message, options ] = vi.mocked( notify.error ).mock.calls[ 0 ] as unknown as [ string, { actions: Array< { label: string; url?: string } > } ];
+
+		expect( message ).toMatch( /^3 items could not be updated/ );
+		expect( options.actions.map( ( action ) => action.label ) ).toEqual( [ 'Select the 3 failed', 'View in History' ] );
+		expect( options.actions[ 1 ]?.url ).toContain( 'batch=batch-x' );
+	} );
+
+	it( 'does not post the rows the server refused and logged itself (conflict, lock, Trash, deleted, editor open)', async () => {
+		vi.mocked( logSkipped ).mockClear();
+		vi.mocked( batchProducts ).mockImplementationOnce( ( async ( update: Array< Record< string, unknown > > ) => ( {
+			update: update.map( ( row ) =>
+				row.id === 1 ? { id: 1, error: { code: 'wc_products_list_locked', message: 'Locked.', data: { status: 409 } } } : { id: row.id as number, error: { code: 'woocommerce_rest_cannot_edit', message: 'No.', data: { status: 403 } } }
+			),
+		} ) ) as never );
+
+		await optimisticBatch( [ simple( 1 ), simple( 2 ) ], { patch: ( item ) => ( { id: item.id, featured: true } ), refetch: false, success: () => '' } );
+
+		expect( logSkipped ).toHaveBeenCalledWith( 'batch-x', 'action', [ { id: 2, reason: 'failed', fields: [ 'featured' ], message: 'You are not allowed to edit this item.' } ] );
 	} );
 
 	it( 'keeps the requests that went through when one among several fails offline: only its rows are settled, the rest keep Undo', async () => {

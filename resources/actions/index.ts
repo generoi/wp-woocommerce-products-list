@@ -11,6 +11,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { actionRequestCount, closeBatch, newBatchId, runAction } from '../api/client';
 import type { ActionResponse, ActionResult } from '../api/client';
 import { isEditorHostedAction } from '../edit/hosted-actions';
+import { allFailed, failureNoticeActions, recordFailedRows, unansweredResults } from '../edit/failed-rows';
 import { undoBatch } from '../edit/undo';
 import { canUndo } from '../edit/log-access';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
@@ -145,8 +146,13 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 	try {
 		response = await runAction( action, ids, args, { fields, batchId, ...( planned ? { planned } : {} ), onProgress: progress } );
 	} catch ( error ) {
+		const failedAll = allFailed( ids, errorMessage( error ) );
+
+		// Not one request answered: the attempt and its rows are still recorded in the batch, as failed.
+		recordFailedRows( batchId, 'action', failedAll, { action } );
+
 		if ( ! options.inlineErrors ) {
-			notify.error( errorMessage( error ) );
+			notify.error( errorMessage( error ), own ? { actions: failureNoticeActions( batchId, failedAll ) } : undefined );
 		}
 
 		if ( options.inlineErrors && ! ( error instanceof Error ) ) {
@@ -167,6 +173,11 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 	}
 
 	const { ok, failed } = summarize( response );
+
+	if ( failed.length ) {
+		// The ids whose request failed have no row on the server (it logged every result it gave): recorded as failed.
+		recordFailedRows( batchId, 'action', unansweredResults( response.results ), { action } );
+	}
 
 	if ( response.items.length ) {
 		patchItems( response.items );
@@ -209,7 +220,8 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 						failed.length,
 						failed[ 0 ]?.message ?? ''
 				  )
-				: failed[ 0 ]?.message ?? ''
+				: failed[ 0 ]?.message ?? '',
+			{ actions: failureNoticeActions( batchId, failed ) }
 		);
 
 		return response;

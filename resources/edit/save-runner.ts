@@ -608,7 +608,15 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 				const original = byId.get( failed.id );
 
 				seen.add( failed.id );
-				result.errors.push( { id: failed.id, message: humanizeError( failed.error.code, failed.error.message ), code: failed.error.code } );
+				const conflict = isConflictCode( failed.error.code ) && typeof failed.error.data === 'object' && failed.error.data !== null;
+
+				// A conflict keeps its data (the fields, the values stored now, the values the edit was based on): the editor shows them.
+				result.errors.push( {
+					id: failed.id,
+					message: humanizeError( failed.error.code, failed.error.message ),
+					code: failed.error.code,
+					...( conflict ? { data: failed.error.data as Record< string, unknown > } : {} ),
+				} );
 
 				if ( original ) {
 					patches.push( original.snapshot as Partial< ProductListItem > & { id: number } );

@@ -163,4 +163,16 @@ describe( 'logSkipped with failed rows', () => {
 		expect( sent[ 1 ]?.[ 0 ] ).toEqual( { id: 6, reason: 'other', fields: [ 'featured' ], message: 'Not saved: You are probably offline.' } );
 		expect( sent[ 1 ]?.[ 1 ] ).toEqual( { id: 8, reason: 'trashed' } );
 	} );
+
+	it( 'sends the row action the rows were attempted with, and none by default', async () => {
+		fetchMock.mockResolvedValue( {} );
+
+		await logSkipped( '00000000-0000-4000-8000-000000000000', 'action', [ { id: 6, reason: 'failed' } ], { action: 'trash' } );
+		await logSkipped( '00000000-0000-4000-8000-000000000000', 'action', [ { id: 7, reason: 'failed' } ] );
+
+		const data = fetchMock.mock.calls.map( ( [ options ] ) => ( options as { data: Record< string, unknown > } ).data );
+
+		expect( data[ 0 ] ).toMatchObject( { source: 'action', action: 'trash' } );
+		expect( data[ 1 ] ).not.toHaveProperty( 'action' );
+	} );
 } );

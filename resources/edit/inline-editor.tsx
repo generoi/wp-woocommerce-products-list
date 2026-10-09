@@ -51,7 +51,7 @@ import { ChangeSummary, describeSiteDateTime } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
 import { measureEditorReady } from './editor-panel';
-import { fieldOfErrorCode, isGoneCode, isServerLoggedCode } from './errors';
+import { editorConflictMessage, fieldOfErrorCode, isConflictCode, isGoneCode, isServerLoggedCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
 import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
 import type { StagedTool } from './language-tools';
@@ -664,6 +664,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ invalidFields, setInvalidFields ] = useState< Array< { field: string; message: string } > >( [] );
 	const [ acknowledged, setAcknowledged ] = useState< string | null >( null );
 	const [ failedIds, setFailedIds ] = useState< Set< number > | null >( null );
+	// Rows the last Update was refused on because someone else changed them meanwhile (409 wc_products_list_conflict):
+	// a retry writes the user's values over that change, so it waits for an explicit yes (`overwriteConfirmed`).
+	const [ conflictIds, setConflictIds ] = useState< ReadonlySet< number > >( () => new Set() );
+	const [ overwriteConfirmed, setOverwriteConfirmed ] = useState( false );
 	// Rows an Update held back because someone else saved them meanwhile: a held-back variable parent retries with all its variations.
 	const [ heldBack, setHeldBack ] = useState< ReadonlySet< number > >( () => new Set() );
 	const [ saving, setSaving ] = useState( false );
@@ -1401,6 +1405,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return;
 		}
 
+		// Someone else changed rows of the last Update meanwhile: a retry writes over that only after the explicit yes.
+		if ( failedIds && ! overwriteConfirmed && Array.from( failedIds ).some( ( id ) => conflictIds.has( id ) ) ) {
+			focusWithin( rootRef.current, '.wc-pl-edit__overwrite input' );
+
+			return;
+		}
+
 		if ( pendingCount === 0 && stagedCount === 0 ) {
 			if ( state.hasInput ) {
 				notify.info( __( 'Nothing changed: the values equal the current ones.', 'wp-woocommerce-products-list' ) );
@@ -1822,14 +1833,24 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				setErrors(
 					result.errors.map( ( error ) => {
 						const field = goneSet.has( error.id ) ? undefined : fieldOfErrorCode( error.code );
+						let message = error.message;
+
+						if ( goneSet.has( error.id ) ) {
+							message = __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' );
+						} else if ( isConflictCode( error.code ) ) {
+							// What the other change stored, next to the form that still holds the user's values.
+							message = editorConflictMessage( error.data, ( path ) => fieldLabels[ path ] ?? path, bulk );
+						}
 
 						return {
 							id: error.id,
 							...( field && visibleIds.has( field ) ? { field } : {} ),
-							message: goneSet.has( error.id ) ? __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' ) : error.message,
+							message,
 						};
 					} )
 				);
+				setConflictIds( new Set( result.errors.filter( ( error ) => isConflictCode( error.code ) && ! goneSet.has( error.id ) ).map( ( error ) => error.id ) ) );
+				setOverwriteConfirmed( false );
 
 				if ( ! bulk && fieldErrors.length ) {
 					const flagged = fieldErrors.map( ( entry ) => ( { field: entry.field, message: entry.error.message } ) );
@@ -2187,6 +2208,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	}, [ warnings, targetsForValidation ] );
 	// Staged tools a failed Update left are still to run: Update retries them.
 	const failedButNothingToRetry = failedIds !== null && retryable === 0 && stagedCount === 0;
+	// The retry would write over another user's change: it needs the confirmation below the problem list.
+	const conflictCount = failedIds ? Array.from( failedIds ).filter( ( id ) => conflictIds.has( id ) ).length : 0;
+	const awaitingOverwrite = conflictCount > 0 && ! overwriteConfirmed;
 	const nothingToWrite = plan !== null && plan.writes.length === 0;
 	// The list of rows is fixed once a save has run.
 	const listFrozen = frozenRows !== null;
@@ -2208,6 +2232,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		if ( failedIds && heldBack.size && Array.from( failedIds ).every( ( id ) => heldBack.has( id ) ) ) {
 			/* translators: %d: number of rows saved by someone else meanwhile */
 			return sprintf( _n( 'Update the %d changed item too', 'Update the %d changed items too', retryable, 'wp-woocommerce-products-list' ), retryable );
+		}
+
+		if ( failedIds && conflictCount === retryable && ! bulk ) {
+			return __( 'Overwrite with my values', 'wp-woocommerce-products-list' );
+		}
+
+		if ( failedIds && conflictCount === retryable ) {
+			/* translators: %d: number of rows someone else changed meanwhile */
+			return sprintf( _n( 'Apply the edits to the %d changed item', 'Apply the edits to the %d changed items', retryable, 'wp-woocommerce-products-list' ), retryable );
 		}
 
 		if ( failedIds ) {
@@ -2261,7 +2294,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	} )();
 
 	// Busy buttons stay focusable (a disabled button drops keyboard focus to <body>); the handlers ignore the extra press.
-	const saveBlocked = saving || loading || needsEditOthers || ( ! failedButNothingToRetry && stagedCount === 0 && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
+	const saveBlocked = saving || loading || needsEditOthers || awaitingOverwrite || ( ! failedButNothingToRetry && stagedCount === 0 && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
 	const showNext = ! bulk && nextRow !== null && ! failedIds;
 	// "Save & next" with nothing typed just moves on; with edits it saves them first.
 	const nextBlocked = saving || loading || needsEditOthers || nothingToWrite;
@@ -2729,6 +2762,28 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</div>
 				) : null }
 				<EditErrors errors={ errors } items={ targetsForValidation } names={ errorNames } fieldLabels={ fieldLabels } onFocusField={ focusField } />
+				{ conflictCount > 0 && ! saving ? (
+					<CheckboxControl
+						className="wc-pl-edit__overwrite"
+						label={
+							bulk
+								? sprintf(
+										/* translators: %d: number of rows someone else changed meanwhile */
+										_n(
+											'Apply my edits to the %d item someone else changed, on the values stored now',
+											'Apply my edits to the %d items someone else changed, on the values stored now',
+											conflictCount,
+											'wp-woocommerce-products-list'
+										),
+										conflictCount
+								  )
+								: __( 'Write my values over the other change', 'wp-woocommerce-products-list' )
+						}
+						checked={ overwriteConfirmed }
+						onChange={ ( checked: boolean ) => setOverwriteConfirmed( checked ) }
+						__nextHasNoMarginBottom
+					/>
+				) : null }
 				<div hidden>
 					{ invalidFields.map( ( entry ) => (
 						<span key={ entry.field } id={ invalidMessageId( entry.field ) }>

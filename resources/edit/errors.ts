@@ -2,7 +2,7 @@
  * Human text for the wc/v3 error codes a save can come back with. The raw
  * message ("Invalid ID.") stays in the log; the modal shows what it means.
  */
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 
 const MESSAGES: Record< string, () => string > = {
 	woocommerce_rest_product_invalid_id: () => __( 'This product no longer exists (it was deleted).', 'wp-woocommerce-products-list' ),
@@ -18,12 +18,12 @@ const MESSAGES: Record< string, () => string > = {
 	rest_invalid_param: () => __( 'A value was rejected by WooCommerce.', 'wp-woocommerce-products-list' ),
 	missing_result: () => __( 'WooCommerce returned no result for this item.', 'wp-woocommerce-products-list' ),
 	// The server's concurrency checks (docs/contracts.md §3.6).
-	wc_products_list_conflict: () => __( 'Changed by someone else since it was loaded, so it was not saved. It now shows the current values: check them and apply the edits again.', 'wp-woocommerce-products-list' ),
+	wc_products_list_conflict: () => __( 'Changed by someone else since it was loaded, so it was not saved. The list now shows the stored values: check them and apply the change again.', 'wp-woocommerce-products-list' ),
 	wc_products_list_locked: () => __( 'Another save of this item was running, so it was not saved. Try again in a moment.', 'wp-woocommerce-products-list' ),
 	wc_products_list_trashed: () => __( 'This item is in the Trash, so it was not saved.', 'wp-woocommerce-products-list' ),
 	wc_products_list_deleted: () => __( 'Deleted meanwhile (another tab or user); nothing was saved for this item.', 'wp-woocommerce-products-list' ),
 	// The server's message names the user (Concurrency::editingError) and is shown instead; this is the fallback.
-	wc_products_list_editing: () => __( 'Another user is editing this product in the product editor; nothing was saved for this item.', 'wp-woocommerce-products-list' ),
+	wc_products_list_editing: () => __( 'This product is open in the product editor; nothing was done to this item.', 'wp-woocommerce-products-list' ),
 };
 
 /** Per-item refusals of the server's concurrency checks: the server logs them as skipped rows itself (not posted to /log/skipped again). */
@@ -36,6 +36,81 @@ export function isServerLoggedCode( code: string | undefined ): boolean {
 /** Whether a row was refused because it changed meanwhile (reload it, then apply again). */
 export function isConflictCode( code: string | undefined ): boolean {
 	return code === 'wc_products_list_conflict';
+}
+
+/** The data of a `wc_products_list_conflict` (docs/contracts.md §3.6): the fields, their values now and the values the write was based on. */
+export interface ConflictData {
+	fields: string[];
+	current: Record< string, unknown >;
+	expected: Record< string, unknown >;
+}
+
+function asRecord( value: unknown ): Record< string, unknown > {
+	return typeof value === 'object' && value !== null && ! Array.isArray( value ) ? ( value as Record< string, unknown > ) : {};
+}
+
+/** The conflict data of an error's `data`, or null when it carries none. */
+export function conflictDataOf( data: unknown ): ConflictData | null {
+	const record = asRecord( data );
+	const current = asRecord( record.current );
+	const fields = Array.isArray( record.fields ) ? record.fields.filter( ( field ): field is string => typeof field === 'string' ) : Object.keys( current );
+
+	return fields.length ? { fields, current, expected: asRecord( record.expected ) } : null;
+}
+
+function shownValue( value: unknown ): string {
+	if ( value === null || value === undefined || value === '' ) {
+		return '—';
+	}
+
+	return typeof value === 'object' ? JSON.stringify( value ) : String( value );
+}
+
+/**
+ * The other change, field by field: "Regular price 30 (was 12 when loaded)".
+ * `label` maps a field path to its label.
+ */
+export function describeConflictValues( conflict: ConflictData, label: ( path: string ) => string = ( path ) => path ): string {
+	return conflict.fields
+		.map( ( path ) =>
+			path in conflict.expected
+				? sprintf(
+						/* translators: 1: field label, 2: the value stored now, 3: the value when the editor loaded it */
+						__( '%1$s %2$s (was %3$s when loaded)', 'wp-woocommerce-products-list' ),
+						label( path ),
+						shownValue( conflict.current[ path ] ),
+						shownValue( conflict.expected[ path ] )
+				  )
+				: sprintf(
+						/* translators: 1: field label, 2: the value stored now */
+						__( '%1$s %2$s', 'wp-woocommerce-products-list' ),
+						label( path ),
+						shownValue( conflict.current[ path ] )
+				  )
+		)
+		.join( '; ' );
+}
+
+/**
+ * The editor's line for a row refused with `wc_products_list_conflict`: what
+ * the other change stored, and that the form still holds the user's values,
+ * which only an explicit overwrite writes (never a plain retry).
+ */
+export function editorConflictMessage( data: unknown, label: ( path: string ) => string, bulk: boolean ): string {
+	const conflict = conflictDataOf( data );
+	const stored = conflict
+		? sprintf(
+				/* translators: %s: the fields with the values stored now, e.g. "Regular price 30 (was 12 when loaded)" */
+				__( 'Someone else changed it since it was loaded: %s. Nothing was saved for it.', 'wp-woocommerce-products-list' ),
+				describeConflictValues( conflict, label )
+		  )
+		: __( 'Someone else changed it since it was loaded. Nothing was saved for it.', 'wp-woocommerce-products-list' );
+
+	return `${ stored } ${
+		bulk
+			? __( 'Your edits are kept: confirm below to apply them to the values stored now, or cancel to keep the other change.', 'wp-woocommerce-products-list' )
+			: __( 'The form still shows your values: confirm below to write them over the other change, or cancel to keep it.', 'wp-woocommerce-products-list' )
+	}`;
 }
 
 const SKU_CODES: ReadonlySet< string > = new Set( [ 'product_invalid_sku', 'woocommerce_rest_product_invalid_sku' ] );
@@ -92,6 +167,11 @@ const GONE_CODES: ReadonlySet< string > = new Set( [
 /** Whether an error code means the row no longer exists (nothing to retry; the row leaves the list). */
 export function isGoneCode( code: string | undefined ): boolean {
 	return code !== undefined && GONE_CODES.has( code );
+}
+
+/** A row a save of this tab still holds, so a write from elsewhere in the tab (an extension's batchUpdate) was not sent. */
+export function lockedMessage(): string {
+	return __( 'This item is still being saved in this tab, so it was not sent. Try again when that save is done.', 'wp-woocommerce-products-list' );
 }
 
 /** The message of a row action's per-id result: a lock held by a save of the row reads like the save's own. */

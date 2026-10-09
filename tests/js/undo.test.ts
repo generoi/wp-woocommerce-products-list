@@ -7,6 +7,8 @@ const getRevertPlan = vi.fn();
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
 vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: () => 'revert-1',
+	logSkipped: vi.fn( async () => undefined ),
+	isRequestFailure: ( data: unknown ) => typeof data === 'object' && data !== null && ( data as { wcpl_request_failed?: unknown } ).wcpl_request_failed === true,
 	revertBatch: ( ...args: unknown[] ) => revertBatch( ...args ),
 	getRevertPlan: ( ...args: unknown[] ) => getRevertPlan( ...args ),
 	closeBatch: vi.fn( async () => undefined ),
@@ -15,6 +17,9 @@ vi.mock( '../../resources/store/products', () => ( { invalidateProducts: vi.fn()
 vi.mock( '../../resources/history/use-log', () => ( { invalidateLog: vi.fn() } ) );
 
 const { revertingMessage, undoBatch, undoNoticeId } = await import( '../../resources/edit/undo' );
+const { logSkipped } = await import( '../../resources/api/client' );
+const { setSettings } = await import( '../../resources/settings' );
+const { editSettings } = await import( './edit-fixtures' );
 
 afterEach( () => {
 	vi.clearAllMocks();
@@ -53,10 +58,16 @@ describe( 'undoBatch', () => {
 			return { batch_id: 'revert-1', results: options.ids.map( ( id ) => ( { id, ok: true } ) ), items: [] };
 		} );
 
+		setSettings( editSettings( { links: { ...editSettings().links, history: '/wp/wp-admin/admin.php?page=wc-products-list-history' } } ) );
 		await undoBatch( 'batch-p' );
+		setSettings( undefined );
 
 		expect( revertBatch ).toHaveBeenCalledTimes( 3 );
-		expect( notify.error ).toHaveBeenCalledWith( expect.stringMatching( /^4 put back, 2 failed: Could not get a valid response from the server\. It may have been saved anyway/ ) );
+		// The notice links the revert batch in History, which records the objects of the lost request as failed.
+		expect( notify.error ).toHaveBeenCalledWith( expect.stringMatching( /^4 put back, 2 failed: Could not get a valid response from the server\. It may have been saved anyway/ ), {
+			actions: [ { label: 'View in History', url: expect.stringContaining( 'batch=revert-1' ) } ],
+		} );
+		expect( logSkipped ).toHaveBeenCalledWith( 'revert-1', 'revert', [ expect.objectContaining( { id: 3, reason: 'failed' } ), expect.objectContaining( { id: 4, reason: 'failed' } ) ] );
 		expect( notify.success ).not.toHaveBeenCalled();
 		expect( invalidateProducts ).toHaveBeenCalled();
 		expect( invalidateLog ).toHaveBeenCalled();

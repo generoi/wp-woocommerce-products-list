@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { closeBatch, runAction } from '../../resources/api/client';
+import { closeBatch, logSkipped, runAction } from '../../resources/api/client';
 import { trashRows } from '../../resources/actions/trash';
 import { notify } from '../../resources/actions/notices';
 import { removeItems } from '../../resources/store/products';
@@ -10,6 +10,8 @@ import { simple } from './edit-fixtures';
 vi.mock( '../../resources/api/client', () => ( {
 	runAction: vi.fn(),
 	newBatchId: () => 'trash-1',
+	logSkipped: vi.fn( async () => undefined ),
+	isRequestFailure: ( data: unknown ) => typeof data === 'object' && data !== null && ( data as { wcpl_request_failed?: unknown } ).wcpl_request_failed === true,
 	closeBatch: vi.fn( async () => undefined ),
 	// 20 ids per request.
 	actionRequestCount: ( _action: string, count: number ) => Math.ceil( count / 20 ),
@@ -34,7 +36,7 @@ describe( 'trashRows', () => {
 			return {
 				batch_id: 'trash-1',
 				items: [],
-				results: ids.map( ( id, index ) => ( index >= 20 && index < 40 ? { id, ok: false, code: 'fetch_error', message: 'You are probably offline.' } : { id, ok: true } ) ),
+				results: ids.map( ( id, index ) => ( index >= 20 && index < 40 ? { id, ok: false, code: 'fetch_error', message: 'You are probably offline.', data: { wcpl_request_failed: true, status: 0 } } : { id, ok: true } ) ),
 			} as ActionResponse;
 		} );
 
@@ -47,7 +49,14 @@ describe( 'trashRows', () => {
 		expect( vi.mocked( runAction ).mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { batchId: 'trash-1', planned: 45 } );
 		expect( closeBatch ).toHaveBeenCalledWith( 'trash-1' );
 		expect( notify.success ).toHaveBeenCalledWith( '25 products moved to the Trash.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
-		expect( notify.error ).toHaveBeenCalledWith( 'You are probably offline.' );
+		// The 20 ids of the failed request have no row on the server: recorded as failed, and offered for another try.
+		expect( notify.error ).toHaveBeenCalledWith( 'You are probably offline.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Select the 20 failed' } ) ] } ) );
+		expect( logSkipped ).toHaveBeenCalledWith(
+			'trash-1',
+			'action',
+			rows.slice( 20, 40 ).map( ( row ) => ( { id: row.id, reason: 'failed', message: 'You are probably offline.' } ) ),
+			{ action: 'trash' }
+		);
 		listener.mockRestore();
 	} );
 
@@ -59,6 +68,8 @@ describe( 'trashRows', () => {
 		expect( vi.mocked( runAction ).mock.calls[ 0 ]?.[ 3 ] ).not.toHaveProperty( 'planned' );
 		expect( closeBatch ).not.toHaveBeenCalled();
 		expect( isRowPending( 1 ) ).toBe( false );
-		expect( notify.error ).toHaveBeenCalledWith( 'offline' );
+		expect( notify.error ).toHaveBeenCalledWith( 'offline', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Select the 1 failed' } ) ] } ) );
+		// The one request got no answer: the attempt is still in History, as a failed row.
+		expect( logSkipped ).toHaveBeenCalledWith( 'trash-1', 'action', [ { id: 1, reason: 'failed', message: 'offline' } ], { action: 'trash' } );
 	} );
 } );

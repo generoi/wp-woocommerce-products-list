@@ -16,7 +16,8 @@
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertCheck, RevertPlan } from '../api/client';
-import { checkRevert, closeBatch, getRevertPlan, newBatchId, revertBatch } from '../api/client';
+import { checkRevert, closeBatch, getRevertPlan, logSkipped, newBatchId, revertBatch } from '../api/client';
+import { recordFailedRows } from '../edit/failed-rows';
 import { humanizeError } from '../edit/errors';
 import { outcomeUnknown, UNCERTAIN_CODE, uncertainMessage } from '../edit/save-runner';
 import { beginSaveJob, finishSaveJob, pendingAmong, updateSaveJob } from '../store/save-activity';
@@ -44,6 +45,8 @@ export interface RunRevertOptions {
 	onProgress?( done: number, total: number ): void;
 	/** Close the revert batch when the run ends (tests pass their own); `closeBatch` of the REST client by default. */
 	close?( revertBatchId: string ): Promise< void >;
+	/** Record the objects of chunks that got no answer (tests pass their own); `logSkipped` of the REST client by default. */
+	logFailed?: typeof logSkipped;
 }
 
 /** The revert's objects are still being written by a save in this tab: reverting them now would split the save. */
@@ -185,6 +188,8 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 	let next = 0;
 	let answered = false;
 	let firstError: unknown = null;
+	/** The objects of chunks whose request failed as a whole: the server has no row for them. */
+	const unanswered: ActionResult[] = [];
 
 	options.onProgress?.( 0, total );
 
@@ -204,6 +209,7 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 			} catch ( error ) {
 				firstError ??= error;
 				perChunk[ index ] = failedChunkResults( ids, error );
+				unanswered.push( ...perChunk[ index ]! );
 			}
 
 			done += ids.length;
@@ -231,6 +237,18 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 	} finally {
 		if ( planned ) {
 			await close( revertBatchId );
+		}
+
+		// A chunk that got no answer left no row on the server: its objects go into the revert batch as failed, so
+		// History shows the attempt and what it did not put back, a one-request revert included (it has no planned
+		// header, so no "Interrupted" state either). Per-object failures of an answered chunk the server logged itself.
+		if ( unanswered.length ) {
+			recordFailedRows(
+				revertBatchId,
+				'revert',
+				unanswered.map( ( result ) => ( { id: result.id, message: result.message ?? '' } ) ),
+				{ post: options.logFailed ?? logSkipped }
+			);
 		}
 
 		if ( job !== undefined ) {

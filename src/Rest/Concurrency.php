@@ -474,10 +474,18 @@ final class Concurrency
      *   rows drop the gallery): a list of at most one entry matches when
      *   it names the stored featured image (or none when there is none).
      *
+     * - `attributes` / `default_attributes`: the stored form
+     *   (`Recorder::read()`) or wc/v3's (`{id, name, options|option}`),
+     *   compared field by field (`attributesMatch()`), never by ids only.
+     *
      * The rendered forms are computed only when the plain comparison fails.
      */
     public static function matches(WC_Product $stored, string $path, ?string $expected, ?string $current): bool
     {
+        if ($path === 'attributes' || $path === 'default_attributes') {
+            return ($expected ?? '') === ($current ?? '') || self::attributesMatch($stored, $path, (string) $expected);
+        }
+
         if (self::same($expected, $current)) {
             return true;
         }
@@ -518,6 +526,152 @@ final class Concurrency
         }
 
         return false;
+    }
+
+    /**
+     * Whether an expected attribute list matches the stored attributes, in
+     * the stored form or in wc/v3's. An attribute is identified by its
+     * global attribute id (taxonomy `pa_*`; wc/v3's `id`, or the taxonomy
+     * name of the stored form) or, for a custom one, by its sanitised
+     * name. Order does not matter.
+     *
+     * - A product's `attributes`: the same attributes with the same
+     *   options (names, any order), visibility, "used for variations" and
+     *   position.
+     * - A variation's `attributes` and a product's `default_attributes`:
+     *   the same attribute => option pairs, an option given as the stored
+     *   value (the term slug) or as wc/v3 shows it (the term name); "any"
+     *   (empty) options are left out, as wc/v3 leaves them out.
+     */
+    public static function attributesMatch(WC_Product $stored, string $path, string $expected): bool
+    {
+        $list = trim($expected) === '' ? [] : json_decode($expected, true);
+
+        if (! is_array($list) || ! array_is_list($list)) {
+            return false;
+        }
+
+        $key = static function (array $entry): ?string {
+            $id = is_numeric($entry['id'] ?? null) ? (int) $entry['id'] : 0;
+            $name = is_string($entry['name'] ?? null) ? $entry['name'] : '';
+
+            if ($id <= 0 && str_starts_with($name, 'pa_')) {
+                $id = (int) wc_attribute_taxonomy_id_by_name($name);
+            }
+
+            if ($id > 0) {
+                return 't:'.$id;
+            }
+
+            $slug = sanitize_title($name);
+
+            return $slug === '' ? null : 'c:'.$slug;
+        };
+
+        $pairs = $path === 'default_attributes' || ($path === 'attributes' && $stored->is_type('variation'));
+
+        if ($pairs) {
+            $have = [];
+            $source = $path === 'default_attributes' ? $stored->get_default_attributes('edit') : $stored->get_attributes('edit');
+
+            foreach ((array) $source as $name => $option) {
+                $option = (string) $option;
+
+                if ($option === '') {
+                    continue;
+                }
+
+                $name = (string) $name;
+                $forms = [$option];
+
+                if (taxonomy_exists($name)) {
+                    $term = get_term_by('slug', $option, $name);
+
+                    if ($term instanceof \WP_Term) {
+                        $forms[] = $term->name;
+                    }
+                }
+
+                $id = $key(['name' => $name]);
+
+                if ($id !== null) {
+                    $have[$id] = $forms;
+                }
+            }
+
+            $want = [];
+
+            foreach ($list as $entry) {
+                if (! is_array($entry) || ! is_scalar($entry['option'] ?? null)) {
+                    return false;
+                }
+
+                $option = (string) $entry['option'];
+
+                if ($option === '') {
+                    continue;
+                }
+
+                $id = $key($entry);
+
+                if ($id === null || isset($want[$id])) {
+                    return false;
+                }
+
+                $want[$id] = $option;
+            }
+
+            if (count($want) !== count($have)) {
+                return false;
+            }
+
+            foreach ($want as $id => $option) {
+                if (! isset($have[$id]) || ! in_array(html_entity_decode($option, ENT_QUOTES), array_map(static fn (string $form): string => html_entity_decode($form, ENT_QUOTES), $have[$id]), true)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        $shape = static function (string $id, array $options, bool $visible, bool $variation, int $position): string {
+            $options = array_map(static fn ($option): string => html_entity_decode(trim((string) $option), ENT_QUOTES), $options);
+            sort($options);
+
+            return $id.'|'.wp_json_encode([$options, $visible, $variation, $position]);
+        };
+
+        $have = [];
+
+        foreach ($stored->get_attributes('edit') as $attribute) {
+            if (! $attribute instanceof \WC_Product_Attribute) {
+                continue;
+            }
+
+            $id = $attribute->is_taxonomy() ? 't:'.$attribute->get_id() : $key(['name' => $attribute->get_name()]);
+            $options = $attribute->is_taxonomy() ? array_map(static fn ($term): string => $term->name, $attribute->get_terms() ?: []) : $attribute->get_options();
+
+            if ($id !== null) {
+                $have[] = $shape($id, $options, (bool) $attribute->get_visible(), (bool) $attribute->get_variation(), (int) $attribute->get_position());
+            }
+        }
+
+        $want = [];
+
+        foreach ($list as $entry) {
+            $id = is_array($entry) ? $key($entry) : null;
+
+            if ($id === null || ! is_array($entry['options'] ?? null)) {
+                return false;
+            }
+
+            $want[] = $shape($id, $entry['options'], (bool) ($entry['visible'] ?? false), (bool) ($entry['variation'] ?? false), (int) ($entry['position'] ?? 0));
+        }
+
+        sort($have);
+        sort($want);
+
+        return $have === $want;
     }
 
     /**

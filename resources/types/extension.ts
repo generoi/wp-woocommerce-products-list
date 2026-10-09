@@ -150,6 +150,13 @@ export interface ProductField< Item = ProductListItem > extends Field< Item > {
 		read?: ( item: Item ) => unknown;
 		/** Turn an edited value into the request body fragment; defaults to `{ [ id ]: value }`. */
 		write?: ( value: unknown, item: Item ) => Record< string, unknown >;
+		/**
+		 * The expected values (`_wcpl_expect`, docs/contracts.md §3.6) of a write that changes this field: log field path
+		 * => the value the row loaded, in the stored form the server reads (`wc_products_list/log_value` for an extension
+		 * path). Called for every write with that row's payload; return nothing when the payload does not write the field.
+		 * A stored value that differs refuses the item with 409 `wc_products_list_conflict`.
+		 */
+		expect?: ( item: Item, payload: Record< string, unknown > ) => Record< string, unknown > | null | undefined;
 		/** The wc/v3 list query param a filter on this field maps to. */
 		param?: string;
 		/** The wc/v3 `orderby` value. */
@@ -226,7 +233,8 @@ export interface BatchUpdate {
 
 export interface BatchResult {
 	updated: ProductListItem[];
-	errors: Array< { id: number; message: string; code?: string } >;
+	/** `data` is the error's data where it says more: a `wc_products_list_conflict` carries `{fields, current, expected}` (docs/contracts.md §3.6). */
+	errors: Array< { id: number; message: string; code?: string; data?: Record< string, unknown > } >;
 	batchId: string;
 }
 
@@ -254,7 +262,8 @@ export interface ExtensionApi {
 	/** Merge partial rows into the cache by id without a request. */
 	patchItems( items: Array< Partial< ProductListItem > & { id: number } > ): void;
 	/** Save through the same path as bulk edit: variations first, then parents, logged under one batch. */
-	batchUpdate( update: BatchUpdate, options?: { source?: string } ): Promise< BatchResult >;
+	/** `expect: false` sends no expected values from the loaded rows (an item's own `_wcpl_expect` still goes). */
+	batchUpdate( update: BatchUpdate, options?: { source?: string; expect?: boolean } ): Promise< BatchResult >;
 	notices: {
 		success( message: string, options?: NoticeOptions ): void;
 		error( message: string, options?: NoticeOptions ): void;

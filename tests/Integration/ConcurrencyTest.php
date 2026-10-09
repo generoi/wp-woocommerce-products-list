@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Logger;
+use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Rest\Concurrency;
@@ -456,6 +457,87 @@ class ConcurrencyTest extends RestTestCase
         $this->assertArrayHasKey('name', Concurrency::conflicts($variation, ['name' => 'Size: 99']));
     }
 
+    public function test_attribute_lists_match_in_the_stored_or_the_wc_v3_form_and_not_by_ids_alone(): void
+    {
+        $attributeId = wc_create_attribute(['name' => 'Colour', 'slug' => 'colour']);
+        $this->assertIsInt($attributeId);
+        register_taxonomy('pa_colour', ['product', 'product_variation']);
+        $blue = wp_insert_term('Light blue', 'pa_colour', ['slug' => 'light-blue']);
+        $red = wp_insert_term('Red', 'pa_colour', ['slug' => 'red']);
+        $this->assertIsArray($blue);
+        $this->assertIsArray($red);
+
+        $parent = $this->variableProduct(['38', '39']);
+        $colour = new \WC_Product_Attribute;
+        $colour->set_id($attributeId);
+        $colour->set_name('pa_colour');
+        $colour->set_options([(int) $blue['term_id'], (int) $red['term_id']]);
+        $colour->set_visible(false);
+        $colour->set_variation(true);
+        $colour->set_position(1);
+        $parent->set_attributes([...array_values($parent->get_attributes()), $colour]);
+        $parent->set_default_attributes(['pa_colour' => 'light-blue', 'size' => '38']);
+        $parent->save();
+        [$v38] = $parent->get_children();
+        $variation = wc_get_product($v38);
+        $variation->set_attributes(['size' => '38', 'pa_colour' => 'light-blue']);
+        $variation->save();
+        $parent = wc_get_product($parent->get_id());
+        $variation = wc_get_product($v38);
+
+        // As wc/v3 shows them (labels, term names, any order) and as the log stores them.
+        $productV3 = [
+            ['id' => $attributeId, 'name' => 'Colour', 'slug' => 'pa_colour', 'position' => 1, 'visible' => false, 'variation' => true, 'options' => ['Red', 'Light blue']],
+            ['id' => 0, 'name' => 'size', 'slug' => 'size', 'position' => 0, 'visible' => true, 'variation' => true, 'options' => ['38', '39']],
+        ];
+        $variationV3 = [['id' => 0, 'name' => 'Size', 'option' => '38'], ['id' => $attributeId, 'name' => 'Colour', 'option' => 'Light blue']];
+        $defaultsV3 = [['id' => $attributeId, 'name' => 'Colour', 'option' => 'Light blue'], ['id' => 0, 'name' => 'size', 'option' => '38']];
+
+        $this->assertSame([], Concurrency::conflicts($parent, ['attributes' => wp_json_encode($productV3), 'default_attributes' => wp_json_encode($defaultsV3)]));
+        $this->assertSame([], Concurrency::conflicts($parent, ['attributes' => Recorder::serialize(Recorder::read($parent, 'attributes'))]));
+        $this->assertSame([], Concurrency::conflicts($variation, ['attributes' => wp_json_encode($variationV3)]));
+        $this->assertSame([], Concurrency::conflicts($variation, ['attributes' => wp_json_encode([['name' => 'pa_colour', 'option' => 'light-blue'], ['name' => 'size', 'option' => '38']])]));
+
+        // Same ids, other options, flags or pairs: a conflict.
+        $changed = $productV3;
+        $changed[0]['options'] = ['Red'];
+        $this->assertArrayHasKey('attributes', Concurrency::conflicts($parent, ['attributes' => wp_json_encode($changed)]));
+        $changed = $productV3;
+        $changed[1]['visible'] = false;
+        $this->assertArrayHasKey('attributes', Concurrency::conflicts($parent, ['attributes' => wp_json_encode($changed)]));
+        $this->assertArrayHasKey('attributes', Concurrency::conflicts($parent, ['attributes' => wp_json_encode([$productV3[1]])]));
+        $this->assertArrayHasKey('attributes', Concurrency::conflicts($variation, ['attributes' => wp_json_encode([['id' => 0, 'name' => 'Size', 'option' => '38'], ['id' => $attributeId, 'name' => 'Colour', 'option' => 'Red']])]));
+        $this->assertArrayHasKey('default_attributes', Concurrency::conflicts($parent, ['default_attributes' => wp_json_encode([['id' => $attributeId, 'name' => 'Colour', 'option' => 'Red']])]));
+
+        // Through wc/v3: a variation whose attributes changed since they were loaded is not written.
+        $other = wc_get_product($v38);
+        $other->set_attributes(['size' => '38', 'pa_colour' => 'red']);
+        $other->save();
+        $response = $this->request('PUT', '/wc/v3/products/'.$parent->get_id().'/variations/'.$v38, [
+            'attributes' => [['id' => 0, 'name' => 'size', 'option' => '38'], ['id' => $attributeId, 'option' => 'Light blue']],
+            Concurrency::EXPECT_KEY => ['attributes' => $variationV3],
+        ]);
+        $this->assertStatus(409, $response);
+        $this->assertSame(Concurrency::CONFLICT_ERROR, $this->data($response)['code']);
+        clean_post_cache($v38);
+        $this->assertSame('red', wc_get_product($v38)->get_attributes('edit')['pa_colour'] ?? null);
+    }
+
+    public function test_failed_rows_of_a_row_action_are_logged_under_that_action(): void
+    {
+        $product = $this->simpleProduct();
+        $batch = $this->batchId();
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $batch, 'source' => 'action', 'action' => 'trash', 'items' => [['id' => $product->get_id(), 'reason' => 'failed', 'message' => 'offline']]]));
+        $this->assertStatus(400, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $batch, 'source' => 'action', 'action' => 'no_such_action', 'items' => [['id' => $product->get_id(), 'reason' => 'failed']]]));
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $batch, 'items' => [['id' => $product->get_id(), 'reason' => 'unchanged']]]));
+
+        $rows = $this->rows($batch);
+        $this->assertCount(2, $rows);
+        $this->assertSame(['trash', Logger::STATUS_ERROR], [$rows[0]['action'], $rows[0]['status']]);
+        $this->assertSame(['update', Logger::STATUS_SKIPPED], [$rows[1]['action'], $rows[1]['status']]);
+    }
+
     public function test_a_revert_leaves_alone_an_edit_made_while_it_runs(): void
     {
         $a = $this->simpleProduct(['regular_price' => '20']);
@@ -757,6 +839,26 @@ class ConcurrencyTest extends RestTestCase
         clean_post_cache($id);
         $this->assertSame('publish', get_post_status($id));
         $this->assertSame([], Concurrency::heldObjects());
+
+        // Restore (the Undo of a Trash) too: an editor opened before the Trash keeps its lock fresh.
+        delete_post_meta($id, '_edit_lock');
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/trash', ['ids' => [$id]]));
+        $this->assertTrue($data['results'][0]['ok']);
+        update_post_meta($id, '_edit_lock', time().':'.$other);
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/restore', ['ids' => [$id]]));
+        $this->assertFalse($data['results'][0]['ok']);
+        $this->assertSame(Concurrency::EDITING_ERROR, $data['results'][0]['code']);
+        $row = $this->rows($data['batch_id'])[0];
+        $this->assertSame(Logger::STATUS_SKIPPED, $row['status']);
+        $this->assertSame('editing', json_decode((string) $row['context'], true)['reason']);
+        clean_post_cache($id);
+        $this->assertSame('trash', get_post_status($id));
+        delete_post_meta($id, '_edit_lock');
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/restore', ['ids' => [$id]]));
+        $this->assertTrue($data['results'][0]['ok']);
+        clean_post_cache($id);
+        $this->assertNotSame('trash', get_post_status($id));
+        update_post_meta($id, '_edit_lock', time().':'.$other);
 
         // A copy leaves the original alone.
         $data = $this->data($this->request('POST', '/wc-products-list/v1/actions/duplicate', ['ids' => [$id]]));

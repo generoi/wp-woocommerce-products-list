@@ -24,7 +24,7 @@ describe( 'wc_products_list_deleted', () => {
 describe( 'wc_products_list_editing', () => {
 	it( 'shows the server message naming the user, is already logged by the server, and keeps the row', () => {
 		expect( humanizeError( 'wc_products_list_editing', 'Anna is editing this product in the product editor.' ) ).toBe( 'Anna is editing this product in the product editor.' );
-		expect( humanizeError( 'wc_products_list_editing', '' ) ).toMatch( /^Another user is editing this product/ );
+		expect( humanizeError( 'wc_products_list_editing', '' ) ).toMatch( /^This product is open in the product editor/ );
 		expect( isServerLoggedCode( 'wc_products_list_editing' ) ).toBe( true );
 		expect( isGoneCode( 'wc_products_list_editing' ) ).toBe( false );
 	} );

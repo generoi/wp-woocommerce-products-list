@@ -6,6 +6,8 @@ import type { LogRow } from '../../resources/api/client';
 
 vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: () => 'revert-1',
+	logSkipped: vi.fn( async () => undefined ),
+	isRequestFailure: ( data: unknown ) => typeof data === 'object' && data !== null && ( data as { wcpl_request_failed?: unknown } ).wcpl_request_failed === true,
 	revertBatch: vi.fn(),
 	getRevertPlan: vi.fn(),
 	checkRevert: vi.fn(),
@@ -342,7 +344,36 @@ describe( 'runRevert and the list', () => {
 			throw new Error( 'Offline' );
 		} );
 
-		await expect( runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ] ] }, { close: async () => undefined }, post ) ).rejects.toThrow( 'Offline' );
+		const logFailed = vi.fn( async () => undefined );
+
+		await expect( runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ] ] }, { close: async () => undefined, logFailed }, post ) ).rejects.toThrow( 'Offline' );
 		expect( post ).toHaveBeenCalledTimes( 2 );
+		// Nothing answered: the revert batch still records its objects as failed (History shows the attempt).
+		expect( logFailed ).toHaveBeenCalledWith( 'revert-1', 'revert', [ expect.objectContaining( { id: 1, reason: 'failed' } ), expect.objectContaining( { id: 2, reason: 'failed' } ) ] );
+	} );
+
+	it( 'records a failed one-request revert in its batch (it has no planned header, so no "Interrupted" state)', async () => {
+		const post = vi.fn( async () => {
+			throw Object.assign( new Error( 'Could not get a valid response from the server.' ), { code: 'fetch_error' } );
+		} );
+		const logFailed = vi.fn( async () => undefined );
+		const close = vi.fn( async () => undefined );
+
+		await expect( runRevert( 'batch-a', { chunk: 100, chunks: [ [ 7, 8 ] ] }, { close, logFailed }, post ) ).rejects.toThrow( 'Could not get a valid response' );
+		expect( close ).not.toHaveBeenCalled();
+		expect( logFailed ).toHaveBeenCalledWith( 'revert-1', 'revert', [
+			{ id: 7, reason: 'failed', message: expect.stringContaining( 'It may have been saved anyway' ) },
+			{ id: 8, reason: 'failed', message: expect.stringContaining( 'It may have been saved anyway' ) },
+		] );
+	} );
+
+	it( 'posts nothing when every chunk was answered (the server logged per-object failures itself)', async () => {
+		const post = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => response( ( options?.ids ?? [] ).map( ( id ) => ( id === 2 ? { id, ok: false, code: 'error', message: 'No.' } : { id, ok: true } ) ) ) );
+		const logFailed = vi.fn( async () => undefined );
+
+		const outcome = await runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ] ] }, { close: async () => undefined, logFailed }, post as never );
+
+		expect( outcome.failed.map( ( result ) => result.id ) ).toEqual( [ 2 ] );
+		expect( logFailed ).not.toHaveBeenCalled();
 	} );
 } );

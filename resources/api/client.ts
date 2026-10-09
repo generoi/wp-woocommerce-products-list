@@ -1054,7 +1054,11 @@ export const SKIPPED_CHUNK = 100;
  * know `failed` yet (400 rest_invalid_param) gets those items again as
  * `other`, their message saying they were not saved.
  */
-export async function logSkipped( batchId: string, source: WriteSource | 'revert', items: SkippedItem[] ): Promise< void > {
+/**
+ * `options.action`: the row action (a registered action id, e.g. `trash`) the
+ * items were left out of; the server logs them under it (default `update`).
+ */
+export async function logSkipped( batchId: string, source: WriteSource | 'revert', items: SkippedItem[], options: { action?: string } = {} ): Promise< void > {
 	for ( let index = 0; index < items.length; index += SKIPPED_CHUNK ) {
 		const chunk = items.slice( index, index + SKIPPED_CHUNK ).map( ( item ) => ( {
 			id: item.id,
@@ -1062,7 +1066,7 @@ export async function logSkipped( batchId: string, source: WriteSource | 'revert
 			...( item.fields?.length ? { fields: item.fields.slice( 0, 50 ) } : {} ),
 			...( item.message ? { message: item.message.slice( 0, 500 ) } : {} ),
 		} ) );
-		const post = ( data: typeof chunk ) => request( { path: `${ OWN }/log/skipped`, method: 'POST', data: { batch_id: batchId, source, items: data } } );
+		const post = ( data: typeof chunk ) => request( { path: `${ OWN }/log/skipped`, method: 'POST', data: { batch_id: batchId, source, ...( options.action ? { action: options.action } : {} ), items: data } } );
 
 		try {
 			await post( chunk );

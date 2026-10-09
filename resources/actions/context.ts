@@ -91,18 +91,18 @@ export function dropFromSelection( context: Pick< ProductActionsContext, 'select
 
 export interface ResultSummary {
 	ok: number[];
-	failed: Array< { id: number; message: string } >;
+	failed: Array< { id: number; message: string; code?: string } >;
 }
 
 export function summarize( response: ActionResponse ): ResultSummary {
 	const ok: number[] = [];
-	const failed: Array< { id: number; message: string } > = [];
+	const failed: Array< { id: number; message: string; code?: string } > = [];
 
 	for ( const result of response.results ) {
 		if ( result.ok ) {
 			ok.push( result.id );
 		} else {
-			failed.push( { id: result.id, message: actionResultMessage( result.code, result.message ) } );
+			failed.push( { id: result.id, message: actionResultMessage( result.code, result.message ), ...( result.code ? { code: result.code } : {} ) } );
 		}
 	}
 

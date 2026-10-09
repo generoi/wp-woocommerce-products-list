@@ -138,10 +138,21 @@ describe( 'expectedValues: fields whose list form is not the stored one', () => 
 		expect( expectedValues( row( { cost_of_goods_sold: 2.5 } ), { cost_of_goods_sold: { values: [ { defined_value: 4 } ] } } ) ).toEqual( { cost_of_goods_sold: 2.5 } );
 	} );
 
-	it( 'sends nothing for attributes or extension fields (last write wins)', () => {
-		const item = row( { attributes: [ { id: 1, options: [ 'Red' ] } ], acme_extra: 'x' } );
+	it( 'sends nothing for extension fields without rest.expect (last write wins)', () => {
+		const item = row( { acme_extra: 'x' } );
 
-		expect( expectedValues( item, { attributes: [ { id: 1, options: [ 'Blue' ] } ], acme_extra: 'y' } ) ).toBeNull();
+		expect( expectedValues( item, { acme_extra: 'y' } ) ).toBeNull();
+	} );
+
+	it( 'sends the loaded attribute lists as loaded (the server accepts the wc/v3 form)', () => {
+		const attributes = [ { id: 1, name: 'Colour', options: [ 'Red' ], visible: true, variation: true, position: 0 } ];
+		const defaults = [ { id: 1, name: 'Colour', option: 'Red' } ];
+		const item = row( { attributes, default_attributes: defaults } );
+
+		expect( expectedValues( item, { attributes: [ { id: 1, options: [ 'Blue' ] } ], default_attributes: [] } ) ).toEqual( { attributes, default_attributes: defaults } );
+		// Not loaded, or not a list of objects: nothing is known.
+		expect( expectedValues( row( {} ), { attributes: [] } ) ).toBeNull();
+		expect( expectedValues( row( { attributes: 'x' } ), { attributes: [] } ) ).toBeNull();
 	} );
 } );
 

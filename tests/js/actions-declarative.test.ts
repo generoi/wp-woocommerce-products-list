@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { closeBatch, runAction } from '../../resources/api/client';
+import { closeBatch, logSkipped, runAction } from '../../resources/api/client';
 import { isRowPending } from '../../resources/store/save-activity';
 import { declarativeSummary, runDeclarativeAction } from '../../resources/actions/index';
 import { notify } from '../../resources/actions/notices';
@@ -10,6 +10,8 @@ import { invalidateProducts, patchItems } from '../../resources/store/products';
 vi.mock( '../../resources/api/client', () => ( {
 	runAction: vi.fn(),
 	newBatchId: () => 'b1',
+	logSkipped: vi.fn( async () => undefined ),
+	isRequestFailure: ( data: unknown ) => typeof data === 'object' && data !== null && ( data as { wcpl_request_failed?: unknown } ).wcpl_request_failed === true,
 	closeBatch: vi.fn( async () => undefined ),
 	// 100 ids per request.
 	actionRequestCount: ( _action: string, count: number ) => Math.ceil( count / 100 ),
@@ -73,21 +75,25 @@ describe( 'runDeclarativeAction', () => {
 
 		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 1, 2 ], {}, [ 'id' ] );
 
-		expect( notify.error ).toHaveBeenCalledWith( '1 updated, 1 failed: The product no longer exists.' );
+		// The failed row is offered for another try (the server logged it, so nothing is posted for it).
+		expect( notify.error ).toHaveBeenCalledWith( '1 updated, 1 failed: The product no longer exists.', { actions: [ expect.objectContaining( { label: 'Select the 1 failed' } ) ] } );
+		expect( logSkipped ).not.toHaveBeenCalled();
 		expect( notify.success ).toHaveBeenCalledWith( 'Clear translations: 1 item updated.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
 		expect( invalidateProducts ).toHaveBeenCalledWith( { counts: true } );
 
 		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 2, ok: false, code: 'forbidden', message: 'Not allowed.' } ] ) );
 		await runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 2 ], {}, [ 'id' ] );
-		expect( notify.error ).toHaveBeenLastCalledWith( 'Not allowed.' );
+		expect( notify.error ).toHaveBeenLastCalledWith( 'Not allowed.', expect.anything() );
 	} );
 
 	it( 'shows a request error and rejects so the modal stays open', async () => {
 		vi.mocked( runAction ).mockRejectedValueOnce( new Error( 'Pick a translated language.' ) );
 
 		await expect( runDeclarativeAction( 'i18n_copy', 'Copy translations', [ 1 ], {}, [ 'id' ] ) ).rejects.toThrow( 'Pick a translated language.' );
-		expect( notify.error ).toHaveBeenCalledWith( 'Pick a translated language.' );
+		expect( notify.error ).toHaveBeenCalledWith( 'Pick a translated language.', { actions: [ expect.objectContaining( { label: 'Select the 1 failed' } ) ] } );
 		expect( notify.success ).not.toHaveBeenCalled();
+		// No request was answered: the attempt is recorded in its batch as failed.
+		expect( logSkipped ).toHaveBeenCalledWith( 'b1', 'action', [ { id: 1, reason: 'failed', message: 'Pick a translated language.' } ], { action: 'i18n_copy' } );
 	} );
 
 	it( 'with inline errors: no error snackbar, the failure rejects with its message, the rows that changed keep their Undo', async () => {
