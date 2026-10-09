@@ -32,7 +32,8 @@ import { HierarchyProvider } from '../hierarchy/context';
 import { footerCountLabel } from '../hierarchy/footer-count';
 import { HierarchicalDataViews } from '../hierarchy/hierarchical-dataviews';
 import { useSearchReveal } from '../hierarchy/search-match';
-import { getChildrenState, useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
+import { expandAllConfirmMessage, expansionSummary, getChildrenState, useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
+import type { ExpandAllPlan } from '../hierarchy/use-hierarchy';
 import { useCounts, useProductList } from '../store/products';
 import { setCurrentRows, setVisibleFieldIds } from '../store/rows';
 import { useView } from '../store/view';
@@ -103,8 +104,10 @@ export function focusOriginForRow( row: ProductListItem, doc: Document = documen
  * the progress from its own store so the counter re-renders this button,
  * never the table.
  */
-function ExpandAllButton( { onClick }: { onClick: () => void } ) {
+export function ExpandAllButton( { onClick, summary }: { onClick: () => void; summary?: { expanded: number; total: number } | null } ) {
 	const progress = useExpandAllProgress();
+	// After Expand all stopped at the row limit (or a few were opened by hand): "17 of 100 expanded" stays next to the button.
+	const partial = ! progress && summary && summary.expanded > 0 && summary.expanded < summary.total ? summary : null;
 
 	return (
 		<>
@@ -121,8 +124,23 @@ function ExpandAllButton( { onClick }: { onClick: () => void } ) {
 					) }
 				</span>
 			) : null }
+			{ partial ? (
+				<span className="wc-products-list__expand-progress wc-products-list__expand-summary">
+					{ sprintf(
+						/* translators: 1: expanded products, 2: expandable products on the page */
+						__( '%1$d of %2$d expanded', 'wp-woocommerce-products-list' ),
+						partial.expanded,
+						partial.total
+					) }
+				</span>
+			) : null }
 		</>
 	);
+}
+
+/** The screen's h1, like core admin screens: where a heading jump lands first. */
+export function CatalogTitle() {
+	return <h1 className="wp-heading-inline wc-products-list__title">{ __( 'Catalog', 'wp-woocommerce-products-list' ) }</h1>;
 }
 
 /** The keyboard shortcut to the bulk edit button: Alt+B (Option+B), from anywhere on the screen but the editor and text fields. */
@@ -181,8 +199,8 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		return fields.filter( ( field ) => ids.has( field.id ) );
 	}, [ fields, view.fields, view.titleField, view.mediaField, view.descriptionField ] );
 	// Expand all asks in an in-page dialog, not window.confirm (which blocks the tab and every script on it).
-	const [ expandConfirm, setExpandConfirm ] = useState< { rows: number; resolve: ( ok: boolean ) => void } | null >( null );
-	const confirmExpandAll = useCallback( ( rows: number ) => new Promise< boolean >( ( resolve ) => setExpandConfirm( { rows, resolve } ) ), [] );
+	const [ expandConfirm, setExpandConfirm ] = useState< { plan: ExpandAllPlan; resolve: ( ok: boolean ) => void } | null >( null );
+	const confirmExpandAll = useCallback( ( _rows: number, plan: ExpandAllPlan ) => new Promise< boolean >( ( resolve ) => setExpandConfirm( { plan, resolve } ) ), [] );
 	const answerExpandAll = useCallback( ( ok: boolean ) => {
 		setExpandConfirm( ( current ) => {
 			current?.resolve( ok );
@@ -508,7 +526,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
 			{ hasExpandable && (
 				<>
-					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } />
+					<ExpandAllButton onClick={ () => void hierarchy.expandAll() } summary={ expansionSummary( parents, hierarchy.expandedItemIds ) } />
 					{ hierarchy.variationFilterActive && (
 						<Button size="compact" variant="tertiary" onClick={ onSelectMatching } disabled={ selectingMatching } isBusy={ selectingMatching }>
 							{ __( 'Select matching variations', 'wp-woocommerce-products-list' ) }
@@ -542,16 +560,21 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		<HierarchyProvider value={ guardedHierarchy }>
 			<EditorHostProvider value={ host }>
 				<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }${ session ? ' has-editor' : '' }` }>
+					<CatalogTitle />
 					<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>
 						{ __( 'Skip to products', 'wp-woocommerce-products-list' ) }
 					</a>
 					{ expandConfirm && (
-						<ConfirmDialog onConfirm={ () => answerExpandAll( true ) } onCancel={ () => answerExpandAll( false ) } confirmButtonText={ __( 'Expand all', 'wp-woocommerce-products-list' ) }>
-							{ sprintf(
-								/* translators: %d: number of rows */
-								__( 'This will show about %d rows on one page, which makes the table slow to render and scroll. Continue? (A smaller page size or a filter keeps it fast.)', 'wp-woocommerce-products-list' ),
-								expandConfirm.rows
-							) }
+						<ConfirmDialog onConfirm={ () => answerExpandAll( true ) } onCancel={ () => answerExpandAll( false ) } confirmButtonText={
+							expandConfirm.plan.skipped > 0
+								? sprintf(
+									/* translators: %d: number of products */
+									_n( 'Expand %d product', 'Expand %d products', expandConfirm.plan.expanding, 'wp-woocommerce-products-list' ),
+									expandConfirm.plan.expanding
+								)
+								: __( 'Expand all', 'wp-woocommerce-products-list' )
+						}>
+							{ expandAllConfirmMessage( expandConfirm.plan ) }
 						</ConfirmDialog>
 					) }
 					<StatusTabs tab={ tab } onChange={ guardedSetTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />

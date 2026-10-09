@@ -581,7 +581,14 @@ export function projectEdits( item: ProductListItem, edits: Record< string, unkn
 		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
 			const field = byId.get( id );
 			const chosen = edits[ arrayOpFieldId( id ) ];
-			const { next, changed } = applyArrayOp( field ? readFieldValue( field, item ) : undefined, isArrayOperation( chosen ) ? chosen : 'add', value );
+			const operation = isArrayOperation( chosen ) ? chosen : 'add';
+
+			// "Replace all with" nothing would empty every row's list (categories become Uncategorized): never by accident.
+			if ( operation === 'replace' && value.length === 0 ) {
+				continue;
+			}
+
+			const { next, changed } = applyArrayOp( field ? readFieldValue( field, item ) : undefined, operation, value );
 
 			if ( changed ) {
 				projected[ id ] = next;

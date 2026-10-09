@@ -94,7 +94,7 @@ export function EditErrors( { errors, items, names: knownNames, fieldLabels, tit
 				{ shown.map( ( error, index ) => (
 					<li key={ `${ error.id }-${ error.field ?? '' }-${ index }` }>
 						{ error.id ? <strong>{ names.get( error.id ) ?? `#${ error.id }` }: </strong> : null }
-						{ error.field && fieldLabels[ error.field ] && onFocusField && ! error.id ? (
+						{ error.field && fieldLabels[ error.field ] && onFocusField && ( ! error.id || items.length <= 1 ) ? (
 							<>
 								<button type="button" className="button-link wc-pl-edit__error-field" onClick={ () => onFocusField( error.field! ) }>
 									{ fieldLabels[ error.field ] }

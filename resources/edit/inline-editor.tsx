@@ -45,9 +45,9 @@ import { hasLoadRelativeOps, lowersPrice, parseNumeric, projectWarnings, validat
 import { ChangeSummary, describeSiteDateTime } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
-import { isGoneCode } from './errors';
+import { fieldOfErrorCode, isGoneCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
-import { LanguageTools, toolIds } from './language-tools';
+import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
 import type { StagedTool } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
@@ -403,7 +403,10 @@ function stickyOffset( root: HTMLElement ): number {
  * already fits, else moves the least that shows it, its top first when it
  * is taller than the viewport.
  */
-function scrollEditorIntoView( root: HTMLElement, mode: 'quick' | 'bulk' ): void {
+/** Room kept under a quick editor's buttons when it is scrolled into view. */
+const EDITOR_BOTTOM_MARGIN = 16;
+
+export function scrollEditorIntoView( root: HTMLElement, mode: 'quick' | 'bulk' ): void {
 	if ( typeof root.getBoundingClientRect !== 'function' ) {
 		return;
 	}
@@ -428,8 +431,9 @@ function scrollEditorIntoView( root: HTMLElement, mode: 'quick' | 'bulk' ): void
 
 	if ( rect.top < offset ) {
 		window.scrollBy( { top: rect.top - offset, behavior: 'auto' } );
-	} else if ( rect.bottom > viewport ) {
-		window.scrollBy( { top: Math.min( rect.bottom - viewport, rect.top - offset ), behavior: 'auto' } );
+	} else if ( rect.bottom > viewport - EDITOR_BOTTOM_MARGIN ) {
+		// The buttons at the editor's foot stay on screen (with a margin), unless that would push its top under the sticky header.
+		window.scrollBy( { top: Math.min( rect.bottom - viewport + EDITOR_BOTTOM_MARGIN, rect.top - offset ), behavior: 'auto' } );
 	}
 }
 
@@ -686,6 +690,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	}, [] );
 	const rootRef = useRef< HTMLFormElement >( null );
 	const formRef = useRef< HTMLDivElement >( null );
+	// The bulk list's x buttons: after one removes its item, focus moves to the x now at the same place (or the last one).
+	const itemListRef = useRef< HTMLUListElement >( null );
+	const removedIndexRef = useRef< number | null >( null );
 	const focusedRef = useRef( false );
 	const openSelectRef = useRef< HTMLSelectElement | null >( null );
 	const saveRef = useRef< ( advance?: boolean, implicit?: boolean ) => Promise< void > >( async () => {} );
@@ -817,6 +824,44 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- mode is fixed for the editor's life
 	}, [ formShown ] );
 
+	// The open tab's values arrive after the form is shown and can make it taller: once they are in, the
+	// editor is brought into view again so its buttons ("Update & next" walking down the list) stay on screen.
+	const scrolledOnLoadRef = useRef( false );
+
+	useEffect( () => {
+		if ( ! tabReady || scrolledOnLoadRef.current ) {
+			return;
+		}
+
+		scrolledOnLoadRef.current = true;
+
+		const root = rootRef.current;
+
+		if ( root && mode === 'quick' ) {
+			scrollEditorIntoView( root, mode );
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- mode is fixed for the editor's life
+	}, [ tabReady ] );
+
+	useEffect( () => {
+		const index = removedIndexRef.current;
+
+		if ( index === null ) {
+			return;
+		}
+
+		removedIndexRef.current = null;
+
+		const buttons = Array.from( itemListRef.current?.querySelectorAll< HTMLButtonElement >( '.wc-pl-inline-edit__item-remove' ) ?? [] );
+		const target = buttons[ Math.min( index, buttons.length - 1 ) ];
+
+		if ( target ) {
+			target.focus();
+		} else if ( rootRef.current && ! rootRef.current.contains( document.activeElement ) ) {
+			rootRef.current.focus( { preventScroll: true } );
+		}
+	}, [ items ] );
+
 	// Load the variations of the selected variable parents once the option is on,
 	// so relative price ops, the sale < regular check and the plan see their current values.
 	// Keyed on the parent ids and the fetched keys, not on the rows' identity: a tab load,
@@ -826,8 +871,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const variationFieldKey = useMemo( () => {
 		const sellableIds = Object.fromEntries( visibleFields.filter( isSellableField ).map( ( field ) => [ field.id, true ] ) );
 
-		return variationFetchFields( fieldsWithToggle, sellableIds ).sort().join( ',' );
-	}, [ visibleFields, fieldsWithToggle ] );
+		const keys = new Set( variationFetchFields( fieldsWithToggle, sellableIds ) );
+
+		// On a language tab the market prices load too, so "Adjust market prices" previews the variations it reaches.
+		if ( tab.id.includes( ':' ) ) {
+			for ( const price of [ 'regular_price', 'sale_price' ] ) {
+				allFields.find( ( field ) => field.id === `${ tab.id }.${ price }` )?.rest?.fields.forEach( ( key ) => keys.add( key ) );
+			}
+		}
+
+		return Array.from( keys ).sort().join( ',' );
+	}, [ visibleFields, fieldsWithToggle, tab.id, allFields ] );
 	const variationCacheRef = useRef< { fieldKey: string; byParent: Map< number, ProductListItem[] > } >( { fieldKey: '', byParent: new Map() } );
 
 	useEffect( () => {
@@ -938,6 +992,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			clearFlaggedControls( formRef.current );
 		},
 		[ state ]
+	);
+
+	/** The variations a price tool reaches when "Apply price and sale fields to all variations" is ticked. */
+	const parentVariations = useMemo(
+		() => ( applyToVariations && variations.status === 'loaded' ? Array.from( variations.byParent.values() ).flat() : undefined ),
+		[ applyToVariations, variations ]
 	);
 
 	const variationsReady = ! applyToVariations || variableParents.length === 0 || variations.status === 'loaded';
@@ -1193,9 +1253,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const errors: EditError[] = [];
 		let ran = 0;
 		const ranTabs = new Set< string >();
+		let reachedVariations = false;
 
 		for ( const entry of Array.from( staged.values() ) ) {
-			const ids = toolIds( entry.def, rows );
+			const ids = stagedToolIds( entry, rows, parentVariations );
 
 			if ( ids.length === 0 ) {
 				stageTool( entry.key, null );
@@ -1206,6 +1267,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true } );
 				ran++;
 				ranTabs.add( entry.tabId );
+				reachedVariations ||= Boolean( parentVariations?.length ) && ids.some( ( id ) => parentVariations!.some( ( variation ) => variation.id === id ) );
 				stageTool( entry.key, null );
 			} catch ( reason ) {
 				errors.push( {
@@ -1218,6 +1280,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		// The tabs whose values a tool changed load again if the editor stays open.
 		if ( ranTabs.size && mountedRef.current ) {
 			setLoadedTabs( ( previous ) => new Set( Array.from( previous ).filter( ( id ) => ! ranTabs.has( id ) ) ) );
+		}
+
+		// A price tool that ran on the variations left the fetched ones stale.
+		if ( reachedVariations ) {
+			forgetVariations( rows.filter( isVariableParent ).map( ( row ) => row.id ) );
+
+			if ( mountedRef.current ) {
+				setVariationEpoch( ( epoch ) => epoch + 1 );
+			}
 		}
 
 		return { ran, errors };
@@ -1547,12 +1618,38 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				const goneSet = new Set( gone );
 
 				setErrorNames( names );
+
+				// A row error about one field (a taken SKU) names that field and, in quick edit, flags its control.
+				const fieldErrors = result.errors
+					.filter( ( error ) => ! goneSet.has( error.id ) )
+					.map( ( error ) => ( { error, field: fieldOfErrorCode( error.code ) } ) )
+					.filter( ( entry ): entry is { error: ( typeof result.errors )[ number ]; field: string } => !! entry.field && visibleIds.has( entry.field ) );
+
 				setErrors(
-					result.errors.map( ( error ) => ( {
-						id: error.id,
-						message: goneSet.has( error.id ) ? __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' ) : error.message,
-					} ) )
+					result.errors.map( ( error ) => {
+						const field = goneSet.has( error.id ) ? undefined : fieldOfErrorCode( error.code );
+
+						return {
+							id: error.id,
+							...( field && visibleIds.has( field ) ? { field } : {} ),
+							message: goneSet.has( error.id ) ? __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' ) : error.message,
+						};
+					} )
 				);
+
+				if ( ! bulk && fieldErrors.length ) {
+					const flagged = fieldErrors.map( ( entry ) => ( { field: entry.field, message: entry.error.message } ) );
+
+					setInvalidFields( flagged );
+					setTimeout( () => {
+						if ( mountedRef.current ) {
+							flagInvalidControls(
+								formRef.current,
+								flagged.map( ( entry ) => ( { field: entry.field, label: fieldLabels[ entry.field ] ?? entry.field } ) )
+							);
+						}
+					}, 0 );
+				}
 				const failedNow = new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) );
 
 				setFailedIds( failedNow );
@@ -2014,8 +2111,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 									) }
 								</p>
 							) : null }
-							<ul className="wc-pl-inline-edit__list" aria-label={ __( 'Selected items', 'wp-woocommerce-products-list' ) }>
-								{ listed.map( ( item ) => {
+							<ul ref={ itemListRef } className="wc-pl-inline-edit__list" aria-label={ __( 'Selected items', 'wp-woocommerce-products-list' ) }>
+								{ listed.map( ( item, index ) => {
 									const kind = kindLabel( item, settings.productTypes );
 									const parentName = parentNameOf( item );
 									const sku = skuOf( item );
@@ -2039,7 +2136,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 														nameOf( item )
 													) }
 													disabled={ saving }
-													onClick={ () => onRemoveItem( item.id ) }
+													onClick={ () => {
+														removedIndexRef.current = index;
+														onRemoveItem( item.id );
+													} }
 												>
 													<Icon icon={ closeSmall } size={ 20 } />
 												</button>
@@ -2166,6 +2266,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						fields={ allFields }
 						disabled={ saving }
 						onDirtyChange={ setToolsDirty }
+						applyToVariations={ applyToVariations }
+						parentVariations={ parentVariations }
 						defaultOpen={ bulk }
 						// The tools run with Update, in its batch: one save model, one Undo.
 						stage={ stageTool }
@@ -2335,17 +2437,25 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						<strong>{ __( 'Also saved with Update:', 'wp-woocommerce-products-list' ) }</strong>
 						<ul>
 							{ Array.from( staged.values() ).map( ( entry ) => {
-								const count = toolIds( entry.def, items ).length;
+								const count = stagedToolIds( entry, items, parentVariations ).length;
 
 								return (
 									<li key={ entry.key }>
-										{ sprintf(
-											/* translators: 1: tool label, 2: language, 3: number of items */
-											_n( '%1$s (%2$s) on %3$d item', '%1$s (%2$s) on %3$d items', count, 'wp-woocommerce-products-list' ),
-											entry.def.label,
-											entry.tabLabel,
-											count
-										) }{ ' ' }
+										{ parentVariations?.length
+											? sprintf(
+													/* translators: 1: tool label, 2: language, 3: what it runs on, e.g. "606 variations of 28 products" */
+													__( '%1$s (%2$s) on %3$s', 'wp-woocommerce-products-list' ),
+													entry.def.label,
+													entry.tabLabel,
+													toolTargetsLabel( entry.def, items, parentVariations )
+											  )
+											: sprintf(
+													/* translators: 1: tool label, 2: language, 3: number of items */
+													_n( '%1$s (%2$s) on %3$d item', '%1$s (%2$s) on %3$d items', count, 'wp-woocommerce-products-list' ),
+													entry.def.label,
+													entry.tabLabel,
+													count
+											  ) }{ ' ' }
 										<Button variant="link" disabled={ saving } onClick={ () => stageTool( entry.key, null ) }>
 											{ __( 'Take it out', 'wp-woocommerce-products-list' ) }
 										</Button>
@@ -2381,9 +2491,16 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 									void save( true );
 								}
 							} }
+							aria-keyshortcuts="Shift+Enter"
 							__next40pxDefaultSize
 						>
 							{ __( 'Update & next', 'wp-woocommerce-products-list' ) }
+							<kbd className="wc-pl-edit__shortcut" aria-hidden="true">
+								{
+									/* translators: keyboard shortcut for "Update & next" */
+									__( 'Shift+Enter', 'wp-woocommerce-products-list' )
+								}
+							</kbd>
 						</Button>
 					) : null }
 					<SaveProgress done={ progress.done } total={ progress.total } saving={ saving } />

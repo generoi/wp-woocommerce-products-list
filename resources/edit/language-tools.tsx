@@ -8,13 +8,22 @@
  *
  * Prices are only offered for copying between languages that sell in the
  * same currency: copying 79 € into the Swedish price would sell for 79 kr.
+ *
+ * Each language tab has its own tool settings (a tool is mounted per tab),
+ * and a tool can be added to the Update more than once (an SEO title
+ * template and an SEO description template): adding resets the form, and
+ * changing the form never touches what was added. "Adjust market prices"
+ * runs on the variations of the selected variable parents when "Apply price
+ * and sale fields to all variations" is ticked (`parentVariations`).
  */
 import { Button, CheckboxControl, SelectControl, TextControl } from '@wordpress/components';
 import { useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { KeyboardEvent } from 'react';
 import type { DeclarativeAction, DeclarativeActionArg, ProductField, ProductListItem, Settings } from '../types';
-import { isVariation, readFieldValue, readReference } from './field-value';
+import { formatMoney, getPath } from '../extensions/declarative';
+import type { FieldCurrency } from '../extensions/declarative';
+import { isVariableParent, isVariation, parentIdOf, readFieldValue, readReference } from './field-value';
 import { itemLabel } from './item-label';
 
 import { isEditorHostedAction, LANG_ARG } from './hosted-actions';
@@ -36,6 +45,9 @@ export function languageToolsFor( actions: DeclarativeAction[], tabId: string ):
 }
 
 const PRICE_OPTION = /(^|[._:])(regular_price|sale_price|price)$/;
+
+/** gds-woo-i18n's transform arg: leave a template alone on products without their own name in the language. */
+export const OWN_NAME_ARG = 'own_name';
 
 /** Whether the action copies values from another language (it has a `source` language argument). */
 export function copiesBetweenLanguages( def: Pick< DeclarativeAction, 'args' > ): boolean {
@@ -67,6 +79,81 @@ export function optionAppliesTo( option: DeclarativeActionArg[ 'options' ][ numb
 
 		return applies.product === true || ( Array.isArray( applies.product ) && applies.product.includes( String( item.type ?? '' ) ) );
 	} );
+}
+
+/** An option that exists only on items with a price of their own (not on variable parents): a price. */
+function isSellableOption( option: DeclarativeActionArg[ 'options' ][ number ] ): boolean {
+	return Array.isArray( option.applies?.product );
+}
+
+/**
+ * A tool whose every field is a price ("Adjust market prices"): with "Apply
+ * price and sale fields to all variations" it runs on the variations of the
+ * selected variable parents, as the EUR price fields do.
+ */
+export function isSellableTool( def: Pick< DeclarativeAction, 'args' > ): boolean {
+	const fieldsArg = def.args.find( ( arg ) => arg.type === 'array' && arg.options.length > 0 );
+
+	return !! fieldsArg && fieldsArg.options.every( isSellableOption );
+}
+
+/**
+ * The items a tool works on: the editor's rows, and for a price tool the
+ * variations reached through the selected variable parents (passed only
+ * while "apply to all variations" is ticked and they are loaded).
+ */
+export function toolItems( def: Pick< DeclarativeAction, 'args' >, items: readonly ProductListItem[], parentVariations?: readonly ProductListItem[] ): ProductListItem[] {
+	if ( ! parentVariations?.length || ! isSellableTool( def ) ) {
+		return [ ...items ];
+	}
+
+	const known = new Set( items.map( ( item ) => item.id ) );
+
+	// The variable parents themselves have no price: their variations stand in for them.
+	return [ ...items.filter( ( item ) => ! isVariableParent( item ) ), ...parentVariations.filter( ( variation ) => ! variation._placeholder && ! known.has( variation.id ) ) ];
+}
+
+/** How many items a tool runs on, as words: "12 items", or "606 variations of 28 products". */
+export function toolTargetsLabel( def: Pick< DeclarativeAction, 'args' | 'scope' >, items: readonly ProductListItem[], parentVariations?: readonly ProductListItem[] ): string {
+	const all = toolItems( def, items, parentVariations );
+	const ids = toolIds( def as DeclarativeAction, all );
+	const known = new Set( items.map( ( item ) => item.id ) );
+	const reached = all.filter( ( item ) => ! known.has( item.id ) );
+
+	if ( reached.length === 0 ) {
+		return sprintf(
+			/* translators: %d: number of items */
+			_n( '%d item', '%d items', ids.length, 'wp-woocommerce-products-list' ),
+			ids.length
+		);
+	}
+
+	const parents = new Set( reached.map( parentIdOf ) ).size;
+	// The selected rows the tool also runs on itself (simple products, variations picked directly); variable parents have no price.
+	const own = ids.length - reached.length;
+	const variations = sprintf(
+		/* translators: 1: "N variations", 2: "M products" */
+		__( '%1$s of %2$s', 'wp-woocommerce-products-list' ),
+		sprintf(
+			/* translators: %d: number of variations */
+			_n( '%d variation', '%d variations', reached.length, 'wp-woocommerce-products-list' ),
+			reached.length
+		),
+		sprintf(
+			/* translators: %d: number of variable products */
+			_n( '%d product', '%d products', parents, 'wp-woocommerce-products-list' ),
+			parents
+		)
+	);
+
+	return own > 0
+		? sprintf(
+				/* translators: 1: "N variations of M products", 2: number of other items */
+				_n( '%1$s and %2$d other item', '%1$s and %2$d other items', own, 'wp-woocommerce-products-list' ),
+				variations,
+				own
+		  )
+		: variations;
 }
 
 export function argOptions( arg: DeclarativeActionArg, args: Record< string, unknown >, lang: string, settings: Pick< Settings, 'languages' | 'currency' >, copies = true, items?: readonly ProductListItem[] ): DeclarativeActionArg[ 'options' ] {
@@ -141,6 +228,11 @@ export function argShown( arg: DeclarativeActionArg, def: Pick< DeclarativeActio
 		return chosen !== 'round';
 	}
 
+	// "Skip products without their own name" is about the template's {name}.
+	if ( values.has( 'template' ) && arg.id === OWN_NAME_ARG ) {
+		return chosen === 'template';
+	}
+
 	return true;
 }
 
@@ -176,6 +268,45 @@ export interface PreviewLine {
 	field: string;
 	before: string;
 	after: string;
+	/** What the line is made of that the editor cannot vouch for: {name} from another language, or not loaded. */
+	note?: string;
+}
+
+/** The name a template's {name} is filled with for one item, the way the server does it (gds-woo-i18n fillTemplate). */
+interface TemplateName {
+	/** Null: the editor has not loaded the item's name in this language; the server fills it in. */
+	text: string | null;
+	/** The item has no name of its own in the language: {name} is another language's. */
+	fallback: boolean;
+	/** The language it comes from, when known. */
+	from?: string;
+}
+
+function templateName( item: ProductListItem, lang: string, nameField: ProductField | undefined, defaultLang: string ): TemplateName {
+	const own = nameField ? readFieldValue( nameField, item ) : undefined;
+
+	if ( typeof own === 'string' && own !== '' ) {
+		return { text: own, fallback: false };
+	}
+
+	// What the shop shows in the language without a name of its own: a fallback language's (gds_woo_i18n/fallbacks), else the default one.
+	const entry = getPath( item, `i18n.${ lang }.name` ) as { effective?: unknown; effectiveLang?: unknown } | undefined;
+
+	if ( entry && typeof entry.effective === 'string' && entry.effective !== '' ) {
+		return { text: entry.effective, fallback: true, ...( typeof entry.effectiveLang === 'string' ? { from: entry.effectiveLang } : {} ) };
+	}
+
+	const reference = nameField ? readReference( nameField, item ) : undefined;
+
+	if ( typeof reference === 'string' && reference !== '' ) {
+		return { text: reference, fallback: true, from: defaultLang };
+	}
+
+	if ( own === undefined && reference === undefined ) {
+		return { text: null, fallback: false };
+	}
+
+	return { text: String( ( item as { name?: unknown } ).name ?? '' ), fallback: true, from: defaultLang };
 }
 
 const PREVIEW_SHOWN = 3;
@@ -202,8 +333,9 @@ export function previewTransform(
 	data: Record< string, unknown >,
 	tabId: string,
 	items: ProductListItem[],
-	fields: ProductField[]
-): { lines: PreviewLine[]; changes: number; unloaded: number; emptyTemplate: number } | null {
+	fields: ProductField[],
+	settings?: Pick< Settings, 'languages' >
+): { lines: PreviewLine[]; changes: number; unloaded: number; emptyTemplate: number; fallbackName: number; skippedNoName: number } | null {
 	const operation = String( data.operation ?? '' );
 
 	if ( ! [ 'replace', 'prefix', 'suffix', 'template' ].includes( operation ) || ! def.args.some( ( arg ) => arg.id === 'text' ) || missingArg( def, data ) ) {
@@ -223,20 +355,16 @@ export function previewTransform(
 	let unloaded = 0;
 	// Rows where every token of the template is empty: the server refuses them (gds_woo_i18n_empty_template).
 	let emptyTemplate = 0;
+	// Values whose {name} is another language's (no name of their own in this one), and those left out for it.
+	let fallbackName = 0;
+	let skippedNoName = 0;
+	const lang = tabId.slice( tabId.indexOf( ':' ) + 1 );
+	const defaultLang = settings?.languages?.default ?? '';
+	const labelOf = ( code: string ): string => settings?.languages?.labels?.[ code ] ?? code;
 	const nameField = byId.get( `${ tabId }.name` );
-	// {name} is the product's name as it shows in this language: its translation, else the default-language name.
-	const shownNameOf = ( item: ProductListItem ): string => {
-		const own = nameField ? readFieldValue( nameField, item ) : undefined;
-
-		if ( typeof own === 'string' && own !== '' ) {
-			return own;
-		}
-
-		const fallback = nameField ? readReference( nameField, item ) : undefined;
-
-		return typeof fallback === 'string' && fallback !== '' ? fallback : String( ( item as { name?: unknown } ).name ?? '' );
-	};
 	const tokens = operation === 'template' ? Array.from( new Set( text.match( /\{(name|default_name|brand|category|sku)\}/g ) ?? [] ) ) : [];
+	const usesName = tokens.includes( '{name}' );
+	const ownNameOnly = data[ OWN_NAME_ARG ] === true;
 
 	for ( const item of items ) {
 		if ( item._placeholder ) {
@@ -263,6 +391,7 @@ export function previewTransform(
 			const old = typeof raw === 'string' ? raw : '';
 			const base = old !== '' || ! shown ? old : typeof reference === 'string' ? reference : '';
 			let next = base;
+			let note: string | undefined;
 
 			if ( operation === 'replace' ) {
 				next = base === '' ? '' : base.replace( new RegExp( escapeRegExp( find ), ignoreCase ? 'gi' : 'g' ), () => replace );
@@ -271,8 +400,16 @@ export function previewTransform(
 			} else if ( operation === 'suffix' ) {
 				next = base === '' || base.endsWith( text ) ? base : base + text;
 			} else {
+				const named = usesName ? templateName( item, lang, nameField, defaultLang ) : { text: '', fallback: false };
+
+				if ( usesName && ownNameOnly && named.fallback ) {
+					skippedNoName += 1;
+					continue;
+				}
+
 				const values: Record< string, string | null > = {
-					'{name}': shownNameOf( item ),
+					// Not loaded: shown as the token itself, and noted.
+					'{name}': named.text,
 					'{default_name}': String( ( item as { name?: unknown } ).name ?? '' ),
 					'{sku}': String( ( item as { sku?: unknown } ).sku ?? '' ),
 					// Filled in by the server: unknown here.
@@ -286,9 +423,27 @@ export function previewTransform(
 				}
 
 				next = text
-					.replace( /\{name\}/g, values[ '{name}' ] ?? '' )
+					.replace( /\{name\}/g, values[ '{name}' ] ?? '{name}' )
 					.replace( /\{default_name\}/g, values[ '{default_name}' ] ?? '' )
 					.replace( /\{sku\}/g, values[ '{sku}' ] ?? '' );
+
+				if ( usesName && named.fallback ) {
+					fallbackName += 1;
+					note = named.from
+						? sprintf(
+								/* translators: 1: language the name comes from, 2: the tab's language */
+								__( '{name} is the %1$s name: no %2$s name', 'wp-woocommerce-products-list' ),
+								labelOf( named.from ),
+								labelOf( lang )
+						  )
+						: sprintf(
+								/* translators: %s: the tab's language */
+								__( '{name} is another language\'s name: no %s name', 'wp-woocommerce-products-list' ),
+								labelOf( lang )
+						  );
+				} else if ( usesName && named.text === null ) {
+					note = __( '{name} is filled in on save: the name is not loaded here', 'wp-woocommerce-products-list' );
+				}
 			}
 
 			if ( next.trim() === '' || next === old || ( operation !== 'template' && next === base && old === '' ) ) {
@@ -298,12 +453,241 @@ export function previewTransform(
 			changes += 1;
 
 			if ( lines.length < PREVIEW_SHOWN ) {
-				lines.push( { id: item.id, label: itemLabel( item ), field: field.label ?? name, before: plainText( old ) || __( '(not translated)', 'wp-woocommerce-products-list' ), after: plainText( next ) } );
+				lines.push( {
+					id: item.id,
+					label: itemLabel( item ),
+					field: field.label ?? name,
+					before: plainText( old ) || __( '(not translated)', 'wp-woocommerce-products-list' ),
+					after: plainText( next ),
+					...( note ? { note } : {} ),
+				} );
 			}
 		}
 	}
 
-	return { lines, changes, unloaded, emptyTemplate };
+	return { lines, changes, unloaded, emptyTemplate, fallbackName, skippedNoName };
+}
+
+/** Price points as [step, offset] in cents (gds-woo-i18n ProductsList::PRICE_POINTS). */
+const PRICE_POINTS: Record< string, [ number, number ] > = {
+	whole: [ 100, 0 ],
+	x9: [ 1000, 900 ],
+	x99: [ 10000, 9900 ],
+	x95: [ 100, 95 ],
+	x90: [ 100, 90 ],
+	tens: [ 1000, 0 ],
+};
+
+/** The price point nearest to a price in cents (a tie goes up), never zero or below. */
+export function pricePoint( cents: number, step: number, offset: number ): number {
+	const lower = Math.floor( ( cents - offset ) / step ) * step + offset;
+	const upper = lower + step;
+
+	if ( lower <= 0 ) {
+		return upper;
+	}
+
+	return cents - lower < upper - cents ? lower : upper;
+}
+
+/** One price operation in integer cents, as the server does it; null when there is nothing to change. */
+export function priceOperation( cents: number | null, operation: string, amount: number | null, rounding: string ): number | null {
+	const by = amount ?? 0;
+	const amountCents = Math.round( by * 100 );
+	let result: number;
+
+	if ( operation === 'set' ) {
+		result = amountCents;
+	} else if ( cents === null ) {
+		return null;
+	} else if ( operation === 'increase_percent' ) {
+		result = Math.round( ( cents * ( 100 + by ) ) / 100 );
+	} else if ( operation === 'decrease_percent' ) {
+		result = Math.round( ( cents * ( 100 - by ) ) / 100 );
+	} else if ( operation === 'increase_amount' ) {
+		result = cents + amountCents;
+	} else if ( operation === 'decrease_amount' ) {
+		result = cents - amountCents;
+	} else {
+		result = cents;
+	}
+
+	if ( result <= 0 ) {
+		return null;
+	}
+
+	const point = PRICE_POINTS[ rounding ];
+
+	return point ? pricePoint( result, point[ 0 ], point[ 1 ] ) : result;
+}
+
+type MarketPrices = { regular_price: string; sale_price: string };
+
+/** One operation on one of a row's market prices, in cents; a sale from the regular price starts from the regular one. */
+export function fieldPriceOperation( current: MarketPrices, field: keyof MarketPrices, operation: string, amount: number | null, rounding: string ): number | null {
+	if ( operation === 'sale_from_regular' ) {
+		if ( field !== 'sale_price' || current.regular_price === '' ) {
+			return null;
+		}
+
+		return priceOperation( Math.round( Number( current.regular_price ) * 100 ), 'decrease_percent', amount, rounding );
+	}
+
+	const cents = current[ field ] === '' ? null : Math.round( Number( current[ field ] ) * 100 );
+
+	return priceOperation( cents, operation, amount, rounding );
+}
+
+/** Whether the action is gds-woo-i18n's "Adjust market prices" (price operations with a rounding). */
+export function isPriceTool( def: Pick< DeclarativeAction, 'args' > ): boolean {
+	return def.args.some( ( arg ) => arg.id === 'operation' && arg.options.some( ( option ) => option.value === 'increase_percent' ) ) && def.args.some( ( arg ) => arg.id === 'rounding' );
+}
+
+export interface PricePreview {
+	lines: PreviewLine[];
+	changes: number;
+	/** Rows whose market prices the editor has not loaded (variations reached through their parent): not previewed. */
+	unloaded: number;
+	/** Rows the server refuses: the sale price would not be below the regular price. */
+	invalid: number;
+	lowest: string | null;
+	highest: string | null;
+}
+
+function priceText( value: number | string, field: ProductField | undefined, settings: Pick< Settings, 'currency' > ): string {
+	const currency = ( field as { currency?: FieldCurrency } | undefined )?.currency;
+
+	return currency ? formatMoney( value, currency, settings as Settings ) : String( value );
+}
+
+/**
+ * What "Adjust market prices" does to the rows, worked out from the market
+ * prices the tab loaded (`i18n.{lang}.{price}`: the row's own price, else
+ * the converted one the shop sells at, which is where the server starts),
+ * with its rounding: "e.g. Collonil Organic Care: 159 kr → 169 kr", the
+ * lowest and the highest result, and the rows the server will refuse.
+ */
+export function previewPrices( def: DeclarativeAction, data: Record< string, unknown >, tabId: string, items: ProductListItem[], fields: ProductField[], settings: Pick< Settings, 'currency' > ): PricePreview | null {
+	if ( ! isPriceTool( def ) || missingArg( def, data ) ) {
+		return null;
+	}
+
+	const operation = String( data.operation ?? '' );
+	const rounding = String( data.rounding ?? 'none' );
+	const raw = String( data.amount ?? '' ).trim().replace( ',', '.' );
+	const amount = operation === 'round' ? null : Number( raw );
+
+	if ( operation !== 'round' && ( raw === '' || ! Number.isFinite( amount ) ) ) {
+		return null;
+	}
+
+	if ( operation === 'round' && rounding === 'none' ) {
+		return null;
+	}
+
+	const chosen = ( Array.isArray( data.fields ) ? ( data.fields as string[] ) : [] ).map( ( value ) => ( value.endsWith( '_price' ) ? value : `${ value }_price` ) ) as Array< keyof MarketPrices >;
+	const wanted: Array< keyof MarketPrices > = operation === 'sale_from_regular' ? [ 'sale_price' ] : chosen.filter( ( field ) => field === 'regular_price' || field === 'sale_price' );
+	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
+	const regularField = byId.get( `${ tabId }.regular_price` );
+	const saleField = byId.get( `${ tabId }.sale_price` );
+	const lines: PreviewLine[] = [];
+	let changes = 0;
+	let unloaded = 0;
+	let invalid = 0;
+	let lowest: number | null = null;
+	let highest: number | null = null;
+
+	const read = ( field: ProductField | undefined, item: ProductListItem ): { own: string; shown: string } | null => {
+		if ( ! field ) {
+			return null;
+		}
+
+		const own = readFieldValue( field, item );
+		const reference = readReference( field, item );
+
+		if ( own === undefined && reference === undefined ) {
+			return null;
+		}
+
+		const ownText = own === null || own === undefined ? '' : String( own );
+
+		return { own: ownText, shown: ownText !== '' ? ownText : reference === null || reference === undefined ? '' : String( reference ) };
+	};
+
+	for ( const item of items ) {
+		// Only rows with a price of their own: simple products and variations.
+		if ( item._placeholder || isVariableParent( item ) || ! ( isVariation( item ) || [ 'simple', 'external' ].includes( String( item.type ?? '' ) ) ) ) {
+			continue;
+		}
+
+		const regular = read( regularField, item );
+		const sale = read( saleField, item );
+
+		if ( ! regular || ( wanted.includes( 'sale_price' ) && ! sale ) ) {
+			unloaded += 1;
+			continue;
+		}
+
+		const current: MarketPrices = { regular_price: regular.shown, sale_price: sale?.shown ?? '' };
+		const next: Partial< MarketPrices > = {};
+
+		for ( const field of wanted ) {
+			const result = fieldPriceOperation( current, field, operation, amount, rounding );
+
+			if ( result !== null ) {
+				next[ field ] = ( result / 100 ).toFixed( 2 );
+			}
+		}
+
+		const newRegular = next.regular_price ?? current.regular_price;
+
+		if ( next.sale_price !== undefined && newRegular !== '' && Number( next.sale_price ) >= Number( newRegular ) ) {
+			invalid += 1;
+			continue;
+		}
+
+		for ( const field of wanted ) {
+			const value = next[ field ];
+
+			if ( value === undefined ) {
+				continue;
+			}
+
+			const own = field === 'regular_price' ? regular.own : sale?.own ?? '';
+
+			// Unchanged, or what the shop shows anyway without a price of its own: the server writes nothing.
+			if ( own !== '' ? Number( own ) === Number( value ) : Number( current[ field ] ) === Number( value ) ) {
+				continue;
+			}
+
+			changes += 1;
+			lowest = lowest === null ? Number( value ) : Math.min( lowest, Number( value ) );
+			highest = highest === null ? Number( value ) : Math.max( highest, Number( value ) );
+
+			if ( lines.length < PREVIEW_SHOWN ) {
+				const priceField = field === 'regular_price' ? regularField : saleField;
+
+				lines.push( {
+					id: item.id,
+					label: itemLabel( item ),
+					field: priceField?.label ?? field,
+					before: current[ field ] !== '' ? priceText( current[ field ], priceField, settings ) : __( '(no sale)', 'wp-woocommerce-products-list' ),
+					after: priceText( value, priceField, settings ),
+				} );
+			}
+		}
+	}
+
+	const shownField = wanted.includes( 'regular_price' ) ? regularField : saleField;
+
+	return {
+		lines,
+		changes,
+		unloaded,
+		invalid,
+		lowest: lowest === null ? null : priceText( lowest, shownField, settings ),
+		highest: highest === null ? null : priceText( highest, shownField, settings ),
+	};
 }
 
 /** The ids an action runs on: variations only when its scope takes them. */
@@ -320,7 +704,7 @@ export function toolIds( def: DeclarativeAction, items: ProductListItem[] ): num
  * History batch, one Undo with the field edits).
  */
 export interface StagedTool {
-	/** `<tab id>:<action id>`: one staged run per tool and language. */
+	/** `<tab id>:<action id>:<n>`: a tool can be added more than once per language (two templates on two fields). */
 	key: string;
 	def: DeclarativeAction;
 	tabId: string;
@@ -333,8 +717,58 @@ export interface StagedTool {
 	data: Record< string, unknown >;
 }
 
+let stagedSequence = 0;
+
+/** A new key for a staged run of the tool in this tab (`<tab id>:<action id>:<n>`). */
 export function stagedKey( tabId: string, def: Pick< DeclarativeAction, 'id' > ): string {
-	return `${ tabId }:${ def.id }`;
+	stagedSequence += 1;
+
+	return `${ tabId }:${ def.id }:${ stagedSequence }`;
+}
+
+/**
+ * The ids a staged run goes to at Update: the editor's rows (as they are
+ * then), plus for a price tool the variations of the selected variable
+ * parents while "apply to all variations" is ticked.
+ */
+export function stagedToolIds( entry: Pick< StagedTool, 'def' >, rows: readonly ProductListItem[], parentVariations?: readonly ProductListItem[] ): number[] {
+	return toolIds( entry.def, toolItems( entry.def, rows, parentVariations ) );
+}
+
+/** The settings of a run in words, to tell two runs of one tool apart: "SEO title · Set from template · “{name} | Widetoes”". */
+export function describeToolArgs( def: Pick< DeclarativeAction, 'args' >, args: Record< string, unknown > ): string {
+	const parts: string[] = [];
+
+	for ( const arg of def.args ) {
+		if ( arg.id === LANG_ARG || ! ( arg.id in args ) ) {
+			continue;
+		}
+
+		const value = args[ arg.id ];
+
+		if ( arg.type === 'boolean' ) {
+			if ( value === true ) {
+				parts.push( arg.label );
+			}
+		} else if ( arg.type === 'array' ) {
+			const chosen = Array.isArray( value ) ? ( value as unknown[] ).map( String ) : [];
+			const labels = arg.options.filter( ( option ) => chosen.includes( option.value ) ).map( ( option ) => option.label );
+
+			if ( labels.length ) {
+				parts.push( labels.join( ', ' ) );
+			}
+		} else if ( arg.type === 'select' ) {
+			const option = arg.options.find( ( entry ) => entry.value === String( value ?? '' ) );
+
+			if ( option && ! ( arg.id === 'rounding' && option.value === 'none' ) ) {
+				parts.push( option.label );
+			}
+		} else if ( value !== undefined && value !== null && String( value ).trim() !== '' ) {
+			parts.push( arg.type === 'text' ? `“${ String( value ) }”` : String( value ) );
+		}
+	}
+
+	return parts.join( ' · ' );
 }
 
 export interface LanguageToolsProps {
@@ -356,6 +790,10 @@ export interface LanguageToolsProps {
 	stage?( key: string, entry: StagedTool | null ): void;
 	/** The runs staged so far, by key. */
 	staged?: ReadonlyMap< string, StagedTool >;
+	/** "Apply price and sale fields to all variations" is ticked (the price tool then runs on the variations). */
+	applyToVariations?: boolean;
+	/** The variations of the selected variable parents, once loaded, while that option is ticked. */
+	parentVariations?: readonly ProductListItem[];
 }
 
 function sameData( a: Record< string, unknown >, b: Record< string, unknown > ): boolean {
@@ -364,11 +802,30 @@ function sameData( a: Record< string, unknown >, b: Record< string, unknown > ):
 
 type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultOpen' > & { def: DeclarativeAction; lang: string; tabId: string; onDirty( id: string, dirty: boolean ): void };
 
-function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged }: ToolProps ) {
+/** Why a fields list offers nothing for the selection: prices on variable parents, or names and SEO on variations. */
+function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined ): string {
+	if ( isSellableTool( def ) && items.some( isVariableParent ) ) {
+		if ( ! applyToVariations ) {
+			return __( 'Variable products have no prices of their own. Tick "Apply price and sale fields to all variations" to change their variations\' prices.', 'wp-woocommerce-products-list' );
+		}
+
+		if ( ! parentVariations?.length ) {
+			return __( 'Loading the variations of the selected variable products…', 'wp-woocommerce-products-list' );
+		}
+	}
+
+	if ( isSellableTool( def ) ) {
+		return __( 'None of the selected items has a price of its own.', 'wp-woocommerce-products-list' );
+	}
+
+	return __( 'None of these fields exists on the selected items (variations have no name or SEO fields of their own).', 'wp-woocommerce-products-list' );
+}
+
+function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged, applyToVariations, parentVariations }: ToolProps ) {
 	const defaults = useMemo( () => defaultsOf( def, lang ), [ def, lang ] );
-	const key = stagedKey( tabId, def );
-	const stagedEntry = staged?.get( key );
-	const [ data, setData ] = useState< Record< string, unknown > >( () => stagedEntry?.data ?? defaults );
+	// This tool's runs added to the Update in this language, in the order added.
+	const stagedEntries = useMemo( () => Array.from( staged?.values() ?? [] ).filter( ( entry ) => entry.tabId === tabId && entry.def.id === def.id ), [ staged, tabId, def.id ] );
+	const [ data, setData ] = useState< Record< string, unknown > >( defaults );
 	// What the last run was made with: settings equal to these are not "unsaved".
 	const [ ranWith, setRanWith ] = useState< Record< string, unknown > >( defaults );
 	const [ running, setRunning ] = useState( false );
@@ -377,24 +834,23 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	// How many items the last run went to, until a setting changes: the preview (made from the values before) is not shown again.
 	const [ applied, setApplied ] = useState< number | null >( null );
 	const confirmRef = useRef< HTMLDivElement >( null );
-	const ids = useMemo( () => toolIds( def, items ), [ def, items ] );
+	// The rows, and for the price tool the variations reached through the selected variable parents.
+	const workItems = useMemo( () => toolItems( def, items, applyToVariations ? parentVariations : undefined ), [ def, items, applyToVariations, parentVariations ] );
+	const ids = useMemo( () => toolIds( def, workItems ), [ def, workItems ] );
 	const copies = copiesBetweenLanguages( def );
 	const args = def.args.filter( ( arg ) => arg.id !== LANG_ARG && argShown( arg, def, data ) );
 	const missing = missingArg( def, data );
-	const preview = useMemo( () => ( fields ? previewTransform( def, data, tabId, items, fields ) : null ), [ def, data, tabId, items, fields ] );
+	const preview = useMemo( () => ( fields ? previewTransform( def, data, tabId, workItems, fields, settings ) : null ), [ def, data, tabId, workItems, fields, settings ] );
+	const pricePreview = useMemo( () => ( fields ? previewPrices( def, data, tabId, workItems, fields, settings ) : null ), [ def, data, tabId, workItems, fields, settings ] );
+	// Changing the form never touches a run already added: that one keeps its own settings until taken out.
 	const set = ( id: string, value: unknown ) => {
 		setError( null );
 		setApplied( null );
 		setConfirming( false );
 		setData( ( previous ) => ( { ...previous, [ id ]: value } ) );
-
-		// Changed after it was added: it comes out of the Update until added again with the new settings.
-		if ( stagedEntry ) {
-			stage?.( key, null );
-		}
 	};
-	// A staged run is counted by the editor as a pending change, not as unsaved tool settings.
-	const dirty = ! stagedEntry && ! sameData( data, stage ? defaults : ranWith );
+	// Settings typed but not added (staging) or not run yet.
+	const dirty = ! sameData( data, stage ? defaults : ranWith );
 	const onDirtyRef = useRef( onDirty );
 
 	useEffect( () => {
@@ -416,7 +872,7 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 			sent[ arg.id ] = data[ arg.id ];
 
 			if ( arg.type === 'array' && Array.isArray( sent[ arg.id ] ) ) {
-				const allowed = new Set( argOptions( arg, data, lang, settings, copies, items ).map( ( option ) => option.value ) );
+				const allowed = new Set( argOptions( arg, data, lang, settings, copies, workItems ).map( ( option ) => option.value ) );
 
 				sent[ arg.id ] = ( sent[ arg.id ] as string[] ).filter( ( value ) => allowed.has( value ) );
 			}
@@ -444,8 +900,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 			.finally( () => setRunning( false ) );
 	};
 
-	// A fields list where none of the fields exists on the selection (e.g. names on variations only).
-	const nothingApplies = args.some( ( arg ) => arg.type === 'array' && arg.options.length > 0 && argOptions( arg, data, lang, settings, copies, items ).length === 0 );
+	// A fields list where none of the fields exists on the selection (e.g. names on variations only, prices on variable parents).
+	const nothingApplies = args.some( ( arg ) => arg.type === 'array' && arg.options.length > 0 && argOptions( arg, data, lang, settings, copies, workItems ).length === 0 );
 	const blocked = disabled || running || ids.length === 0 || nothingApplies;
 
 	const start = () => {
@@ -462,7 +918,20 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 
 		// In the editor the run joins the Update: no question, Update (and Cancel) decide.
 		if ( stage ) {
-			stage( key, { key, def, tabId, tabLabel, ids, args: sentArgs(), data } );
+			const sent = sentArgs();
+
+			if ( stagedEntries.some( ( entry ) => sameData( entry.args, sent ) ) ) {
+				setError( __( 'This run is already added to Update.', 'wp-woocommerce-products-list' ) );
+
+				return;
+			}
+
+			const key = stagedKey( tabId, def );
+
+			stage( key, { key, def, tabId, tabLabel, ids, args: sent, data } );
+			// The form is free for the next run (another field, another template); the one added is listed above it.
+			setData( defaults );
+			setError( null );
 
 			return;
 		}
@@ -493,16 +962,33 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		}
 	};
 
-	const itemsCount = sprintf(
-		/* translators: %d: number of items */
-		_n( '%d item', '%d items', ids.length, 'wp-woocommerce-products-list' ),
-		ids.length
-	);
+	const itemsCount = toolTargetsLabel( def, items, applyToVariations ? parentVariations : undefined );
 
 	return (
 		<div className="wc-pl-language-tools__tool" onKeyDown={ onKeyDown }>
 			<strong className="wc-pl-language-tools__label">{ def.label }</strong>
 			{ def.description ? <p className="wc-pl-language-tools__description">{ def.description }</p> : null }
+			{ stage && stagedEntries.length ? (
+				<ul className="wc-pl-language-tools__staged" role="status">
+					{ stagedEntries.map( ( entry ) => (
+						<li key={ entry.key }>
+							<span>
+								{ sprintf(
+									/* translators: 1: action label, 2: language, 3: the run's settings, 4: "N items" */
+									__( '%1$s (%2$s): %3$s, runs on %4$s with Update.', 'wp-woocommerce-products-list' ),
+									def.label,
+									tabLabel,
+									describeToolArgs( def, entry.args ),
+									itemsCount
+								) }
+							</span>{ ' ' }
+							<Button variant="link" onClick={ () => stage( entry.key, null ) }>
+								{ __( 'Take it out', 'wp-woocommerce-products-list' ) }
+							</Button>
+						</li>
+					) ) }
+				</ul>
+			) : null }
 			<div className="wc-pl-language-tools__args">
 				{ args.map( ( arg ) => {
 					if ( arg.type === 'boolean' ) {
@@ -524,8 +1010,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 					}
 
 					if ( arg.type === 'array' ) {
-						const options = argOptions( arg, data, lang, settings, copies, items );
-						const inapplicable = arg.options.length - argOptions( arg, data, lang, settings, false, items ).length;
+						const options = argOptions( arg, data, lang, settings, copies, workItems );
+						const inapplicable = arg.options.length - argOptions( arg, data, lang, settings, false, workItems ).length;
 						const chosen = Array.isArray( data[ arg.id ] ) ? ( data[ arg.id ] as string[] ) : [];
 
 						return (
@@ -541,7 +1027,7 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 									/>
 								) ) }
 								{ options.length === 0 && inapplicable > 0 ? (
-									<p className="wc-pl-language-tools__description">{ __( 'None of these fields exists on the selected items (variations have no name or SEO fields of their own).', 'wp-woocommerce-products-list' ) }</p>
+									<p className="wc-pl-language-tools__description">{ nothingAppliesText( def, items, applyToVariations, parentVariations ) }</p>
 								) : inapplicable > 0 ? (
 									<p className="wc-pl-language-tools__description">
 										{ sprintf(
@@ -589,6 +1075,49 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 						applied
 					) }
 				</p>
+			) : pricePreview ? (
+				<div className="wc-pl-language-tools__preview" aria-live="polite">
+					{ pricePreview.invalid > 0 ? (
+						<p className="wc-pl-language-tools__warning">
+							{ sprintf(
+								/* translators: %d: number of items */
+								_n( '%d item is skipped: its sale price would not be below its regular price.', '%d items are skipped: their sale price would not be below their regular price.', pricePreview.invalid, 'wp-woocommerce-products-list' ),
+								pricePreview.invalid
+							) }
+						</p>
+					) : null }
+					{ pricePreview.changes === 0 ? (
+						<p className="wc-pl-language-tools__description">
+							{ pricePreview.unloaded > 0 ? __( 'No preview: the market prices of these items are not loaded in this editor.', 'wp-woocommerce-products-list' ) : __( 'Preview: this changes none of the loaded prices.', 'wp-woocommerce-products-list' ) }
+						</p>
+					) : (
+						<>
+							<p className="wc-pl-language-tools__description">
+								{ sprintf(
+									/* translators: 1: number of prices that change, 2: lowest new price, 3: highest new price */
+									_n( 'Preview: %1$d price changes (new prices %2$s – %3$s).', 'Preview: %1$d prices change (new prices %2$s – %3$s).', pricePreview.changes, 'wp-woocommerce-products-list' ),
+									pricePreview.changes,
+									pricePreview.lowest ?? '',
+									pricePreview.highest ?? ''
+								) }
+								{ pricePreview.unloaded > 0
+									? ` ${ sprintf(
+											/* translators: %d: number of items */
+											_n( '%d item not previewed: its prices are not loaded here.', '%d items not previewed: their prices are not loaded here.', pricePreview.unloaded, 'wp-woocommerce-products-list' ),
+											pricePreview.unloaded
+									  ) }`
+									: '' }
+							</p>
+							<ul>
+								{ pricePreview.lines.map( ( line ) => (
+									<li key={ `${ line.id }:${ line.field }` }>
+										<span className="wc-pl-language-tools__preview-name">{ line.label }</span> ({ line.field }) <del>{ line.before }</del> → <ins>{ line.after }</ins>
+									</li>
+								) ) }
+							</ul>
+						</>
+					) }
+				</div>
 			) : preview ? (
 				<div className="wc-pl-language-tools__preview" aria-live="polite">
 					{ preview.emptyTemplate > 0 ? (
@@ -602,6 +1131,31 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 									'wp-woocommerce-products-list'
 								),
 								preview.emptyTemplate
+							) }
+						</p>
+					) : null }
+					{ preview.fallbackName > 0 ? (
+						<p className="wc-pl-language-tools__warning">
+							{ sprintf(
+								/* translators: 1: number of values, 2: language */
+								_n(
+									'%1$d value uses another language\'s name for {name}: the product has no %2$s name. Tick "Skip products without their own name" to leave it out.',
+									'%1$d values use another language\'s name for {name}: those products have no %2$s name. Tick "Skip products without their own name" to leave them out.',
+									preview.fallbackName,
+									'wp-woocommerce-products-list'
+								),
+								preview.fallbackName,
+								tabLabel
+							) }
+						</p>
+					) : null }
+					{ preview.skippedNoName > 0 ? (
+						<p className="wc-pl-language-tools__description">
+							{ sprintf(
+								/* translators: 1: number of values, 2: language */
+								_n( '%1$d value is left as it is: no %2$s name.', '%1$d values are left as they are: no %2$s name.', preview.skippedNoName, 'wp-woocommerce-products-list' ),
+								preview.skippedNoName,
+								tabLabel
 							) }
 						</p>
 					) : null }
@@ -622,6 +1176,7 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 								{ preview.lines.map( ( line ) => (
 									<li key={ `${ line.id }:${ line.field }` }>
 										<span className="wc-pl-language-tools__preview-name">{ line.label }</span> <del>{ line.before }</del> → <ins>{ line.after }</ins>
+										{ line.note ? <span className="wc-pl-language-tools__preview-note"> ({ line.note })</span> : null }
 									</li>
 								) ) }
 							</ul>
@@ -667,26 +1222,11 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 						</Button>
 					</div>
 				</div>
-			) : stage && stagedEntry ? (
-				<div className="wc-pl-language-tools__staged" role="status">
-					<span>
-						{ sprintf(
-							/* translators: 1: action label, 2: language, 3: "N items" */
-							__( '%1$s (%2$s) runs on %3$s with Update.', 'wp-woocommerce-products-list' ),
-							def.label,
-							tabLabel,
-							itemsCount
-						) }
-					</span>{ ' ' }
-					<Button variant="link" onClick={ () => stage( key, null ) }>
-						{ __( 'Take it out', 'wp-woocommerce-products-list' ) }
-					</Button>
-				</div>
 			) : stage ? (
 				<Button variant="secondary" isDestructive={ def.destructive } aria-disabled={ blocked } onClick={ start } __next40pxDefaultSize>
 					{ sprintf(
 						/* translators: 1: action label, 2: language, 3: "N items" */
-						__( '%1$s: %2$s, add to Update (%3$s)', 'wp-woocommerce-products-list' ),
+						stagedEntries.length ? __( '%1$s: %2$s, add another run to Update (%3$s)', 'wp-woocommerce-products-list' ) : __( '%1$s: %2$s, add to Update (%3$s)', 'wp-woocommerce-products-list' ),
 						def.label,
 						tabLabel,
 						itemsCount
@@ -758,7 +1298,7 @@ export function LanguageTools( props: LanguageToolsProps ) {
 		<details className="wc-pl-language-tools" open={ props.defaultOpen || undefined }>
 			<summary>{ toolsSummary( tools, props.tabLabel ) }</summary>
 			{ tools.map( ( def ) => (
-				<Tool key={ def.id } { ...toolProps } def={ def } lang={ lang } onDirty={ onDirty } />
+				<Tool key={ `${ tabId }:${ def.id }` } { ...toolProps } def={ def } lang={ lang } onDirty={ onDirty } />
 			) ) }
 		</details>
 	);

@@ -196,7 +196,13 @@ function termsField( spec: TermsFieldSpec ): ProductField {
 		rest: {
 			param: spec.param,
 			// wc/v3 takes `[{id}]` lists.
-			write: ( value ) => ( { [ spec.id ]: ( Array.isArray( value ) ? value : [] ).map( ( id ) => ( { id: Number( id ) } ) ) } ),
+			// Only positive integer ids reach the server: `{ id: null }` would empty the product's terms.
+			write: ( value ) => ( {
+				[ spec.id ]: ( Array.isArray( value ) ? value : [] )
+					.map( Number )
+					.filter( ( id ) => Number.isInteger( id ) && id > 0 )
+					.map( ( id ) => ( { id } ) ),
+			} ),
 			applies: { product: true, variation: false },
 		},
 		edit: { group: 'organization', bulk: 'default', order: spec.order },

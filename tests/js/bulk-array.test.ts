@@ -88,6 +88,9 @@ describe( 'bulk list edits per row', () => {
 		expect( buildPayload( boots, { categories: [ 83 ], [ opId ]: 'remove' }, fields, settings ) ).toEqual( { categories: [ { id: 15 } ] } );
 		expect( buildPayload( boots, { categories: [ 94 ], [ opId ]: 'replace' }, fields, settings ) ).toEqual( { categories: [ { id: 94 } ] } );
 		expect( buildPayload( boots, { [ opId ]: 'replace' }, fields, settings ) ).toEqual( {} );
+		// "Replace all with" nothing never empties the rows' lists (categories would become Uncategorized).
+		expect( buildPayload( boots, { categories: [], [ opId ]: 'replace' }, fields, settings ) ).toEqual( {} );
+		expect( describeEdits( { categories: [], [ opId ]: 'replace' }, fields, [ boots ], settings ) ).toEqual( [] );
 	} );
 
 	it( 'without an op field (quick edit) the list is the full list, as before', () => {

@@ -11,6 +11,8 @@ import {
 	MAX_CONCURRENT_REQUESTS,
 	boundExpanded,
 	createLimiter,
+	expandAllConfirmMessage,
+	expansionSummary,
 	getChildrenState,
 	invalidateVariations,
 	loadingParentIds,
@@ -321,7 +323,7 @@ describe( 'useHierarchy', () => {
 		} );
 
 		expect( ok ).toBe( false );
-		expect( confirm ).toHaveBeenCalledWith( 10 + 500 );
+		expect( confirm ).toHaveBeenCalledWith( 10 + 500, { expanding: 10, skipped: 0, rows: 510, maxRows: EXPAND_ALL_MAX_ROWS } );
 		expect( calls ).toHaveLength( 0 );
 		expect( result.current.expandedItemIds ).toEqual( [] );
 
@@ -1051,5 +1053,143 @@ describe( 'a refetch keeps the loaded variations on screen', () => {
 
 		await waitFor( () => expect( loadingParentIds() ).toEqual( [] ) );
 		expect( getChildrenState().get( 1 )?.items.map( ( row ) => row.id ) ).toEqual( [ 1001, 1002 ] );
+	} );
+} );
+
+describe( 'changes made while a variation load is in flight', () => {
+	/** Page 1 answers at once, page 2 only when `release()` is called. */
+	function slowSecondPage( total: number ) {
+		let release: () => void = () => {};
+		let gate = Promise.resolve();
+		const hold = () => {
+			gate = new Promise< void >( ( resolve ) => {
+				release = resolve;
+			} );
+		};
+		hold();
+		const fetch: FetchVariations = async ( parentId, page, { perPage } ) => {
+			if ( page > 1 ) {
+				await gate;
+			}
+
+			const start = ( page - 1 ) * perPage;
+			const items = Array.from( { length: Math.max( 0, Math.min( perPage, total - start ) ) }, ( _, i ) => rawVariation( parentId, start + i + 1 ) );
+
+			return { items, total, totalPages: Math.ceil( total / perPage ) };
+		};
+
+		return { fetch, release: () => release(), hold };
+	}
+
+	it( 'a patch made while the pages load survives the final publish', async () => {
+		const { fetch, release } = slowSecondPage( 150 );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 150 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		let done: Promise< void > = Promise.resolve();
+		act( () => {
+			done = result.current.expand( 1 );
+		} );
+		await waitFor( () => expect( getChildrenState().get( 1 )?.items.length ).toBe( 100 ) );
+		expect( getChildrenState().get( 1 )?.status ).toBe( 'loading' );
+
+		// A quick-edit save lands on page 1 and on page 2 (not yet loaded) while the load runs.
+		act( () => patchVariationRows( [ { id: 1001, sku: 'SAVED' }, { id: 1120, sku: 'SAVED-2' } ] ) );
+		expect( getChildrenState().get( 1 )?.items.find( ( row ) => row.id === 1001 )?.sku ).toBe( 'SAVED' );
+
+		release();
+		await act( async () => {
+			await done;
+		} );
+
+		const state = getChildrenState().get( 1 );
+		expect( state?.status ).toBe( 'loaded' );
+		expect( state?.items ).toHaveLength( 150 );
+		expect( state?.items.find( ( row ) => row.id === 1001 )?.sku ).toBe( 'SAVED' );
+		expect( state?.items.find( ( row ) => row.id === 1120 )?.sku ).toBe( 'SAVED-2' );
+		expect( state?.items.find( ( row ) => row.id === 1002 )?.sku ).toBe( 'S2' );
+	} );
+
+	it( 'a refetch (after invalidation) keeps a save made while it ran, and a deletion stays deleted', async () => {
+		const { fetch, release, hold } = slowSecondPage( 150 );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 150 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		release();
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( getChildrenState().get( 1 )?.status ).toBe( 'loaded' );
+
+		// The refetch reads the server's old values; the patches below arrive before it returns.
+		hold();
+		act( () => invalidateVariations( [ 1 ] ) );
+		await waitFor( () => expect( loadingParentIds() ).toEqual( [ 1 ] ) );
+		act( () => patchVariationRows( [ { id: 1005, sku: 'NEW' } ] ) );
+		act( () => removeVariationRows( [ 1006 ] ) );
+		expect( getChildrenState().get( 1 )?.status ).not.toBe( 'loaded' );
+		release();
+		await waitFor( () => expect( getChildrenState().get( 1 )?.status ).toBe( 'loaded' ) );
+
+		const state = getChildrenState().get( 1 );
+		expect( state?.items.find( ( row ) => row.id === 1005 )?.sku ).toBe( 'NEW' );
+		expect( state?.items.some( ( row ) => row.id === 1006 ) ).toBe( false );
+		expect( state?.total ).toBe( 149 );
+	} );
+
+	it( 'a patch made before a load started is not replayed on it', async () => {
+		const { fetch, release } = slowSecondPage( 2 );
+		release();
+		act( () => patchVariationRows( [ { id: 1001, sku: 'EARLY' } ] ) );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 2 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( getChildrenState().get( 1 )?.items.find( ( row ) => row.id === 1001 )?.sku ).toBe( 'S1' );
+	} );
+} );
+
+describe( 'expandAll that leaves products collapsed', () => {
+	it( 'asks first, telling how many products open and how many stay collapsed', async () => {
+		// 100 parents with 30 variations each: only some fit under EXPAND_ALL_MAX_ROWS.
+		const parents = Array.from( { length: 100 }, ( _, i ) => parent( i + 1, 30 ) );
+		const { fetch, calls } = fakeFetch( Object.fromEntries( parents.map( ( p ) => [ p.id, 30 ] ) ) );
+		const confirm = vi.fn( async () => false );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: confirm, onExpandAllLimit: () => {} } ) );
+
+		await act( async () => {
+			await result.current.expandAll();
+		} );
+
+		const fit = Math.floor( ( EXPAND_ALL_MAX_ROWS - 100 ) / 30 );
+		expect( confirm ).toHaveBeenCalledWith( 100 + fit * 30, { expanding: fit, skipped: 100 - fit, rows: 100 + fit * 30, maxRows: EXPAND_ALL_MAX_ROWS } );
+		expect( calls ).toHaveLength( 0 );
+	} );
+
+	it( 'asks even below the row warning when some products would stay collapsed', async () => {
+		// 3 + 200 + 300 = 503 is fine; the third (300 more) would pass 600 → partial, under the 400-row warning.
+		const parents = [ parent( 1, 200 ), parent( 2, 150 ), parent( 3, 300 ) ];
+		const { fetch } = fakeFetch( { 1: 200, 2: 150, 3: 300 } );
+		const confirm = vi.fn( async () => true );
+		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: confirm, onExpandAllLimit: () => {} } ) );
+
+		await act( async () => {
+			await result.current.expandAll();
+		} );
+
+		expect( confirm ).toHaveBeenCalledWith( 353, { expanding: 2, skipped: 1, rows: 353, maxRows: EXPAND_ALL_MAX_ROWS } );
+		expect( result.current.expandedItemIds ).toEqual( [ 1, 2 ] );
+		expect( expansionSummary( parents, result.current.expandedItemIds ) ).toEqual( { expanded: 2, total: 3 } );
+	} );
+
+	it( 'words the confirm with the outcome', () => {
+		expect( expandAllConfirmMessage( { expanding: 17, skipped: 83, rows: 595, maxRows: 600 } ) ).toContain( 'Expands 17 of 100 products (about 595 rows on one page); 83 stay collapsed so the page stays under 600 rows.' );
+		expect( expandAllConfirmMessage( { expanding: 10, skipped: 0, rows: 510 } ) ).toContain( 'Expands 10 products (about 510 rows on one page)' );
+	} );
+
+	it( 'expansionSummary counts only the variable products on the page', () => {
+		const parents = [ parent( 1 ), parent( 2, 0 ), parent( 3 ) ];
+
+		expect( expansionSummary( parents, [ 3, 99 ] ) ).toEqual( { expanded: 1, total: 2 } );
+		expect( expansionSummary( [ parent( 2, 0 ) ], [] ) ).toBeNull();
 	} );
 } );

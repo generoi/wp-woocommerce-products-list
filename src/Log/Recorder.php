@@ -351,7 +351,7 @@ final class Recorder
             $seen[$item['object_id']] = true;
             self::$loggedErrors[$item['object_id'].'|'.($error['code'] ?? '')] = true;
 
-            $rows[] = self::errorRow($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error, $item['before'], $item['attempted']);
+            array_push($rows, ...self::errorRows($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error, $item['before'], $item['attempted']));
         }
 
         if ($errors !== []) {
@@ -379,7 +379,7 @@ final class Recorder
                 $stored = $paths !== [] ? wc_get_product($id) : null;
                 $before = $stored instanceof WC_Product && $stored->get_id() > 0 ? self::snapshot($stored, $paths) : [];
 
-                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $rowParent, false, $paths, self::context($request, array_keys($body)), $error, $before, self::attempted($body, $paths));
+                array_push($rows, ...self::errorRows($isVariation ? 'variation' : 'product', $id, $rowParent, false, $paths, self::context($request, array_keys($body)), $error, $before, self::attempted($body, $paths)));
             }
         }
 
@@ -387,37 +387,46 @@ final class Recorder
     }
 
     /**
+     * The error rows of one rejected item: one per field it tried to
+     * change, with the stored and the attempted value, so History finds a
+     * failed attempt by field and shows what was tried. An item whose body
+     * names no field gets one row without a field.
+     *
      * @param  array<int, string>  $paths
      * @param  array<string, mixed>  $context
      * @param  array{code: string, message: string}|null  $error
      * @param  array<string, ?string>  $before  stored values of the paths when the save was attempted
      * @param  array<string, ?string>  $attempted  the values the request asked for
-     * @return array<string, mixed>
+     * @return array<int, array<string, mixed>>
      */
-    private static function errorRow(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error, array $before = [], array $attempted = []): array
+    private static function errorRows(string $objectType, int $objectId, int $parentId, bool $creating, array $paths, array $context, ?array $error, array $before = [], array $attempted = []): array
     {
-        $single = count($paths) === 1 ? $paths[0] : null;
         $context += ['code' => $error['code'] ?? '', 'fields' => $paths];
-
-        // One error row per rejected item: with one field the values are
-        // the row's own columns, with several they ride along in the context.
-        if ($single === null && $attempted !== []) {
-            $context['before'] = $before;
-            $context['attempted'] = $attempted;
-        }
-
-        return [
+        $base = [
             'action' => $creating ? 'create' : 'update',
             'object_type' => $objectType,
             'object_id' => $objectId,
             'parent_id' => $parentId,
-            'field' => $single ?? '',
-            'old_value' => $single !== null ? ($before[$single] ?? null) : null,
-            'new_value' => $single !== null ? ($attempted[$single] ?? null) : null,
             'status' => 'error',
             'message' => $error['message'] ?? __('The save was rejected.', 'wp-woocommerce-products-list'),
             'context' => $context,
         ];
+
+        if ($paths === []) {
+            return [$base + ['field' => '', 'old_value' => null, 'new_value' => null]];
+        }
+
+        $rows = [];
+
+        foreach ($paths as $path) {
+            $rows[] = $base + [
+                'field' => $path,
+                'old_value' => $before[$path] ?? null,
+                'new_value' => $attempted[$path] ?? null,
+            ];
+        }
+
+        return $rows;
     }
 
     /**

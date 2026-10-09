@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TERMS_STORAGE_PREFIX, TERMS_STORAGE_TTL, clearTermElements, readStoredTerms, termElements } from '../../resources/fields/terms';
+import { TERMS_STORAGE_PREFIX, TERMS_STORAGE_TTL, clearTermElements, createTermsFields, readStoredTerms, termElements } from '../../resources/fields/terms';
+import { editSettings } from './edit-fixtures';
 
 const getTerms = vi.fn();
 
@@ -50,5 +51,13 @@ describe( 'termElements', () => {
 
 		await expect( termElements( 'product_tag' ) ).rejects.toThrow( 'down' );
 		expect( await termElements( 'product_tag' ) ).toEqual( [] );
+	} );
+} );
+
+describe( 'terms field write', () => {
+	it( 'sends only positive integer term ids, never { id: null }', () => {
+		const categories = createTermsFields( editSettings() ).find( ( entry ) => entry.id === 'categories' );
+
+		expect( categories?.rest?.write?.( [ 'Droppi', 15, '22', 0, -3, null ], {} as never ) ).toEqual( { categories: [ { id: 15 }, { id: 22 } ] } );
 	} );
 } );

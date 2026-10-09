@@ -310,6 +310,30 @@ class SaveHookTest extends RestTestCase
         $this->assertSame('FREE', wc_get_product($product->get_id())->get_sku());
     }
 
+    public function test_a_term_list_without_valid_ids_is_refused_and_keeps_the_terms(): void
+    {
+        $term = wp_insert_term('Droppi', 'product_cat');
+        $termId = (int) $term['term_id'];
+        $product = $this->simpleProduct(['sku' => 'TERMS']);
+        $product->set_category_ids([$termId]);
+        $product->save();
+        $good = $this->simpleProduct(['sku' => 'TERMS2']);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [
+                ['id' => $product->get_id(), 'categories' => [['id' => null]]],
+                ['id' => $good->get_id(), 'categories' => [['id' => $termId]]],
+            ],
+        ]);
+        $this->assertStatus(200, $response);
+        $items = $this->data($response)['update'];
+        $this->assertSame('wc_products_list_invalid_term', $items[0]['error']['code']);
+        $this->assertArrayNotHasKey('error', $items[1]);
+
+        $this->assertSame([$termId], wc_get_product($product->get_id())->get_category_ids());
+        $this->assertSame([$termId], wc_get_product($good->get_id())->get_category_ids());
+    }
+
     public function test_a_rejected_single_save_names_the_sku_owner_and_keeps_the_values(): void
     {
         $owner = $this->simpleProduct(['sku' => 'TAKEN', 'name' => 'Owner']);
@@ -319,12 +343,22 @@ class SaveHookTest extends RestTestCase
         $this->assertSame(400, $response->get_status());
         $this->assertSame(sprintf('The SKU "TAKEN" is already used by "Owner" (#%d).', $owner->get_id()), $response->as_error()->get_error_message());
 
+        // One error row per field the save tried to change, each with the
+        // stored and the attempted value, so History finds it by field.
         $rows = $this->rows();
-        $this->assertCount(1, $rows);
-        $this->assertSame('', $rows[0]['field']);
-        $context = json_decode($rows[0]['context'], true);
-        $this->assertSame(['sku' => 'TAKEN', 'regular_price' => '12'], $context['attempted']);
-        $this->assertSame('FREE', $context['before']['sku']);
+        $this->assertCount(2, $rows);
+        $byField = array_column($rows, null, 'field');
+        $this->assertEqualsCanonicalizing(['sku', 'regular_price'], array_keys($byField));
+        $this->assertSame(['FREE', 'TAKEN'], [$byField['sku']['old_value'], $byField['sku']['new_value']]);
+        $this->assertSame(['10', '12'], [$byField['regular_price']['old_value'], $byField['regular_price']['new_value']]);
+
+        foreach ($rows as $row) {
+            $this->assertSame('error', $row['status']);
+            $this->assertSame(sprintf('The SKU "TAKEN" is already used by "Owner" (#%d).', $owner->get_id()), $row['message']);
+            $context = json_decode($row['context'], true);
+            $this->assertSame('product_invalid_sku', $context['code']);
+            $this->assertEqualsCanonicalizing(['sku', 'regular_price'], $context['fields']);
+        }
 
         // A malformed SKU nobody owns keeps WooCommerce's own message.
         $this->assertNull(Saves::skuOwnerMessage('NOBODY', $product->get_id()));
@@ -445,7 +479,11 @@ class SaveHookTest extends RestTestCase
         $this->assertArrayNotHasKey('error', $update[2]);
 
         $rows = $this->rows();
-        $this->assertCount(3, $rows);
+        // a and c one change each; b one error row per field it tried.
+        $this->assertCount(4, $rows);
+        $bRows = array_values(array_filter($rows, static fn (array $row): bool => (int) $row['object_id'] === $b->get_id()));
+        $this->assertSame(['error', 'error'], array_column($bRows, 'status'));
+        $this->assertEqualsCanonicalizing(['sku', 'regular_price'], array_column($bRows, 'field'));
 
         $byObject = array_column($rows, null, 'object_id');
         $this->assertSame(['ok', 'regular_price', '189', '10'], [$byObject[$a->get_id()]['status'], $byObject[$a->get_id()]['field'], $byObject[$a->get_id()]['old_value'], $byObject[$a->get_id()]['new_value']]);

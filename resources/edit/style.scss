@@ -603,6 +603,20 @@ html.wc-pl-editing .wc-products-list__notices {
 		margin-inline-end: 4px;
 		color: var( --wp-components-color-foreground-muted, #757575 );
 	}
+
+	&__preview-note {
+		color: var( --wp-components-color-foreground-muted, #757575 );
+	}
+
+	&__staged {
+		margin: 0 0 12px;
+		padding: 0;
+		list-style: none;
+
+		li {
+			margin: 0 0 4px;
+		}
+	}
 }
 
 .wc-pl-bulk-numeric__round {
@@ -714,4 +728,15 @@ html.wc-pl-editing .wc-products-list__notices {
 		padding-inline-start: 18px;
 		list-style: disc;
 	}
+}
+
+// The keyboard shortcut shown on "Update & next" (Shift+Enter), as "Bulk edit (Alt+B)" shows its own.
+.wc-pl-edit__shortcut {
+	margin-inline-start: 8px;
+	padding: 0 4px;
+	border-radius: 2px;
+	background: transparent;
+	font-family: inherit;
+	font-size: 11px;
+	opacity: 0.75;
 }

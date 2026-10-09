@@ -118,13 +118,88 @@ export interface ExpandAllLimit {
 	rows: number;
 }
 
+/** What an expandAll is about to do: told to the confirm so it can say how many products stay collapsed. */
+export interface ExpandAllPlan {
+	/** Parents this call would expand. */
+	expanding: number;
+	/** Parents it would leave collapsed to stay under EXPAND_ALL_MAX_ROWS. */
+	skipped: number;
+	/** Rows on the page afterwards. */
+	rows: number;
+	/** The page's row limit (EXPAND_ALL_MAX_ROWS). */
+	maxRows: number;
+}
+
+/**
+ * The confirm text of an expandAll: the row count, and when some products
+ * will stay collapsed, how many of how many get expanded.
+ */
+export function expandAllConfirmMessage( plan: Pick< ExpandAllPlan, 'expanding' | 'skipped' | 'rows' > & { maxRows?: number } ): string {
+	if ( plan.skipped > 0 ) {
+		return sprintf(
+			/* translators: 1: products that get expanded, 2: expandable products on the page, 3: rows on the page afterwards, 4: products left collapsed, 5: row limit */
+			_n(
+				'Expands %1$d of %2$d products (about %3$d rows on one page); %4$d stays collapsed so the page stays under %5$d rows. Large tables are slow to render and scroll; a smaller page size or a filter keeps it fast. Continue?',
+				'Expands %1$d of %2$d products (about %3$d rows on one page); %4$d stay collapsed so the page stays under %5$d rows. Large tables are slow to render and scroll; a smaller page size or a filter keeps it fast. Continue?',
+				plan.skipped,
+				'wp-woocommerce-products-list'
+			),
+			plan.expanding,
+			plan.expanding + plan.skipped,
+			plan.rows,
+			plan.skipped,
+			plan.maxRows ?? EXPAND_ALL_MAX_ROWS
+		);
+	}
+
+	return sprintf(
+		/* translators: 1: number of products, 2: number of rows */
+		_n(
+			'Expands %1$d product (about %2$d rows on one page), which makes the table slow to render and scroll. Continue? (A smaller page size or a filter keeps it fast.)',
+			'Expands %1$d products (about %2$d rows on one page), which makes the table slow to render and scroll. Continue? (A smaller page size or a filter keeps it fast.)',
+			plan.expanding,
+			'wp-woocommerce-products-list'
+		),
+		plan.expanding,
+		plan.rows
+	);
+}
+
+/**
+ * The page's expansion at a glance, for the toolbar: how many of its
+ * variable products are open. Null when there is nothing to expand.
+ */
+export function expansionSummary( parents: ProductRow[], expandedIds: readonly number[] ): { expanded: number; total: number } | null {
+	const expanded = new Set( expandedIds );
+	let total = 0;
+	let open = 0;
+
+	for ( const parent of parents ) {
+		if ( ! parent._hasChildren ) {
+			continue;
+		}
+
+		total += 1;
+
+		if ( expanded.has( parent.id ) ) {
+			open += 1;
+		}
+	}
+
+	return total > 0 ? { expanded: open, total } : null;
+}
+
 export interface HierarchyOptions {
 	/** Defaults to `api/client` `getVariations`; tests inject a stub. */
 	fetchVariations?: FetchVariations;
 	/** Defaults to `limits.maxChildrenPerParent`. */
 	maxChildren?: number;
-	/** Asked before expandAll adds more than EXPAND_ALL_WARN_ROWS rows; defaults to window.confirm. */
-	confirmExpandAll?: ( rows: number ) => boolean | Promise< boolean >;
+	/**
+	 * Asked before expandAll adds more than EXPAND_ALL_WARN_ROWS rows, or
+	 * leaves products collapsed; defaults to window.confirm with
+	 * `expandAllConfirmMessage`.
+	 */
+	confirmExpandAll?: ( rows: number, plan: ExpandAllPlan ) => boolean | Promise< boolean >;
 	/** Called when expandAll left parents collapsed to stay under EXPAND_ALL_MAX_ROWS; defaults to an info notice. */
 	onExpandAllLimit?: ( limit: ExpandAllLimit ) => void;
 	/** Defaults to window.sessionStorage. */
@@ -190,9 +265,16 @@ export const getItemLevel = ( item: ProductListItem ): number => item._level;
 
 type Listener = () => void;
 
+type RowPatch = Partial< ProductListItem > & { id: number };
+
+/** A change made to a parent's rows while its load ran: replayed on the rows the load brings back. */
+type PendingChange = { patches: Map< number, RowPatch > } | { removed: Set< number > };
+
 interface Inflight {
 	promise: Promise< void >;
 	controller: AbortController;
+	/** Patches and removals that arrived while this load was in flight, in order. */
+	pending: PendingChange[];
 }
 
 let children: Map< number, ChildrenState > = new Map();
@@ -352,12 +434,22 @@ export function getChildrenState(): ReadonlyMap< number, ChildrenState > {
  * Merge partial rows into loaded variations by id. Called by the products
  * store's `patchItems`; unknown ids are ignored.
  */
-export function patchVariationRows( items: Array< Partial< ProductListItem > & { id: number } > ): void {
-	if ( ! items.length || ! children.size ) {
+export function patchVariationRows( items: RowPatch[] ): void {
+	if ( ! items.length ) {
 		return;
 	}
 
 	const byId = new Map( items.map( ( item ) => [ item.id, item ] ) );
+
+	// A load in flight brings back rows read before this patch: replay it on them.
+	for ( const entry of inflight.values() ) {
+		entry.pending.push( { patches: byId } );
+	}
+
+	if ( ! children.size ) {
+		return;
+	}
+
 	let changed = false;
 	const next = new Map( children );
 
@@ -369,11 +461,7 @@ export function patchVariationRows( items: Array< Partial< ProductListItem > & {
 		changed = true;
 		next.set( parentId, {
 			...state,
-			items: state.items.map( ( item ) => {
-				const patch = byId.get( item.id );
-
-				return patch ? ( normalizeVariation( withImageFallback( item, patch, parentId ), parentId ) as VariationRow ) : item;
-			} ),
+			items: applyPatches( state.items, byId, parentId ),
 		} );
 	}
 
@@ -381,6 +469,31 @@ export function patchVariationRows( items: Array< Partial< ProductListItem > & {
 		children = next;
 		emit();
 	}
+}
+
+function applyPatches( items: VariationRow[], byId: ReadonlyMap< number, RowPatch >, parentId: number ): VariationRow[] {
+	return items.map( ( item ) => {
+		const patch = byId.get( item.id );
+
+		return patch ? ( normalizeVariation( withImageFallback( item, patch, parentId ), parentId ) as VariationRow ) : item;
+	} );
+}
+
+/** `items` with the changes made while their load ran, in the order they were made. */
+function replayPending( items: VariationRow[], pending: readonly PendingChange[], parentId: number ): VariationRow[] {
+	let result = items;
+
+	for ( const change of pending ) {
+		if ( 'patches' in change ) {
+			if ( result.some( ( item ) => change.patches.has( item.id ) ) ) {
+				result = applyPatches( result, change.patches, parentId );
+			}
+		} else {
+			result = result.filter( ( item ) => ! change.removed.has( item.id ) );
+		}
+	}
+
+	return result;
 }
 
 /**
@@ -408,11 +521,16 @@ function withImageFallback( item: VariationRow, patch: Partial< ProductListItem 
 
 /** Drop variations by id (after delete). Parents being removed drop their whole state. */
 export function removeVariationRows( ids: number[] ): void {
-	if ( ! ids.length || ! children.size ) {
+	if ( ! ids.length || ( ! children.size && ! inflight.size ) ) {
 		return;
 	}
 
 	const gone = new Set( ids );
+
+	for ( const entry of inflight.values() ) {
+		entry.pending.push( { removed: gone } );
+	}
+
 	let changed = false;
 	const next = new Map( children );
 
@@ -701,7 +819,7 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 
 	const controller = new AbortController();
 	const { signal } = controller;
-	const entry: Inflight = { controller, promise: Promise.resolve() };
+	const entry: Inflight = { controller, promise: Promise.resolve(), pending: [] };
 	const isCancelled = () => signal.aborted;
 
 	// The loading marker shows at once for a single expand; during expandAll the expanded ids already show every parent loading.
@@ -726,7 +844,7 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 				// A first load shows page 1 at once; a refetch keeps the
 				// stale rows on screen until the whole list is back.
 				if ( ! previous?.items.length ) {
-					void setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total }, false );
+					void setChildren( parentId, { status: 'loading', items: replayPending( pages[ 0 ] ?? [], entry.pending, parentId ), total }, false );
 				}
 
 				await Promise.all(
@@ -742,8 +860,13 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 			}
 
 			evict();
-			const items = pages.flat();
-			await setChildren( parentId, filtered ? { status: 'loaded', items, total, filtered } : { status: 'loaded', items, total }, false );
+			// Saves, optimistic patches and deletions made while the pages were on their way win over what the pages say.
+			const fetched = pages.flat();
+			const items = replayPending( fetched, entry.pending, parentId );
+			const dropped = fetched.length - items.length;
+			entry.pending = [];
+			const loadedTotal = Math.max( 0, total - dropped );
+			await setChildren( parentId, filtered ? { status: 'loaded', items, total: loadedTotal, filtered } : { status: 'loaded', items, total: loadedTotal }, false );
 
 			if ( inBulkLoad() ) {
 				noteBulkRows( items.length );
@@ -840,18 +963,12 @@ export function writeExpanded( storage: Pick< Storage, 'setItem' > | null, ids: 
 	}
 }
 
-function defaultConfirm( rows: number ): boolean {
+function defaultConfirm( _rows: number, plan: ExpandAllPlan ): boolean {
 	if ( typeof window === 'undefined' || typeof window.confirm !== 'function' ) {
 		return true;
 	}
 
-	return window.confirm(
-		sprintf(
-			/* translators: %d: number of rows */
-			__( 'This will show about %d rows on one page, which makes the table slow to render and scroll. Continue? (A smaller page size or a filter keeps it fast.)', 'wp-woocommerce-products-list' ),
-			rows
-		)
-	);
+	return window.confirm( expandAllConfirmMessage( plan ) );
 }
 
 function sameIds( a: number[], b: number[] ): boolean {
@@ -1127,7 +1244,10 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 				return false;
 			}
 
-			if ( ! force && projected > EXPAND_ALL_WARN_ROWS && ! ( await confirmExpandAll( projected ) ) ) {
+			// Large, or partial: the user hears how many products open and how many stay collapsed before anything loads.
+			const plan: ExpandAllPlan = { expanding: fit.length, skipped, rows: projected, maxRows: EXPAND_ALL_MAX_ROWS };
+
+			if ( ! force && ( projected > EXPAND_ALL_WARN_ROWS || skipped > 0 ) && ! ( await confirmExpandAll( projected, plan ) ) ) {
 				return false;
 			}
 

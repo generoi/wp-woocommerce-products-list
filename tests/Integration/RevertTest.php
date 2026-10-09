@@ -163,6 +163,59 @@ class RevertTest extends RestTestCase
         $this->assertSame($batches['items'][0]['batch_id'], $rows[0]['reverted_by']['batch_id']);
     }
 
+    public function test_a_revert_builds_its_sub_items_with_only_the_requested_fields(): void
+    {
+        $parents = [$this->variableProduct(['38', '39', '40']), $this->variableProduct(['41', '42'])];
+        $update = array_map(static fn (WC_Product $p): array => ['id' => $p->get_id(), 'menu_order' => 7], $parents);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => $update], [Logger::SOURCE_HEADER => 'bulk']));
+
+        // What each wc/v3 sub-item looked like once every filter had run,
+        // and which `_fields` the controller was asked to build.
+        $built = [];
+        $capture = static function ($response, $product, $request) use (&$built) {
+            $built[] = [
+                'keys' => array_keys((array) $response->get_data()),
+                '_fields' => $request instanceof WP_REST_Request ? $request->get_param('_fields') : null,
+            ];
+
+            return $response;
+        };
+        add_filter('woocommerce_rest_prepare_product_object', $capture, PHP_INT_MAX, 3);
+
+        global $wpdb;
+        $before = $wpdb->num_queries;
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['fields' => 'id,menu_order']);
+        $queries = $wpdb->num_queries - $before;
+
+        remove_filter('woocommerce_rest_prepare_product_object', $capture, PHP_INT_MAX);
+
+        $this->assertStatus(200, $response);
+        $data = $this->data($response);
+        $this->assertSame([true, true], array_column($data['results'], 'ok'));
+
+        foreach ($parents as $parent) {
+            $this->assertSame(0, wc_get_product($parent->get_id())->get_menu_order());
+        }
+
+        $this->assertCount(2, $built);
+
+        foreach ($built as $item) {
+            // `fields` reaches the sub-items: the controller builds only
+            // those keys (no price range over every variation) and the trim
+            // leaves nothing else.
+            $this->assertSame('id,menu_order,id', $item['_fields']);
+            $this->assertEqualsCanonicalizing(['id', 'menu_order'], $item['keys']);
+        }
+
+        foreach ($data['items'] as $item) {
+            $this->assertEqualsCanonicalizing(['id', 'menu_order'], array_keys($item));
+        }
+
+        // Loose budget against regressions back to full serialisation.
+        $this->assertLessThan(400, $queries, 'queries for reverting 2 variable products');
+    }
+
     public function test_only_update_rows_revert_and_array_fields_round_trip(): void
     {
         $product = $this->simpleProduct();

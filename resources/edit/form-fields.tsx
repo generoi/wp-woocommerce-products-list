@@ -28,6 +28,7 @@ import { mergeReference, MIXED_VALUE, hasOptionList } from './merge';
 import type { MixedState } from './merge';
 import { createMixedBooleanControl } from './mixed-boolean-control';
 import { createMixedTextControl } from './mixed-text-control';
+import { createTermTokensControl } from './term-tokens-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { saleDateProblem } from './sale-schedule';
 import { leafOf } from './visibility';
@@ -180,10 +181,25 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			const sample = rows.map( ( item ) => readFieldValue( field, item ) ).find( ( value ) => Array.isArray( value ) && value.length > 0 ) as unknown[] | undefined;
 			const numeric = sample ? sample.every( ( entry ) => typeof entry === 'number' ) : false;
 
+			const picked = ! field.Edit && ( Array.isArray( field.elements ) || typeof field.getElements === 'function' );
+
 			formField.getValue = ( { item } ) => stringTokens( item[ field.id ] );
+			// A list picked from known options (term ids) never keeps a token that is not one: a typed name
+			// would otherwise reach the save as `{id: null}` and WooCommerce would drop every term.
 			formField.setValue = ( { value } ) => ( {
-				[ field.id ]: Array.isArray( value ) ? value.map( ( token ) => ( numeric && INTEGER_PATTERN.test( String( token ) ) ? Number( token ) : String( token ) ) ) : [],
+				[ field.id ]: Array.isArray( value )
+					? value
+							.map( String )
+							.filter( ( token ) => ! numeric || INTEGER_PATTERN.test( token ) )
+							.filter( ( token ) => ! picked || ! numeric || Number( token ) > 0 )
+							.map( ( token ) => ( numeric ? Number( token ) : token ) )
+					: [],
 			} );
+
+			if ( picked ) {
+				// Typed and suggested by name, kept as ids (DataViews' own control matches what is typed against the ids).
+				formField.Edit = createTermTokensControl();
+			}
 			formField.elements = stringElements( field.elements );
 
 			if ( field.getElements ) {

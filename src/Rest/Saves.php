@@ -266,6 +266,8 @@ final class Saves
     /** WooCommerce's code for a SKU that is malformed or already taken. */
     public const SKU_ERROR = 'product_invalid_sku';
 
+    public const INVALID_TERM_ERROR = 'wc_products_list_invalid_term';
+
     /**
      * WooCommerce rejects a taken SKU with "Invalid or duplicated SKU."
      * and no word on who has it. In list mode the message names the
@@ -378,6 +380,20 @@ final class Saves
         self::forwardFields($request);
         Recorder::begin($product, $request, $creating);
 
+        $invalidTerms = self::invalidTermList($request);
+
+        if ($invalidTerms !== null) {
+            return new \WP_Error(
+                self::INVALID_TERM_ERROR,
+                sprintf(
+                    /* translators: %s: field key, e.g. categories */
+                    __('The %s list names a term without a valid id. Nothing was saved for this product.', 'wp-woocommerce-products-list'),
+                    $invalidTerms
+                ),
+                ['status' => 400, 'field' => $invalidTerms]
+            );
+        }
+
         if (self::carriesWriteKey($request)) {
             /**
              * Fires before WooCommerce saves a product the app is writing
@@ -393,6 +409,36 @@ final class Saves
         }
 
         return $product;
+    }
+
+    /**
+     * The first term list (`categories`, `tags`, `brands`) with an entry
+     * that is not `{id: <positive int>}`, or null. WooCommerce reads
+     * `[{id: null}]` as "no terms" and empties the product's terms.
+     */
+    public static function invalidTermList(WP_REST_Request $request): ?string
+    {
+        foreach (['categories', 'tags', 'brands'] as $key) {
+            $terms = $request->get_param($key);
+
+            if ($terms === null) {
+                continue;
+            }
+
+            if (! is_array($terms)) {
+                return $key;
+            }
+
+            foreach ($terms as $term) {
+                $id = is_array($term) ? ($term['id'] ?? null) : null;
+
+                if (! is_numeric($id) || (string) (int) $id !== trim((string) $id) || (int) $id <= 0) {
+                    return $key;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**

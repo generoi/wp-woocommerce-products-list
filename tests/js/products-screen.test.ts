@@ -1,6 +1,8 @@
+import { render, screen } from '@testing-library/react';
+import { createElement } from '@wordpress/element';
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../resources/api/errors';
-import { listErrorMessage } from '../../resources/list/products-screen';
+import { CatalogTitle, ExpandAllButton, listErrorMessage } from '../../resources/list/products-screen';
 
 describe( 'listErrorMessage', () => {
 	it( 'asks for a reload only on a nonce the server refused, and shows the REST message otherwise', () => {
@@ -10,5 +12,26 @@ describe( 'listErrorMessage', () => {
 		expect( listErrorMessage( new ApiError( '', 'rest_forbidden', 401 ) ) ).toMatchObject( { reload: false, message: expect.stringContaining( 'not allowed' ) } );
 		expect( listErrorMessage( new ApiError( 'Gateway timeout', 'http_error', 504 ) ) ).toEqual( { message: 'Gateway timeout', reload: false } );
 		expect( listErrorMessage( new Error( '' ) ) ).toMatchObject( { reload: false, message: expect.stringContaining( 'could not be loaded' ) } );
+	} );
+} );
+
+describe( 'CatalogTitle', () => {
+	it( 'gives the Catalog screen an h1', () => {
+		render( createElement( CatalogTitle ) );
+
+		expect( screen.getByRole( 'heading', { level: 1 } ).textContent ).toBe( 'Catalog' );
+	} );
+} );
+
+describe( 'ExpandAllButton', () => {
+	it( 'keeps "17 of 100 expanded" next to the button after a partial expand', () => {
+		const { rerender } = render( createElement( ExpandAllButton, { onClick: () => {}, summary: { expanded: 17, total: 100 } } ) );
+		expect( screen.getByText( '17 of 100 expanded' ) ).toBeTruthy();
+
+		rerender( createElement( ExpandAllButton, { onClick: () => {}, summary: { expanded: 100, total: 100 } } ) );
+		expect( screen.queryByText( /expanded$/ ) ).toBeNull();
+
+		rerender( createElement( ExpandAllButton, { onClick: () => {}, summary: { expanded: 0, total: 100 } } ) );
+		expect( screen.queryByText( /expanded$/ ) ).toBeNull();
 	} );
 } );

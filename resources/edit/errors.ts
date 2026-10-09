@@ -19,6 +19,19 @@ const MESSAGES: Record< string, () => string > = {
 	missing_result: () => __( 'WooCommerce returned no result for this item.', 'wp-woocommerce-products-list' ),
 };
 
+const SKU_CODES: ReadonlySet< string > = new Set( [ 'product_invalid_sku', 'woocommerce_rest_product_invalid_sku' ] );
+
+const FIELD_OF_CODE: Record< string, string > = {
+	product_invalid_sku: 'sku',
+	woocommerce_rest_product_invalid_sku: 'sku',
+	product_invalid_global_unique_id: 'global_unique_id',
+};
+
+/** The form field a row error is about (a taken SKU is the SKU field's), for flagging its control; undefined when it is about the row. */
+export function fieldOfErrorCode( code: string | undefined ): string | undefined {
+	return code ? FIELD_OF_CODE[ code ] : undefined;
+}
+
 /** The message to show for a failed row: a known code's text, else the server's message (with the code's detail kept when it adds something). */
 export function humanizeError( code: string | undefined, message: string ): string {
 	const known = code ? MESSAGES[ code ] : undefined;
@@ -28,6 +41,11 @@ export function humanizeError( code: string | undefined, message: string ): stri
 	}
 
 	const text = known();
+
+	// The plugin names the product that owns a taken SKU ("… is already used by "Name" (#206).", Saves::skuOwnerMessage): that says more.
+	if ( code && SKU_CODES.has( code ) && message && /#\d+/.test( message ) ) {
+		return message;
+	}
 
 	if ( code === 'rest_invalid_param' && message ) {
 		return `${ text } ${ message }`;

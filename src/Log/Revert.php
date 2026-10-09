@@ -765,7 +765,7 @@ final class Revert
         $request->set_body_params(['update' => $update]);
 
         if ($fields !== null) {
-            $request->set_query_params(['_fields' => $fields]);
+            $request->set_query_params(['fields' => $fields]);
         }
 
         $response = rest_do_request($request);

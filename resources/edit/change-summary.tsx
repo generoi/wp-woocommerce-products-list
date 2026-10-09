@@ -230,6 +230,12 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
 			const chosen = edits[ arrayOpFieldId( id ) ];
 			const operation = isArrayOperation( chosen ) ? chosen : 'add';
+
+			// Replacing with nothing is never saved (bulk-numeric.ts projectEdits).
+			if ( operation === 'replace' && value.length === 0 ) {
+				continue;
+			}
+
 			const changed = reached.filter( ( item ) => applyArrayOp( readFieldValue( field, item ), operation, value ).changed );
 
 			lines.push( { field: id, label, change: `${ describeArrayOperation( operation ) } ${ describeValue( field, value, settings ) }`, count: changed.length, rowIds: changed.map( ( item ) => item.id ) } );
