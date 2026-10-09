@@ -1,6 +1,6 @@
 /**
  * The selection controls in the toolbar: what is selected (with how many
- * of them sit on other pages), "Select all N" for the whole list, "Bulk
+ * of them are not in this view), "Select all N" for the whole list, "Bulk
  * edit" over the whole selection (DataViews' own footer only reaches the
  * page), and "Clear". The bulk edit opens the inline editor above the first
  * row with every selected row (`onEdit`).
@@ -25,7 +25,7 @@ export interface SelectionBarProps {
 	onEdit( rows: ProductListItem[] ): void;
 }
 
-/** "12 selected (4 on other pages)". */
+/** "12 selected (4 not in this view)": on other pages, or filtered out since they were selected. */
 export function selectionLabel( count: number, offPage: number ): string {
 	/* translators: %d: number of selected rows */
 	const selected = sprintf( _n( '%d selected', '%d selected', count, 'wp-woocommerce-products-list' ), count );
@@ -35,8 +35,8 @@ export function selectionLabel( count: number, offPage: number ): string {
 	}
 
 	return `${ selected } (${ sprintf(
-		/* translators: %d: number of selected rows on other pages */
-		_n( '%d on another page', '%d on other pages', offPage, 'wp-woocommerce-products-list' ),
+		/* translators: %d: number of selected rows not shown in the list right now (other pages, or filtered out) */
+		_n( '%d not in this view', '%d not in this view', offPage, 'wp-woocommerce-products-list' ),
 		offPage
 	) })`;
 }

@@ -31,6 +31,7 @@ import { rowDomId } from '../hierarchy/chevron';
 import { HierarchyProvider } from '../hierarchy/context';
 import { footerCountLabel } from '../hierarchy/footer-count';
 import { HierarchicalDataViews } from '../hierarchy/hierarchical-dataviews';
+import { useSearchReveal } from '../hierarchy/search-match';
 import { useExpandAllProgress, useHierarchy } from '../hierarchy/use-hierarchy';
 import { useCounts, useProductList } from '../store/products';
 import { setCurrentRows, setVisibleFieldIds } from '../store/rows';
@@ -38,7 +39,7 @@ import { useView } from '../store/view';
 import type { StatusTabId } from './default-view';
 import { getItemId, isProductRow } from '../types';
 import type { ProductField, ProductListItem, ProductRow, Settings } from '../types';
-import { Button, Notice, Notices, Spinner } from '../ui';
+import { Button, ErrorBoundary, Notice, Notices, Spinner } from '../ui';
 import { ColumnsMenu } from './columns-menu';
 import { DEFAULT_LAYOUTS, PER_PAGE_SIZES } from './default-view';
 import { EmptyState } from './empty-state';
@@ -145,6 +146,15 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const hierarchyOptions = useMemo( () => ( { confirmExpandAll } ), [ confirmExpandAll ] );
 	const hierarchy = useHierarchy( parents, visibleFields, hierarchyOptions );
 	// The selection spans pages, searches, filters and sorts; a status tab is another list.
+	// A variation SKU / barcode search opens the parent at the matching variation.
+	const searchMatchIds = useSearchReveal( {
+		search: view.search,
+		parents,
+		rows: hierarchy.rows,
+		isFetching: list.isFetching,
+		isExpanded: hierarchy.isExpanded,
+		expand: hierarchy.expand,
+	} );
 	const selected = useSelection( hierarchy.rows, tab );
 	const { selection } = selected;
 
@@ -374,7 +384,11 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	);
 
 	const hasExpandable = parents.some( ( item ) => item._hasChildren );
-	const countLabel = useMemo( () => footerCountLabel( { data: hierarchy.rows, selection: [], totalItems: list.total } ), [ hierarchy.rows, list.total ] );
+	// No "0 products" before the first answer: the table shows its own loading state.
+	const countLabel = useMemo(
+		() => ( list.isLoading && ! hierarchy.rows.length ? __( 'Loading products…', 'wp-woocommerce-products-list' ) : footerCountLabel( { data: hierarchy.rows, selection: [], totalItems: list.total } ) ),
+		[ hierarchy.rows, list.total, list.isLoading ]
+	);
 	const header = (
 		<div className="wc-products-list__header">
 			<span className="wc-products-list__count" aria-live="polite">
@@ -444,6 +458,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 					) }
 					<div id={ PANEL_ID } role="tabpanel" aria-labelledby={ `wc-products-list-tab-${ tab }` } className="wc-products-list__panel">
 						<div id={ TABLE_ID } tabIndex={ -1 } className="wc-products-list__table-anchor" />
+						<ErrorBoundary context="table">
 						<HierarchicalDataViews
 							data={ data }
 							fields={ fields }
@@ -468,7 +483,9 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 							onChangeExpandedItemIds={ guardedSetExpanded }
 							childrenState={ hierarchy.childrenState }
 							onRetryChildren={ hierarchy.retry }
+							searchMatchIds={ searchMatchIds }
 						/>
+						</ErrorBoundary>
 					</div>
 					<Notices />
 				</div>

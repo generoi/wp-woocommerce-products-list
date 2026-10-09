@@ -12,7 +12,7 @@
 import { decodeEntities } from '@wordpress/html-entities';
 import type { ListItemMeta, ProductListItem, ProductRow, RawAttribute, RawProduct, RawVariation, VariationRow } from '../types/product';
 
-const META_KEYS: ReadonlyArray< keyof ListItemMeta > = [ '_kind', '_level', '_parentId', '_parentName', '_hasChildren', '_childCount', '_placeholder', '_placeholderMessage' ];
+const META_KEYS: ReadonlyArray< keyof ListItemMeta > = [ '_kind', '_level', '_parentId', '_parentName', '_hasChildren', '_childCount', '_placeholder', '_placeholderMessage', '_noLongerMatches' ];
 
 /** The parent taxonomies a variation shows read-only. */
 const INHERITED_KEYS = [ 'categories', 'tags', 'brands' ] as const;

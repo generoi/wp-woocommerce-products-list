@@ -30,15 +30,17 @@ export interface BatchScope {
 	skipped?: number;
 	/** Changes that failed when they were made: nothing to put back. */
 	failed?: number;
+	/** Items the batch left unwritten (status `skipped` rows): nothing to put back. */
+	leftOut?: number;
 }
 
 /** The scope from `GET /log/batch/{id}`: exact counts for any size, no field names. */
-export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > & Partial< Pick< RevertPlan, 'failed' > > ): BatchScope {
+export function scopeFromPlan( plan: Pick< RevertPlan, 'rows' | 'objects' | 'skipped' > & Partial< Pick< RevertPlan, 'failed' | 'left_out' > > ): BatchScope {
 	const failedEntries = plan.skipped.filter( ( entry ) => entry.action === 'failed' ).length;
 	const failed = Math.max( failedEntries, plan.failed ?? 0 );
 	const skipped = plan.skipped.length - failedEntries;
 
-	return { changes: Math.max( 0, plan.rows - skipped - failed ), objects: plan.objects, fields: [], partial: false, skipped, failed };
+	return { changes: Math.max( 0, plan.rows - skipped - failed ), objects: plan.objects, fields: [], partial: false, skipped, failed, ...( plan.left_out ? { leftOut: plan.left_out } : {} ) };
 }
 
 /**
@@ -96,6 +98,16 @@ export function describeBatchScope( scope: BatchScope ): string {
 				/* translators: %d: number of changes that failed when they were made */
 				_n( '%d failed change, nothing to revert.', '%d failed changes, nothing to revert.', scope.failed, 'wp-woocommerce-products-list' ),
 				scope.failed
+			)
+		);
+	}
+
+	if ( scope.leftOut ) {
+		parts.push(
+			sprintf(
+				/* translators: %d: number of items the batch left out when it ran */
+				_n( '%d item was left out when the batch ran (see Show changes); nothing to put back.', '%d items were left out when the batch ran (see Show changes); nothing to put back.', scope.leftOut, 'wp-woocommerce-products-list' ),
+				scope.leftOut
 			)
 		);
 	}

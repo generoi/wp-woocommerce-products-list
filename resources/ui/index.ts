@@ -7,3 +7,4 @@
 export { Button, Dropdown, Modal, Spinner, TextControl, Notice, SnackbarList, Flex, FlexItem, Tooltip, Icon, __experimentalInputControl as InputControl } from '@wordpress/components';
 export { Notices } from './notices';
 export { useNotices } from './use-notices';
+export { ErrorBoundary, guardCell, isChunkLoadError } from './error-boundary';

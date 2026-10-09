@@ -139,25 +139,38 @@ export function createBatchFields( settings: Settings, options: BatchFieldOption
 			enableSorting: false,
 			filterBy: false,
 			getValue: ( { item } ) => String( item.errors ?? 0 ),
-			render: ( { item } ) =>
-				item.errors ? (
-					<span className="wc-pl-history__error">
-						{ sprintf(
-							/* translators: 1: changes that failed, 2: changes in the batch */
-							__( '%1$d of %2$d failed', 'wp-woocommerce-products-list' ),
-							item.errors,
-							item.rows
-						) }
-					</span>
-				) : (
-					<span>
-						{ sprintf(
-							/* translators: %d: number of logged changes */
-							_n( '%d change', '%d changes', item.rows, 'wp-woocommerce-products-list' ),
-							item.rows
-						) }
-					</span>
-				),
+			render: ( { item } ) => (
+				<>
+					{ item.errors ? (
+						<span className="wc-pl-history__error">
+							{ sprintf(
+								/* translators: 1: changes that failed, 2: changes in the batch */
+								__( '%1$d of %2$d failed', 'wp-woocommerce-products-list' ),
+								item.errors,
+								item.rows
+							) }
+						</span>
+					) : (
+						<span>
+							{ sprintf(
+								/* translators: %d: number of logged changes */
+								_n( '%d change', '%d changes', item.rows, 'wp-woocommerce-products-list' ),
+								item.rows
+							) }
+						</span>
+					) }
+					{ item.skipped ? (
+						<span className="wc-pl-history__skipped">
+							{ ', ' }
+							{ sprintf(
+								/* translators: %d: number of items the batch left out */
+								_n( '%d skipped', '%d skipped', item.skipped, 'wp-woocommerce-products-list' ),
+								item.skipped
+							) }
+						</span>
+					) : null }
+				</>
+			),
 		},
 		{
 			id: 'reverted',

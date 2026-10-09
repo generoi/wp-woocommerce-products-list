@@ -17,6 +17,7 @@ import type { BatchOptions, WriteSource } from '../api/client';
 import { invalidateProducts, patchItems } from '../store/products';
 import { isVariation, parentIdOf } from '../edit/field-value';
 import { saveFields } from '../edit/save';
+import { undoBatch } from '../edit/undo';
 import { withoutUntouchedImages } from '../edit/save-runner';
 import { isBatchItemError } from '../types';
 import type { BatchResponse, ProductAction, ProductField, ProductListItem, ProductStatus, RawProduct, RawVariation } from '../types';
@@ -58,8 +59,8 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 		return [];
 	}
 
-	// One row is a quick change, several are a bulk one: the log's source column says which.
-	const source: WriteSource = rows.length > 1 ? 'bulk' : 'quick';
+	// A menu action (publish, disable variations, feature): History lists it under Actions, whatever the row count.
+	const source: WriteSource = 'action';
 	const okIds: number[] = [];
 
 	const snapshots = new Map< number, Patch >();
@@ -172,7 +173,21 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 	}
 
 	if ( ok ) {
-		notify.success( options.success( ok ) );
+		// The batch is in the change log: Undo reverts it (disable a colour's variations, feature 99 products…).
+		const noticeId = `wc-pl-action-${ batchId }`;
+
+		notify.success( options.success( ok ), {
+			id: noticeId,
+			actions: [
+				{
+					label: __( 'Undo', 'wp-woocommerce-products-list' ),
+					onClick: () => {
+						notify.remove( noticeId );
+						void undoBatch( batchId );
+					},
+				},
+			],
+		} );
 	}
 
 	if ( options.refetch && ok ) {

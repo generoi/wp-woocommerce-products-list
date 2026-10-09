@@ -223,6 +223,8 @@ export interface ListItemMeta {
 	_placeholderMessage?: string;
 	/** Set only on the inline editor's row (edit/editor-rows.ts). */
 	_editor?: EditorRowMeta;
+	/** A row edited in this view that a refetch no longer returns (it left the filter); kept on screen until the query changes. */
+	_noLongerMatches?: boolean;
 }
 
 export type ProductListItem = ( RawProduct | RawVariation ) & ListItemMeta;

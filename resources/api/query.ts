@@ -207,6 +207,11 @@ export function fieldsParam( view: View, fields: ProductField[] ): string {
 	// The title column is always rendered; name is needed even when it is not the title field.
 	visible.add( 'name' );
 
+	// A search tells a parent matched by its own SKU from one matched through a variation's (hierarchy/search-match.ts).
+	if ( view.search ) {
+		visible.add( 'sku' );
+	}
+
 	for ( const field of fields ) {
 		if ( ids.has( field.id ) ) {
 			field.rest.fields.forEach( ( f ) => visible.add( f ) );

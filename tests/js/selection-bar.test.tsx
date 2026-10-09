@@ -35,8 +35,8 @@ const onEdit = vi.fn();
 describe( 'selectionLabel', () => {
 	it( 'counts the rows on other pages', () => {
 		expect( selectionLabel( 1, 0 ) ).toBe( '1 selected' );
-		expect( selectionLabel( 12, 1 ) ).toBe( '12 selected (1 on another page)' );
-		expect( selectionLabel( 12, 4 ) ).toBe( '12 selected (4 on other pages)' );
+		expect( selectionLabel( 12, 1 ) ).toBe( '12 selected (1 not in this view)' );
+		expect( selectionLabel( 12, 4 ) ).toBe( '12 selected (4 not in this view)' );
 	} );
 } );
 
@@ -74,7 +74,7 @@ describe( 'SelectionBar', () => {
 		const selection = api( { selection: [ '1', '7', '8' ], rows, offPageCount: 2 } );
 		render( <SelectionBar selection={ selection } total={ 3 } pageProducts={ 3 } query={ {} } actions={ actions } onEdit={ onEdit } /> );
 
-		expect( screen.getByText( '3 selected (2 on other pages)' ) ).toBeInTheDocument();
+		expect( screen.getByText( '3 selected (2 not in this view)' ) ).toBeInTheDocument();
 		fireEvent.click( screen.getByRole( 'button', { name: 'Clear selection' } ) );
 		expect( selection.clear ).toHaveBeenCalled();
 

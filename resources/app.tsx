@@ -4,7 +4,7 @@ import { useRegistryVersion } from './extensions/api';
 import { createProductFields } from './fields/registry';
 import { ProductsScreen } from './list/products-screen';
 import { getSettings } from './settings';
-import { Spinner } from './ui';
+import { ErrorBoundary, Spinner } from './ui';
 
 // The History screen is its own chunk: most visits never open it.
 const HistoryScreen = lazy( () => import( /* webpackChunkName: "history" */ './history/history-screen' ) );
@@ -24,11 +24,17 @@ export function App() {
 
 	if ( screen === 'history' ) {
 		return (
-			<Suspense fallback={ <div className="wc-products-list__placeholder"><Spinner /></div> }>
-				<HistoryScreen fields={ fields } />
-			</Suspense>
+			<ErrorBoundary context="history">
+				<Suspense fallback={ <div className="wc-products-list__placeholder"><Spinner /></div> }>
+					<HistoryScreen fields={ fields } />
+				</Suspense>
+			</ErrorBoundary>
 		);
 	}
 
-	return <ProductsScreen fields={ fields } settings={ settings } />;
+	return (
+		<ErrorBoundary context="catalog">
+			<ProductsScreen fields={ fields } settings={ settings } />
+		</ErrorBoundary>
+	);
 }

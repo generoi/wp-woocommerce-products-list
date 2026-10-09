@@ -16,7 +16,7 @@ import type { ProductField, ProductListItem, Settings } from '../types';
 import { splitParentEdits } from './apply-to-variations';
 import { applyArrayOp, arrayOpFieldId, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
 import { isVariableParent, readFieldValue, readReference } from './field-value';
-import { resolveRowEdits } from './row-rules';
+import { currentSellingPrice, resolveRowEdits } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { leafOf } from './visibility';
 
@@ -398,6 +398,33 @@ export function relativeBase( field: ProductField, item: ProductListItem, op: Nu
 	const reference = readReference( field, item );
 
 	return parseNumeric( reference, settings ) !== undefined ? ( reference as string | number ) : current;
+}
+
+/**
+ * Whether the edits lower the row's price: the new core sale price is
+ * below what the row sells at now (its running sale price, else its
+ * regular price, or the new regular price when that is edited too). Edits
+ * without a new sale price, or that clear it, count as lowering (nothing to
+ * guard). The "only where it gets cheaper" option keeps the rows this
+ * says yes to.
+ */
+export function lowersPrice( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], settings: Settings ): boolean {
+	if ( edits.sale_price === undefined ) {
+		return true;
+	}
+
+	const projected = projectEdits( item, edits, fields, settings );
+	const next = parseNumeric( projected.sale_price, settings );
+
+	if ( next === undefined ) {
+		return true;
+	}
+
+	const regularEdited = projected.regular_price !== undefined ? parseNumeric( projected.regular_price, settings ) : undefined;
+	const now = parseNumeric( currentSellingPrice( item ), settings );
+	const paid = regularEdited !== undefined && now !== undefined ? Math.min( now, regularEdited ) : now ?? regularEdited;
+
+	return paid === undefined || next < paid;
 }
 
 /**

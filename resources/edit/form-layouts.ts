@@ -11,6 +11,8 @@ import type { Form, FormField } from '../dataviews';
 import { getQuickEditTabs } from '../extensions/api';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
+import { isVariation } from './field-value';
+import { isEditorHostedAction, LANG_ARG } from './hosted-actions';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 
 export const GENERAL_TAB_ID = 'general';
@@ -139,6 +141,35 @@ export function fieldsOfTab( fields: ProductField[], tab: QuickEditTab ): Produc
 }
 
 /**
+ * The `group:lang` tabs the editor-hosted actions (language tools) need for
+ * these items: one per language option of an action whose scope covers at
+ * least one of the items.
+ */
+export function toolTabIds( settings: Pick< Settings, 'actions' >, items: ProductListItem[] ): Set< string > {
+	const ids = new Set< string >();
+	const hasProducts = items.some( ( item ) => ! isVariation( item ) );
+	const hasVariations = items.some( ( item ) => isVariation( item ) );
+
+	for ( const def of settings.actions ?? [] ) {
+		if ( ! isEditorHostedAction( def ) || ! def.group ) {
+			continue;
+		}
+
+		const scope = def.scope ?? 'both';
+
+		if ( ( scope === 'product' && ! hasProducts ) || ( scope === 'variation' && ! hasVariations ) ) {
+			continue;
+		}
+
+		for ( const option of def.args.find( ( arg ) => arg.id === LANG_ARG )?.options ?? [] ) {
+			ids.add( `${ def.group }:${ String( option.value ) }` );
+		}
+	}
+
+	return ids;
+}
+
+/**
  * The tabs for a selection: General first, then one per extension group
  * found on the fields (languages), then registered tabs; empty tabs are
  * dropped; `wcProductsList.quickEdit.tabs` runs last.
@@ -156,13 +187,22 @@ export function buildTabs( fields: ProductField[], items: ProductListItem[], set
 		}
 	}
 
+	// A language tab whose fields a bulk edit cannot set (names, SEO texts) still hosts its tools (copy, find & replace, prices).
+	const toolTabs = toolTabIds( settings, items );
+
+	for ( const id of toolTabs ) {
+		if ( ! tabs.has( id ) ) {
+			tabs.set( id, { id, label: groupLabel( id, settings ), order: 100 } );
+		}
+	}
+
 	for ( const registered of getQuickEditTabs() ) {
 		tabs.set( registered.id, { ...tabs.get( registered.id ), ...registered } );
 	}
 
 	const list = Array.from( tabs.values() )
 		.sort( ( a, b ) => ( a.order ?? 100 ) - ( b.order ?? 100 ) )
-		.filter( ( tab ) => tab.id === GENERAL_TAB_ID || fieldsOfTab( fields, tab ).length > 0 );
+		.filter( ( tab ) => tab.id === GENERAL_TAB_ID || toolTabs.has( tab.id ) || fieldsOfTab( fields, tab ).length > 0 );
 
 	const filtered = applyFilters( FILTERS.quickEditTabs, list, items );
 

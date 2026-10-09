@@ -119,6 +119,28 @@ describe( 'runSave', () => {
 		expect( ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 0 ] ).toHaveLength( 100 );
 	} );
 
+	it( 'sends a lane\'s next request before the list re-renders with the previous response', async () => {
+		const events: string[] = [];
+		const d = deps( {
+			variationsBatchSize: 1,
+			patchItems: vi.fn( ( patches: Array< { id: number; echoed?: boolean } > ) => {
+				events.push( `${ patches.some( ( patch ) => patch.echoed ) ? 'returned' : 'optimistic' }:${ patches.map( ( patch ) => patch.id ).join( ',' ) }` );
+			} ),
+		} );
+
+		d.batchVariationsAcross = vi.fn( async ( update: Array< Update & { parent_id: number } > ) => {
+			events.push( `request:${ update.map( ( row ) => row.id ).join( ',' ) }` );
+
+			return { update: update.map( ( { parent_id: _parent, ...row } ) => ( { ...row, echoed: true } ) ) } as BatchResponse< RawVariation >;
+		} );
+
+		// One parent with more rows than a request takes: a lane of requests one after the other.
+		const result = await runSave( d, [ variation( 41, 4 ), variation( 42, 4 ), variation( 43, 4 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
+
+		expect( events ).toEqual( [ 'optimistic:41,42,43', 'request:41', 'request:42', 'request:43', 'returned:41,42,43' ] );
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 42, 43 ] );
+	} );
+
 	it( 'patches optimistically, then with the returned rows', async () => {
 		const d = deps();
 		await runSave( d, [ simple( 1, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'quick' } );

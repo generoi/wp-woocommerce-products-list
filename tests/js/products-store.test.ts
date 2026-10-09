@@ -5,7 +5,7 @@ import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { resetHierarchyStore } from '../../resources/hierarchy/use-hierarchy';
 import { setSettings } from '../../resources/settings';
-import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, patchItems, refreshParentsOf, useProductList } from '../../resources/store/products';
+import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, patchItems, refreshParentsOf, resetEditedRows, retainEditedRows, useProductList } from '../../resources/store/products';
 import type { View } from '../../resources/dataviews';
 import { cache } from '../../resources/store/query-cache';
 import type { ListResult } from '../../resources/api/client';
@@ -31,6 +31,7 @@ function setup(): void {
 	beforeEach( () => {
 		setSettings( sampleSettings() );
 		resetHierarchyStore();
+		resetEditedRows();
 		listProducts.mockReset();
 	} );
 
@@ -117,5 +118,52 @@ describe( 'useProductList', () => {
 		// Before afterEach drops the settings and clears the cache (both re-render the hook).
 		unmount();
 		removeAction( ACTIONS.loaded, 'test/loaded' );
+	} );
+} );
+
+describe( 'edited rows that leave the filter', () => {
+	setup();
+
+	it( 'retainEditedRows puts edited rows back at their old positions, flagged, and counts them', () => {
+		const previous = { items: [ parent( 10 ), parent( 11 ), parent( 12 ) ], total: 3, totalPages: 1 };
+		const next = { items: [ parent( 10 ), parent( 12 ) ], total: 2, totalPages: 1 };
+
+		const merged = retainEditedRows( previous, next, new Set( [ 11 ] ) );
+		expect( merged.items.map( ( item ) => item.id ) ).toEqual( [ 10, 11, 12 ] );
+		expect( merged.items[ 1 ]?._noLongerMatches ).toBe( true );
+		expect( merged.items[ 0 ]?._noLongerMatches ).toBeUndefined();
+		expect( merged.total ).toBe( 3 );
+
+		// Not edited: it leaves. Nothing previous: the server's answer as is.
+		expect( retainEditedRows( previous, next, new Set( [ 99 ] ) ) ).toBe( next );
+		expect( retainEditedRows( undefined, next, new Set( [ 11 ] ) ) ).toBe( next );
+	} );
+
+	it( 'keeps rows changed by an action visible after the filtered list refetches, until the view changes', async () => {
+		listProducts.mockResolvedValue( { items: [ parent( 10 ), parent( 11 ), parent( 12 ) ], total: 3, totalPages: 1 } );
+		const view: View = { type: 'table', page: 1, perPage: 20, fields: [], search: 'missing' };
+		const { result, rerender, unmount } = renderHook( ( { v } ) => useProductList( v, 'all', [] ), { initialProps: { v: view } } );
+		await waitFor( () => expect( result.current.items ).toHaveLength( 3 ) );
+
+		// An action (a language-tools copy) patches 10 and 11, then the list refetches without them.
+		patchItems( [ { id: 10, name: 'Fixed' }, { id: 11, name: 'Fixed too' } ] );
+		listProducts.mockResolvedValue( { items: [ parent( 12 ) ], total: 1, totalPages: 1 } );
+		invalidateProducts( { counts: false } );
+
+		await waitFor( () => expect( listProducts ).toHaveBeenCalledTimes( 2 ) );
+		await waitFor( () => expect( result.current.items.map( ( item ) => item.id ) ).toEqual( [ 10, 11, 12 ] ) );
+		expect( result.current.items[ 0 ] ).toMatchObject( { name: 'Fixed', _noLongerMatches: true } );
+		expect( result.current.items[ 2 ]?._noLongerMatches ).toBeUndefined();
+		expect( result.current.total ).toBe( 3 );
+
+		// A new search is a new view: they go.
+		listProducts.mockResolvedValue( { items: [ parent( 12 ) ], total: 1, totalPages: 1 } );
+		rerender( { v: { ...view, search: 'other' } } );
+		await waitFor( () => expect( result.current.items.map( ( item ) => item.id ) ).toEqual( [ 12 ] ) );
+		rerender( { v: view } );
+		await result.current.refetch();
+		await waitFor( () => expect( result.current.items.map( ( item ) => item.id ) ).toEqual( [ 12 ] ) );
+
+		unmount();
 	} );
 } );

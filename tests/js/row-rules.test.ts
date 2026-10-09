@@ -53,6 +53,8 @@ describe( 'stock gating', () => {
 
 		expect( plan.writes.map( ( entry ) => entry.target.item.id ) ).toEqual( [ 1 ] );
 		expect( plan.stockSkipped.map( ( row ) => row.id ) ).toEqual( [ 2, 31, 4 ] );
+		// The audit trail gets each with why and what it would have changed.
+		expect( plan.skippedItems ).toEqual( [ 2, 31, 4 ].map( ( id ) => ( { id, reason: 'no_stock_management', fields: [ 'stock_quantity' ] } ) ) );
 		expect( plan.unchanged ).toBe( 1 );
 		expect( plan.products ).toBe( 1 );
 		expect( plan.variations ).toBe( 0 );
@@ -114,6 +116,7 @@ describe( 'existing sales', () => {
 
 		expect( skip.writes.map( ( entry ) => entry.target.item.id ) ).toEqual( [ 13 ] );
 		expect( skip.saleSkipped.map( ( row ) => row.id ) ).toEqual( [ 11, 12 ] );
+		expect( skip.skippedItems.map( ( entry ) => [ entry.id, entry.reason ] ) ).toEqual( [ [ 11, 'has_sale' ], [ 12, 'has_sale' ] ] );
 		expect( skip.replacedSales ).toBe( 0 );
 	} );
 } );

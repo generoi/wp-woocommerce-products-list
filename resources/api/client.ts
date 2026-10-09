@@ -27,7 +27,7 @@ export const LIST_HEADER = 'X-WC-Products-List';
 export const BATCH_HEADER = 'X-WC-Products-List-Batch';
 export const SOURCE_HEADER = 'X-WC-Products-List-Source';
 
-export type WriteSource = 'quick' | 'bulk' | 'extension';
+export type WriteSource = 'quick' | 'bulk' | 'action' | 'extension';
 
 export interface ListResult< Item > {
 	items: Item[];
@@ -60,6 +60,20 @@ export interface ActionResult {
 	data?: Record< string, unknown >;
 	/** On a revert `conflict`: the fields changed again since the batch. */
 	fields?: string[];
+	/** On a revert `conflict`: the object, for a readable report. */
+	object_type?: 'product' | 'variation';
+	parent_id?: number;
+	name?: string;
+	/** The conflicting fields' labels ("Stock quantity"), in `fields` order. */
+	labels?: string[];
+	/** Field => value now. */
+	current?: Record< string, unknown >;
+	/** Field => the value the batch left. */
+	batch?: Record< string, unknown >;
+	/** Field => the value a revert would restore. */
+	expected?: Record< string, unknown >;
+	/** The conflicting fields can be reverted relatively (take the batch's change off the current value). */
+	relative?: boolean;
 }
 
 export interface ActionResponse {
@@ -84,7 +98,8 @@ export interface LogRow {
 	field: string;
 	old_value: string | null;
 	new_value: string | null;
-	status: 'ok' | 'error';
+	/** `skipped`: the item was left out of the batch (the message says why). */
+	status: 'ok' | 'error' | 'skipped';
 	message: string;
 	/** The copy a `duplicate` row created, while it still exists. */
 	related?: { id: number; name: string; edit_link: string | null } | null;
@@ -120,6 +135,8 @@ export interface LogBatch {
 	parents?: number;
 	/** Rows that failed. */
 	errors?: number;
+	/** Distinct items the batch left unwritten (status `skipped` rows). */
+	skipped?: number;
 	/** The batch this one reverted, when it is a revert. */
 	reverts?: string | null;
 	/** The latest revert of this batch. */
@@ -598,6 +615,8 @@ export interface RevertPlan {
 	skipped: Array< { id: number; object_type: 'product' | 'variation'; action: string } >;
 	/** Rows of the batch that failed when they were made: nothing to put back. */
 	failed?: number;
+	/** Items the batch left unwritten (status `skipped`): nothing to put back. */
+	left_out?: number;
 	/** The latest revert of this batch, or null. */
 	reverted_by?: RevertedBy | null;
 	/** Distinct users with rows in the batch; more than one makes it not revertable (409 wc_products_list_batch_shared). */
@@ -619,6 +638,8 @@ export interface RevertOptions extends RequestOptions {
 	revertBatchId?: string;
 	/** Also put back fields changed again since the batch (otherwise reported as `conflict`). */
 	force?: boolean;
+	/** Take the batch's change off the current value for relative fields (stock), keeping changes made since. */
+	relative?: boolean;
 }
 
 /** `POST /log/batch/{id}/revert`: the whole batch, or one chunk of it (`ids`). Conflicting objects come back as results with `code: 'conflict'`. */
@@ -637,6 +658,10 @@ export async function revertBatch( batchId: string, options?: RevertOptions ): P
 		data.force = true;
 	}
 
+	if ( options?.relative ) {
+		data.relative = true;
+	}
+
 	const response = await request< ActionResponse >( {
 		path: addQueryArgs( `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }/revert`, options?.fields?.length ? { fields: options.fields.join( ',' ) } : {} ),
 		method: 'POST',
@@ -645,4 +670,40 @@ export async function revertBatch( batchId: string, options?: RevertOptions ): P
 	} );
 
 	return { ...response, items: ( response.items ?? [] ).map( ( raw ) => toRow( raw as RawProduct ) ) };
+}
+
+/** Why the app left an item out of a save (POST /log/skipped `reason`). */
+export type SkipReason = 'trashed' | 'deleted' | 'conflict' | 'no_stock_management' | 'has_sale' | 'no_sale_price' | 'below_zero' | 'not_applicable' | 'other';
+
+export interface SkippedItem {
+	id: number;
+	reason: SkipReason;
+	/** The write paths the item would have changed. */
+	fields?: string[];
+	message?: string;
+}
+
+/** Items one POST /log/skipped takes. */
+export const SKIPPED_CHUNK = 100;
+
+/**
+ * `POST /log/skipped`: record the items a save left out as `skipped` rows
+ * of its batch, so History says why they kept their value. Chunked by 100;
+ * never throws (the audit trail must not break a save that worked).
+ */
+export async function logSkipped( batchId: string, source: WriteSource | 'revert', items: SkippedItem[] ): Promise< void > {
+	for ( let index = 0; index < items.length; index += SKIPPED_CHUNK ) {
+		const chunk = items.slice( index, index + SKIPPED_CHUNK ).map( ( item ) => ( {
+			id: item.id,
+			reason: item.reason,
+			...( item.fields?.length ? { fields: item.fields.slice( 0, 50 ) } : {} ),
+			...( item.message ? { message: item.message.slice( 0, 500 ) } : {} ),
+		} ) );
+
+		try {
+			await request( { path: `${ OWN }/log/skipped`, method: 'POST', data: { batch_id: batchId, source, items: chunk } } );
+		} catch ( error ) {
+			console.warn( '[wc-products-list] log/skipped', error );
+		}
+	}
 }

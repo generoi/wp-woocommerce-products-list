@@ -373,6 +373,35 @@ $link: #2271b1;
 	font-style: italic;
 }
 
+// A variation name built from an attribute value without a translation: a small tag linking to the term.
+.wc-products-list-field__untranslated {
+	display: inline-block;
+	padding: 0 4px;
+	border-radius: 2px;
+	background: #fcf0d6;
+	color: #6b4a00;
+	font-size: 11px;
+	font-style: normal;
+	line-height: 16px;
+	white-space: nowrap;
+	text-decoration: none;
+
+	&:hover,
+	&:focus {
+		text-decoration: underline;
+	}
+}
+
+.wc-pl-history__skipped {
+	color: $muted;
+}
+
+.wc-pl-confirm__preview ul,
+.wc-pl-confirm__conflicts ul {
+	margin: 4px 0 8px 1.2em;
+	list-style: disc;
+}
+
 .wc-products-list__skip {
 	&:focus {
 		position: absolute;

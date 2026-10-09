@@ -19,6 +19,34 @@ $wc-pl-chevron-size: 24px;
 	white-space: nowrap;
 }
 
+.wc-pl-name__match {
+	flex: none;
+	margin-inline-start: 8px;
+	padding: 0 6px;
+	border-radius: 2px;
+	background: var(--wp-admin-theme-color, #3858e9);
+	color: #fff;
+	font-size: 12px;
+	line-height: 20px;
+	white-space: nowrap;
+}
+
+tr:has(> td .wc-pl-name.is-search-match) {
+	box-shadow: inset 3px 0 0 var(--wp-admin-theme-color, #3858e9);
+}
+
+.wc-pl-name__stale {
+	flex: none;
+	margin-inline-start: 8px;
+	padding: 0 6px;
+	border-radius: 2px;
+	background: #f0f0f0;
+	color: #757575;
+	font-size: 12px;
+	line-height: 20px;
+	white-space: nowrap;
+}
+
 .wc-pl-name--level-1 .wc-pl-name__content {
 	color: var(--wpds-color-foreground-content-neutral, #1e1e1e);
 }

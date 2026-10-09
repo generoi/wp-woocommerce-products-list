@@ -330,6 +330,14 @@ function toOperators( operators: string[] | undefined ): Operator[] {
  * - price fields get a text control with the currency as suffix, locale
  *   parsing on write and a validation rule.
  */
+/** A term a translated value falls back on (gds-woo-i18n: `i18n.{lang}.name.untranslated`). */
+interface UntranslatedTerm {
+	id: number;
+	taxonomy?: string;
+	name: string;
+	edit_link?: string | null;
+}
+
 export function fieldFromDeclarative( input: DeclarativeField, settings: Settings ): DeclarativeProductField {
 	const def = input as DeclarativeFieldInput;
 	const currency = currencyForField( def, settings );
@@ -351,26 +359,67 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 		return value;
 	};
 
+	// The object holding the value (`i18n.se.name` for `i18n.se.name.value`) may say more about this row:
+	// a row-level `referenceLabel`, and `untranslated` terms (a variation name built from attribute values without a translation).
+	const containerPath = def.path.includes( '.' ) ? def.path.slice( 0, def.path.lastIndexOf( '.' ) ) : '';
+	const rowNotes = ( item: ProductListItem ): { label?: string; untranslated: UntranslatedTerm[] } => {
+		const container = containerPath ? getPath( item, containerPath ) : null;
+
+		if ( ! container || typeof container !== 'object' ) {
+			return { untranslated: [] };
+		}
+
+		const { referenceLabel, untranslated } = container as { referenceLabel?: unknown; untranslated?: unknown };
+
+		return {
+			label: typeof referenceLabel === 'string' && referenceLabel ? referenceLabel : undefined,
+			untranslated: Array.isArray( untranslated ) ? ( untranslated as UntranslatedTerm[] ).filter( ( term ) => term && typeof term === 'object' ) : [],
+		};
+	};
+	const untranslatedMarker = ( terms: UntranslatedTerm[], label: string | undefined ) => {
+		if ( ! terms.length ) {
+			return null;
+		}
+
+		const first = terms[ 0 ]!;
+		const text = __( 'untranslated term', 'wp-woocommerce-products-list' );
+		const title =
+			label ??
+			sprintf(
+				/* translators: %s: attribute value names */
+				__( 'No translation for: %s', 'wp-woocommerce-products-list' ),
+				terms.map( ( term ) => term.name ).join( ', ' )
+			);
+
+		return first.edit_link
+			? createElement( 'a', { className: 'wc-products-list-field__untranslated', href: first.edit_link, title, onClick: ( event: { stopPropagation(): void } ) => event.stopPropagation() }, text )
+			: createElement( 'span', { className: 'wc-products-list-field__untranslated', title }, text );
+	};
+
 	const renderCell = ( { item, field }: DataViewRenderFieldProps< ProductListItem > ) => {
 		const value = field.getValue( { item } );
+		const notes = rowNotes( item );
+		const marker = untranslatedMarker( notes.untranslated, notes.label );
 
 		if ( ! isEmptyValue( value ) ) {
-			return createElement( 'span', { className: 'wc-products-list-field' }, displayValue( value, def, currency, settings ) );
+			return createElement( 'span', { className: 'wc-products-list-field', title: marker ? notes.label : undefined }, displayValue( value, def, currency, settings ), marker ? ' ' : null, marker );
 		}
 
 		const fallback = reference?.( item );
 
 		if ( isEmptyValue( fallback ) ) {
-			return null;
+			return marker;
 		}
 
 		return createElement(
 			'span',
 			{
 				className: 'wc-products-list-field wc-products-list-field--reference',
-				title: def.referenceLabel ?? undefined,
+				title: notes.label ?? def.referenceLabel ?? undefined,
 			},
-			displayValue( fallback, def, currency, settings )
+			displayValue( fallback, def, currency, settings ),
+			marker ? ' ' : null,
+			marker
 		);
 	};
 

@@ -79,7 +79,8 @@ export function isParentOwnedField( fieldOrId: ProductField | string ): boolean 
 }
 
 /** Extension leaves that identify one product (a translated name or slug): never set on many rows at once. */
-export const BULK_UNSUPPORTED_EXTENSION_LEAVES: ReadonlySet< string > = new Set( [ 'name', 'slug' ] );
+// One SEO title or description on many products is a duplicate-content problem: in bulk they go through the language tools' templates.
+export const BULK_UNSUPPORTED_EXTENSION_LEAVES: ReadonlySet< string > = new Set( [ 'name', 'slug', 'meta_title', 'meta_description' ] );
 
 export function isBulkUnsupportedField( fieldOrId: ProductField | string ): boolean {
 	const id = typeof fieldOrId === 'string' ? fieldOrId : fieldOrId.id;

@@ -12,7 +12,7 @@ const settings = editSettings();
 const fields = coreFields();
 
 function plan( overrides: Partial< SavePlan > ): SavePlan {
-	return { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], replacedSales: 0, ...overrides };
+	return { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], notLowerSkipped: [], replacedSales: 0, skippedItems: [], ...overrides };
 }
 
 function result( overrides: Partial< SaveResult > ): SaveResult {

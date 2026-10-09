@@ -80,6 +80,17 @@ describe( 'runDeclarativeAction', () => {
 		expect( notify.error ).toHaveBeenCalledWith( 'Pick a translated language.' );
 		expect( notify.success ).not.toHaveBeenCalled();
 	} );
+
+	it( 'with inline errors: no error snackbar, the failure rejects with its message, the rows that changed keep their Undo', async () => {
+		vi.mocked( runAction ).mockRejectedValueOnce( { code: 'gds_woo_i18n_missing_find', message: 'Enter the text to find.' } );
+		await expect( runDeclarativeAction( 'i18n_transform', 'Edit translated text', [ 1 ], {}, [ 'id' ], { inlineErrors: true } ) ).rejects.toThrow( 'Enter the text to find.' );
+		expect( notify.error ).not.toHaveBeenCalled();
+
+		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 1, ok: true, changed: 1 }, { id: 2, ok: false, code: 'not_found', message: 'The product no longer exists.' } ] ) );
+		await expect( runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 1, 2 ], {}, [ 'id' ], { inlineErrors: true } ) ).rejects.toThrow( '1 updated, 1 failed: The product no longer exists.' );
+		expect( notify.error ).not.toHaveBeenCalled();
+		expect( notify.success ).toHaveBeenCalledWith( 'Clear translations: 1 item updated.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
+	} );
 } );
 
 describe( 'declarativeSummary', () => {

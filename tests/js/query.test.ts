@@ -143,6 +143,11 @@ describe( 'buildProductListQuery', () => {
 		expect( filterToParams( { field: 'categories', operator: 'isAny', value: [] }, undefined ) ).toEqual( {} );
 		expect( fieldsParam( view( { fields: [] } ), fields ) ).toContain( 'wc_products_list' );
 	} );
+
+	it( 'asks for the SKU while searching, so a variation SKU match can be told apart', () => {
+		expect( fieldsParam( view( { fields: [] } ), fields ).split( ',' ) ).not.toContain( 'sku' );
+		expect( fieldsParam( view( { fields: [], search: '8585055472542' } ), fields ).split( ',' ) ).toContain( 'sku' );
+	} );
 } );
 
 describe( 'buildVariationsQuery', () => {

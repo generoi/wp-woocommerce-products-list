@@ -145,10 +145,22 @@ export function NameCell( { item, children }: NameCellProps ) {
 		);
 	}
 
+	const isSearchMatch = level > 0 && view?.searchMatchIds?.has( item.id ) === true;
+
 	return (
-		<div id={ rowDomId( item ) } className={ `wc-pl-name wc-pl-name--level-${ level }` } style={ { '--wc-pl-level': level } as CSSProperties }>
+		<div id={ rowDomId( item ) } className={ `wc-pl-name wc-pl-name--level-${ level }` + ( isSearchMatch ? ' is-search-match' : '' ) } style={ { '--wc-pl-level': level } as CSSProperties }>
 			{ level === 0 ? <Chevron item={ item } /> : <span className="wc-pl-chevron wc-pl-chevron--spacer" aria-hidden="true" /> }
 			<span className="wc-pl-name__content">{ children ?? item.name ?? '' }</span>
+			{ isSearchMatch && (
+				<span className="wc-pl-name__match">
+					{ __( 'Matches search', 'wp-woocommerce-products-list' ) }
+				</span>
+			) }
+			{ item._noLongerMatches && (
+				<span className="wc-pl-name__stale" title={ __( 'Edited here; it no longer matches the filters and leaves the list when the view changes.', 'wp-woocommerce-products-list' ) }>
+					{ __( 'No longer matches', 'wp-woocommerce-products-list' ) }
+				</span>
+			) }
 			{ level > 0 && item._parentName && (
 				<span className="screen-reader-text">
 					{ sprintf(

@@ -280,6 +280,23 @@ describe( 'fieldFromDeclarative', () => {
 		expect( container.textContent ).toBe( '' );
 	} );
 
+	it( 'marks a variation name built from an untranslated attribute value, linking to the term, with the row\'s own label', () => {
+		const field = fieldFromDeclarative( makeField( { referenceLabel: 'Suomi' } as Partial< DeclarativeFieldInput > ), settings );
+		const Render = field.render as ( props: { item: ProductListItem; field: NormalizedField< ProductListItem > } ) => JSX.Element;
+		const name = {
+			value: 'Omaking, Black with wool',
+			source: 'Omaking, Musta villalla',
+			referenceLabel: 'Black with wool has no Svenska translation; translate the attribute term.',
+			untranslated: [ { id: 77, taxonomy: 'pa_color', name: 'Musta villalla', edit_link: 'https://example.test/term.php?tag_ID=77' } ],
+		};
+		const { container } = render( createElement( Render, { item: product( { i18n: { se: { name } } } ), field: normalized( field ) } ) );
+		const marker = container.querySelector( 'a.wc-products-list-field__untranslated' );
+
+		expect( marker?.getAttribute( 'href' ) ).toBe( 'https://example.test/term.php?tag_ID=77' );
+		expect( marker?.getAttribute( 'title' ) ).toBe( name.referenceLabel );
+		expect( container.textContent ).toBe( 'Omaking, Black with wool untranslated term' );
+	} );
+
 	it( 'renders booleans, select labels and html as text', () => {
 		const settingsWithOptions = settings;
 		const bool = fieldFromDeclarative( makeField( { id: 'acme:flag', type: 'boolean', path: 'acme.flag', reference: null } ), settingsWithOptions );

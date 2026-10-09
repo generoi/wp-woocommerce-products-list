@@ -10,6 +10,7 @@ import { getRegisteredFields } from '../extensions/api';
 import { fieldsFromSettings } from '../extensions/declarative';
 import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, Settings } from '../types';
+import { guardCell } from '../ui/error-boundary';
 import { createBackordersField } from './backorders';
 import { createCatalogVisibilityField } from './catalog-visibility';
 import { createCostOfGoodsField } from './cost-of-goods';
@@ -147,9 +148,13 @@ export function createProductFields( settings: Settings ): ProductField[] {
 		console.error( '[wc-products-list] declarative fields', error );
 	}
 
-	const merged = mergeById( [ createCoreFields( settings ), declarative, getRegisteredFields() ] );
+	const core = createCoreFields( settings );
+	const coreRenders = new Set( core.map( ( field ) => field.render ).filter( Boolean ) );
+	const merged = mergeById( [ core, declarative, getRegisteredFields() ] );
+	const filtered = applyFilters( FILTERS.fields, merged, settings ) as ProductField[];
 
-	return applyFilters( FILTERS.fields, merged, settings ) as ProductField[];
+	// A cell renderer from an extension that throws blanks its own cell, not the list.
+	return filtered.map( ( field ) => ( field.render && ! coreRenders.has( field.render ) ? { ...field, render: guardCell( field.render, `field ${ field.id }` ) } : field ) );
 }
 
 export function getField( fields: ProductField[], id: string ): ProductField | undefined {

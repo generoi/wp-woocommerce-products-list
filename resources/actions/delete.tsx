@@ -1,4 +1,9 @@
-/** Delete permanently, after a confirmation. Irreversible: no Undo. */
+/**
+ * Delete permanently, after a confirmation. Irreversible: no Undo.
+ * Products only from the Trash (as in the classic list); variations have no
+ * Trash in WooCommerce, so "Delete variations" works on any variation row
+ * (a retired colour's sizes).
+ */
 import { Button } from '@wordpress/components';
 import { useState } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
@@ -10,11 +15,12 @@ import { useReturnFocus } from '../edit/focus';
 import { invalidateProducts, removeItems } from '../store/products';
 import type { ProductAction, ProductListItem } from '../types';
 import type { ActionFactory } from './context';
-import { canDelete, errorMessage, idsOf, isRealRow, nameOf, realRows, summarize } from './context';
+import { canDelete, errorMessage, idsOf, isRealRow, isVariationRow, nameOf, realRows, summarize } from './context';
 import { notify } from './notices';
 
 function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps< ProductListItem > ) {
 	const rows = realRows( items );
+	const variations = rows.length > 0 && rows.every( isVariationRow );
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
 
@@ -35,11 +41,17 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 				invalidateProducts( { counts: true } );
 				doAction( ACTIONS.deleted, ok, { action: 'delete', batchId: response.batch_id } );
 				notify.success(
-					sprintf(
-						/* translators: %d: number of products */
-						_n( '%d product permanently deleted.', '%d products permanently deleted.', ok.length, 'wp-woocommerce-products-list' ),
-						ok.length
-					)
+					variations
+						? sprintf(
+								/* translators: %d: number of variations */
+								_n( '%d variation permanently deleted.', '%d variations permanently deleted.', ok.length, 'wp-woocommerce-products-list' ),
+								ok.length
+						  )
+						: sprintf(
+								/* translators: %d: number of products */
+								_n( '%d product permanently deleted.', '%d products permanently deleted.', ok.length, 'wp-woocommerce-products-list' ),
+								ok.length
+						  )
 				);
 			}
 
@@ -61,7 +73,21 @@ function DeleteModal( { items, closeModal, onActionPerformed }: RenderModalProps
 	return (
 		<div className="wc-pl-confirm">
 			<p>
-				{ rows.length === 1
+				{ variations ? (
+					rows.length === 1 ? (
+						sprintf(
+							/* translators: %s: variation name */
+							__( 'Delete the variation “%s” permanently? Variations have no Trash; this cannot be undone.', 'wp-woocommerce-products-list' ),
+							nameOf( rows[ 0 ]! )
+						)
+					) : (
+						sprintf(
+							/* translators: %d: number of variations */
+							_n( 'Delete %d variation permanently? Variations have no Trash; this cannot be undone.', 'Delete %d variations permanently? Variations have no Trash; this cannot be undone.', rows.length, 'wp-woocommerce-products-list' ),
+							rows.length
+						)
+					)
+				) : rows.length === 1
 					? sprintf(
 							/* translators: %s: product name */
 							__( 'Delete “%s” permanently? This cannot be undone.', 'wp-woocommerce-products-list' ),
@@ -104,6 +130,26 @@ export const createDeleteAction: ActionFactory = ( { settings } ) => {
 		isEligible: ( item ) => isRealRow( item ) && canDelete( item ) && ( item.status === 'trash' || settings.features.hardDelete === true ),
 		RenderModal: DeleteModal,
 		modalHeader: __( 'Delete permanently', 'wp-woocommerce-products-list' ),
+		modalSize: 'small',
+	};
+
+	return action;
+};
+
+/** "Delete variations": variation rows, whatever their status (WooCommerce has no Trash for variations). */
+export const createDeleteVariationsAction: ActionFactory = ( { settings } ) => {
+	if ( ! settings.caps.delete ) {
+		return null;
+	}
+
+	const action: ProductAction = {
+		id: 'delete-variations',
+		label: __( 'Delete variations permanently', 'wp-woocommerce-products-list' ),
+		supportsBulk: true,
+		scope: 'variation',
+		isEligible: ( item ) => isRealRow( item ) && isVariationRow( item ) && canDelete( item ),
+		RenderModal: DeleteModal,
+		modalHeader: __( 'Delete variations permanently', 'wp-woocommerce-products-list' ),
 		modalSize: 'small',
 	};
 

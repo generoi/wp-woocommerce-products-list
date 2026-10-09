@@ -25,7 +25,9 @@ const removeItems = vi.fn();
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
 vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: ( ids: number[] ) => removeItems( ids ) } ) );
+const logSkipped = vi.fn( async () => undefined );
 vi.mock( '../../resources/api/client', () => ( {
+	logSkipped: ( ...args: unknown[] ) => logSkipped( ...( args as [] ) ),
 	getVariations: vi.fn( async () => ( { items: [], total: 0, totalPages: 1 } ) ),
 	listProducts: vi.fn( async ( query: Record< string, unknown > ) => ( {
 		items: String( query.include )
@@ -132,12 +134,10 @@ describe( 'InlineEditor', () => {
 		expect( view.close ).not.toHaveBeenCalled();
 		// The x buttons are gone: the list is fixed from the first save on.
 		expect( screen.queryByRole( 'button', { name: /Remove .* from the selection/ } ) ).not.toBeInTheDocument();
-		// The two rows that did save can be undone from the notice; the notice names the failed one and why
-		// (the editor may be gone by the time it shows), and links to the batch in the History.
-		expect( notify.error ).toHaveBeenCalledWith(
-			expect.stringMatching( /^2 updated, 1 failed\. Simple 3: You are not allowed/ ),
-			expect.objectContaining( { id: 'wc-pl-saved', actions: expect.arrayContaining( [ expect.objectContaining( { label: 'Undo' } ) ] ) } )
-		);
+		// The two rows that did save can be undone from the notice. The open editor lists who failed and why,
+		// so the snackbar carries only the counts and expires (it never sits over Update as a persistent error).
+		expect( notify.info ).toHaveBeenCalledWith( '2 updated, 1 failed.', expect.objectContaining( { id: 'wc-pl-saved', actions: expect.arrayContaining( [ expect.objectContaining( { label: 'Undo' } ) ] ) } ) );
+		expect( notify.error ).not.toHaveBeenCalled();
 
 		// The retry sends only the failed row.
 		saveEdits.mockResolvedValueOnce( { updated: [ simple( 3, { featured: true } ) ], errors: [], batchId: 'b2', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
@@ -177,6 +177,29 @@ describe( 'InlineEditor', () => {
 		view.rerenderWith( [ simple( 1, { name: 'One' } ), simple( 3, { name: 'Three' } ) ] );
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
 		expect( screen.getByRole( 'list', { name: 'Selected items' } ).querySelectorAll( 'li' ) ).toHaveLength( 2 );
+	} );
+
+	it( 'records the rows the save left out in the batch audit trail', async () => {
+		saveEdits.mockResolvedValueOnce( {
+			updated: [ simple( 1, { featured: true } ) ],
+			errors: [],
+			batchId: 'b-skip',
+			unchanged: 0,
+			stockSkipped: 1,
+			saleSkipped: 0,
+			replacedSales: 0,
+			skippedItems: [ { id: 2, reason: 'no_stock_management', fields: [ 'stock_quantity' ] } ],
+		} );
+
+		renderEditor( [ simple( 1 ), simple( 2 ) ] );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		fireEvent.click( screen.getByLabelText( 'featured' ) );
+		await screen.findByRole( 'button', { name: 'Update 2 products' } );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Update 2 products' } ) );
+
+		await waitFor( () => expect( logSkipped ).toHaveBeenCalledTimes( 1 ) );
+		expect( logSkipped ).toHaveBeenCalledWith( 'b-skip', 'bulk', [ { id: 2, reason: 'no_stock_management', fields: [ 'stock_quantity' ] } ] );
 	} );
 
 	it( 'shows the count alone when every product of the list is selected, and the off-page count otherwise', async () => {
@@ -219,6 +242,67 @@ describe( 'InlineEditor', () => {
 
 		view.unmount();
 		expect( removeItems ).toHaveBeenCalledWith( [ 3 ] );
+	} );
+
+	it( 'Escape in a select closes only its dropdown; settings typed into a language tool count as unsaved', async () => {
+		const withLanguage = coreFields().filter( ( field ) => [ 'name', 'featured', 'i18n:se.name' ].includes( field.id ) );
+		const previous = settings.actions;
+
+		settings.actions = [
+			{
+				id: 'i18n_transform',
+				label: 'Edit translated text',
+				description: '',
+				icon: null,
+				scope: 'both',
+				supportsBulk: true,
+				isPrimary: false,
+				destructive: false,
+				confirm: null,
+				capability: null,
+				group: 'i18n',
+				order: 502,
+				source: 'gds-woo-i18n',
+				args: [
+					{ id: 'lang', label: 'Language', type: 'select', required: true, default: null, options: [ { value: 'se', label: 'SE' } ] },
+					{ id: 'operation', label: 'Operation', type: 'select', required: true, default: 'replace', options: [ { value: 'replace', label: 'Find & replace' }, { value: 'prefix', label: 'Add prefix' } ] },
+					{ id: 'find', label: 'Find', type: 'text', required: true, default: null, options: [] },
+				],
+			},
+		];
+
+		try {
+			const view = renderEditor( [ simple( 1, { name: 'One' } ) ], { fields: withLanguage, session: { initialTab: 'i18n:se' } } );
+
+			await screen.findByText( 'One' );
+			fireEvent.click( await screen.findByText( /tools: Edit translated text/ ) );
+
+			// Chrome hands the Escape that closes a native select's dropdown to the page: it stays with the select.
+			fireEvent.keyDown( screen.getByLabelText( 'Operation' ), { key: 'Escape' } );
+			expect( view.close ).not.toHaveBeenCalled();
+
+			fireEvent.change( screen.getByLabelText( 'Find' ), { target: { value: 'vinter' } } );
+			fireEvent.keyDown( editorForm( view.container ), { key: 'Escape' } );
+
+			expect( await screen.findByText( /Discard 1 unsaved change/ ) ).toBeInTheDocument();
+			expect( view.close ).not.toHaveBeenCalled();
+		} finally {
+			settings.actions = previous;
+		}
+	} );
+
+	it( 'keeps the loading line in the layout once loaded (nothing moves under a first click) and moves the snackbars aside while open', async () => {
+		const view = renderEditor( [ simple( 1, { name: 'One' } ), simple( 2, { name: 'Two' } ) ] );
+
+		expect( document.documentElement.classList.contains( 'wc-pl-editing' ) ).toBe( true );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		await waitFor( () => expect( view.container.querySelector( '.wc-pl-inline-edit__loading.is-done' ) ).not.toBeNull() );
+		// Beside the title in the item list, not above the fields.
+		expect( view.container.querySelector( '.wc-pl-inline-edit__items .wc-pl-inline-edit__loading' ) ).not.toBeNull();
+		expect( view.container.querySelector( '.wc-pl-inline-edit__main .wc-pl-inline-edit__loading' ) ).toBeNull();
+
+		view.unmount();
+		expect( document.documentElement.classList.contains( 'wc-pl-editing' ) ).toBe( false );
 	} );
 
 	it( 'Escape on a dirty form asks before discarding; a clean form closes', async () => {
@@ -459,7 +543,7 @@ describe( 'InlineEditor tabs', () => {
 		window.sessionStorage.clear();
 	} );
 
-	it( 'loads a language tab on its first visit only, and remembers the tab for the next editor', async () => {
+	it( 'loads a language tab on its first visit only; the next editor opens on General', async () => {
 		const { listProducts } = await import( '../../resources/api/client' );
 		const calls = listProducts as unknown as ReturnType< typeof vi.fn >;
 		const view = renderEditor( [ simple( 1, { name: 'One' } ) ], { fields: withLanguage } );
@@ -481,11 +565,28 @@ describe( 'InlineEditor tabs', () => {
 		expect( calls ).toHaveBeenCalledTimes( 2 );
 
 		view.unmount();
+		// A new editor (a restock after a translation session) opens on General, not on the last language used.
+		renderEditor( [ simple( 2, { name: 'Two' } ) ], { fields: withLanguage } );
+		await screen.findByText( 'Two' );
+		expect( screen.getByRole( 'tab', { name: 'General' } ) ).toHaveAttribute( 'aria-selected', 'true' );
+		expect( String( calls.mock.calls[ 2 ]?.[ 0 ]?._fields ) ).not.toContain( 'i18n' );
+	} );
+
+	it( '"Update & next" carries the open tab to the next row\'s editor', async () => {
+		setCurrentRows( [ simple( 1, { name: 'One' } ), simple( 2, { name: 'Two' } ) ] );
+
+		const view = renderEditor( [ simple( 1, { name: 'One' } ) ], { fields: withLanguage } );
+
+		await screen.findByText( 'One' );
+		fireEvent.click( screen.getByRole( 'tab', { name: 'SE' } ) );
+		await screen.findByLabelText( /i18n:se\.name/ );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Update & next' } ) );
+		await waitFor( () => expect( view.advance ).toHaveBeenCalled() );
+
+		view.unmount();
 		renderEditor( [ simple( 2, { name: 'Two' } ) ], { fields: withLanguage } );
 		await screen.findByText( 'Two' );
 		expect( screen.getByRole( 'tab', { name: 'SE' } ) ).toHaveAttribute( 'aria-selected', 'true' );
-		// Opened straight on the remembered tab: its fields come with the first load.
-		expect( String( calls.mock.calls[ 2 ]?.[ 0 ]?._fields ) ).toContain( 'i18n' );
 	} );
 
 	it( 'opens on the tab the list points at', async () => {
@@ -550,7 +651,7 @@ describe( 'initialTabFor', () => {
 } );
 
 describe( 'InlineEditor, round 4', () => {
-	const metaTitle = { ...coreFields().find( ( field ) => field.id === 'name' )!, id: 'i18n:se.meta_title', label: 'SE title', edit: { group: 'i18n:se', bulk: 'default' as const }, rest: { fields: [ 'i18n' ], applies: { product: true, variation: false } } };
+	const metaTitle = { ...coreFields().find( ( field ) => field.id === 'name' )!, id: 'i18n:se.short_description', label: 'SE short description', edit: { group: 'i18n:se', bulk: 'default' as const }, rest: { fields: [ 'i18n' ], applies: { product: true, variation: false } } };
 
 	it( 'a language tab\'s load leaves variable products variable: the apply-to-variations box stays', async () => {
 		const { listProducts } = await import( '../../resources/api/client' );
@@ -563,7 +664,7 @@ describe( 'InlineEditor, round 4', () => {
 			// The client normalises every row: without `type` in `_fields` it says "simple", without `name` "#id".
 			return {
 				items: ids.map( ( id ) =>
-					wanted.includes( 'type' ) ? parents.find( ( row ) => row.id === id )! : { id, type: 'simple', name: `#${ id }`, status: 'publish', _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0, i18n: { se: { meta_title: 'T' } } }
+					wanted.includes( 'type' ) ? parents.find( ( row ) => row.id === id )! : { id, type: 'simple', name: `#${ id }`, status: 'publish', _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0, i18n: { se: { short_description: 'T' } } }
 				),
 				total: ids.length,
 				totalPages: 1,

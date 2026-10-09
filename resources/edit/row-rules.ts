@@ -27,6 +27,13 @@ export interface RowEditOptions {
 	enableManageStock?: boolean;
 	/** Leave the sale fields of rows that already have a sale price alone. */
 	skipExistingSales?: boolean;
+	/**
+	 * "Only where it gets cheaper": false leaves the row's sale fields alone
+	 * (the new sale price would not be lower than what the row sells at
+	 * now). Built by the editor from `lowersPrice()` (edit/bulk-numeric.ts),
+	 * which needs the fields and the settings this module does not have.
+	 */
+	keepSale?: ( item: ProductListItem, edits: Record< string, unknown > ) => boolean;
 }
 
 export function isStockGatedEdit( id: string ): boolean {
@@ -117,6 +124,13 @@ export function rowsWithExistingSale( items: ProductListItem[], edits: Record< s
 	return { rows, active: rows.filter( ( item ) => saleIsActive( item ) ).length };
 }
 
+/** The price the row sells at right now: its sale price while the sale runs, else its regular price. */
+export function currentSellingPrice( item: ProductListItem, now: number = Date.now() ): unknown {
+	const row = item as { sale_price?: unknown; regular_price?: unknown };
+
+	return saleIsActive( item, now ) ? row.sale_price : row.regular_price;
+}
+
 /** Rows a stock-gated edit would be dropped for. */
 export function stockGatedRows( items: ProductListItem[], edits: Record< string, unknown >, options: RowEditOptions = {} ): ProductListItem[] {
 	if ( ! hasStockGatedEdit( edits ) ) {
@@ -147,6 +161,10 @@ export function resolveRowEdits( item: ProductListItem, edits: Record< string, u
 	}
 
 	if ( options.skipExistingSales && hasSale( item ) && hasSaleEdit( result ) ) {
+		result = omit( result, isSaleEdit );
+	}
+
+	if ( options.keepSale && hasSaleEdit( result ) && ! isVariableParent( item ) && ! options.keepSale( item, result ) ) {
 		result = omit( result, isSaleEdit );
 	}
 

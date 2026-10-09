@@ -4,12 +4,14 @@
  * languages that sell in different currencies.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { buildTabs, toolTabIds } from '../../resources/edit/form-layouts';
+import { isBulkUnsupportedField } from '../../resources/edit/visibility';
 import { describe, expect, it, vi } from 'vitest';
-import { argOptions, isEditorHostedAction, LanguageTools, languageToolsFor, toolIds } from '../../resources/edit/language-tools';
+import { argOptions, argShown, isEditorHostedAction, LanguageTools, languageToolsFor, missingArg, previewTransform, toolIds } from '../../resources/edit/language-tools';
 import type { DeclarativeAction } from '../../resources/types';
-import { editSettings, simple, variation } from './edit-fixtures';
+import { coreFields, editSettings, simple, variation } from './edit-fixtures';
 
-vi.mock( '../../resources/extensions/api', () => ( { getRegisteredActions: () => [], useRegistryVersion: () => 0 } ) );
+vi.mock( '../../resources/extensions/api', () => ( { getRegisteredActions: () => [], getQuickEditTabs: () => [], useRegistryVersion: () => 0 } ) );
 
 const languages = [
 	{ value: 'se', label: 'Svenska' },
@@ -56,6 +58,21 @@ const settings = editSettings( {
 	languages: { default: 'fi', others: [ 'se', 'de' ], labels: { fi: 'Suomi', se: 'Svenska', de: 'Deutsch' }, currencies: { fi: 'EUR', se: 'SEK', de: 'EUR' } },
 } );
 
+describe( 'language tabs in bulk', () => {
+	it( 'keep a tab for the tools when the bulk edit has no field of that language (SEO texts are not bulk fields)', () => {
+		const general = coreFields().filter( ( entry ) => entry.id === 'status' );
+		const tabs = buildTabs( general, [ simple( 1 ), simple( 2 ) ], settings );
+
+		expect( tabs.map( ( tab ) => tab.id ) ).toEqual( [ 'general', 'i18n:se', 'i18n:de' ] );
+		expect( toolTabIds( settings, [ simple( 1 ) ] ) ).toEqual( new Set( [ 'i18n:se', 'i18n:de' ] ) );
+		// A product-only tool adds nothing to a selection of variations.
+		expect( toolTabIds( { actions: [ { ...copyAction(), scope: 'product' } ] }, [ variation( 41, 4 ) ] ).size ).toBe( 0 );
+		expect( isBulkUnsupportedField( 'i18n:se.meta_title' ) ).toBe( true );
+		expect( isBulkUnsupportedField( 'i18n:se.meta_description' ) ).toBe( true );
+		expect( isBulkUnsupportedField( 'i18n:se.short_description' ) ).toBe( false );
+	} );
+} );
+
 describe( 'language tools', () => {
 	it( 'are the grouped actions with a language argument, per tab', () => {
 		expect( isEditorHostedAction( copyAction() ) ).toBe( true );
@@ -78,7 +95,7 @@ describe( 'language tools', () => {
 
 		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ), variation( 41, 1 ) ] } settings={ settings } run={ run } onDone={ onDone } /> );
 
-		fireEvent.click( screen.getByText( 'Copy or clear Svenska for the selected items' ) );
+		fireEvent.click( screen.getByText( 'Svenska tools: Copy translations' ) );
 		expect( screen.queryByLabelText( 'Regular price' ) ).not.toBeInTheDocument();
 		fireEvent.click( screen.getByLabelText( 'Name' ) );
 		fireEvent.click( screen.getByRole( 'button', { name: 'Copy translations: Svenska (2)' } ) );
@@ -95,4 +112,176 @@ describe( 'language tools', () => {
 		expect( buildProductActions( { ...context, openEditor: () => {} } ).some( ( action ) => action.id === 'i18n_copy' ) ).toBe( false );
 		expect( buildProductActions( context ).some( ( action ) => action.id === 'i18n_copy' ) ).toBe( true );
 	} );
+
+	it( 'draw a text input for every text argument and a decimal input for an amount (every arg type gds-woo-i18n declares)', async () => {
+		const tools = editSettings( { actions: [ copyAction(), clearAction(), transformAction(), pricesAction() ], languages: settings.languages } );
+		const run = vi.fn( async () => undefined );
+
+		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ) ] } settings={ tools } run={ run } onDone={ vi.fn() } /> );
+		fireEvent.click( screen.getByText( /^Svenska tools: / ) );
+
+		// Find & replace (the default operation): its two inputs, not the prefix one.
+		expect( screen.getByLabelText( 'Find (find & replace)' ) ).toHaveAttribute( 'type', 'text' );
+		expect( screen.getByLabelText( 'Replace with (find & replace)' ) ).toBeInTheDocument();
+		expect( screen.queryByLabelText( /Prefix, suffix or template/ ) ).not.toBeInTheDocument();
+
+		// Another operation swaps in the prefix/suffix/template input.
+		fireEvent.change( screen.getByLabelText( 'Operation' ), { target: { value: 'prefix' } } );
+		expect( screen.getByLabelText( /Prefix, suffix or template/ ) ).toBeInTheDocument();
+		expect( screen.queryByLabelText( 'Find (find & replace)' ) ).not.toBeInTheDocument();
+
+		// Market prices in SEK: the amount input and both price boxes (the tab's own currency, nothing is converted).
+		const amount = screen.getByLabelText( 'Amount' );
+
+		expect( amount ).toHaveAttribute( 'inputmode', 'decimal' );
+		expect( screen.getByLabelText( 'Regular price' ) ).toBeInTheDocument();
+		expect( screen.getByLabelText( 'Sale price' ) ).toBeInTheDocument();
+
+		// Empty: an inline prompt, no request.
+		fireEvent.click( screen.getByRole( 'button', { name: 'Adjust market prices: Svenska (1)' } ) );
+		expect( await screen.findByText( 'Fill in "Amount" first.' ) ).toBeInTheDocument();
+		expect( run ).not.toHaveBeenCalled();
+
+		// Enter in the amount runs this tool (never the editor's Update) with what is shown.
+		fireEvent.change( amount, { target: { value: '5' } } );
+		const enter = new KeyboardEvent( 'keydown', { key: 'Enter', bubbles: true, cancelable: true } );
+		const outer = vi.fn();
+
+		document.addEventListener( 'keydown', outer );
+		amount.dispatchEvent( enter );
+		document.removeEventListener( 'keydown', outer );
+		expect( outer ).not.toHaveBeenCalled();
+		await waitFor( () => expect( run ).toHaveBeenCalledWith( expect.objectContaining( { id: 'i18n_prices' } ), [ 1 ], { lang: 'se', fields: [ 'regular_price' ], operation: 'increase_percent', amount: '5', rounding: 'none' } ) );
+	} );
+
+	it( 'show which arguments an operation uses and what is still missing', () => {
+		const def = transformAction();
+		const find = def.args.find( ( arg ) => arg.id === 'find' )!;
+		const text = def.args.find( ( arg ) => arg.id === 'text' )!;
+		const amount = pricesAction().args.find( ( arg ) => arg.id === 'amount' )!;
+
+		expect( argShown( find, def, { operation: 'replace' } ) ).toBe( true );
+		expect( argShown( text, def, { operation: 'replace' } ) ).toBe( false );
+		expect( argShown( text, def, { operation: 'template' } ) ).toBe( true );
+		expect( argShown( amount, pricesAction(), { operation: 'round' } ) ).toBe( false );
+		expect( missingArg( def, { fields: [ 'name' ], operation: 'replace', find: '' } )?.id ).toBe( 'find' );
+		expect( missingArg( def, { fields: [ 'name' ], operation: 'replace', find: 'x' } ) ).toBeNull();
+		expect( missingArg( def, { fields: [ 'name' ], operation: 'suffix', text: ' ' } )?.id ).toBe( 'text' );
+		// Copy needs no free text.
+		expect( missingArg( copyAction(), { fields: [ 'name' ] } ) ).toBeNull();
+	} );
+
+	it( 'preview a few before → after values from the loaded translations', () => {
+		const fields = coreFields();
+		const items = [
+			simple( 1, { name: 'Boot', i18n: { se: { name: { value: 'Känga vinter', source: '' } } } } ),
+			simple( 2, { name: 'Sandal', i18n: { se: { name: { value: '', source: 'Sandal' } } } } ),
+			simple( 3, { name: 'Shoe', i18n: { se: { name: { value: 'Sko vinter', source: '' } } } } ),
+		];
+		const replace = previewTransform( transformAction(), { fields: [ 'name' ], operation: 'replace', find: 'VINTER', replace: 'sommar', case_insensitive: true, base: 'stored' }, 'i18n:se', items, fields );
+
+		expect( replace?.changes ).toBe( 2 );
+		expect( replace?.lines.map( ( line ) => `${ line.before } → ${ line.after }` ) ).toEqual( [ 'Känga vinter → Känga sommar', 'Sko vinter → Sko sommar' ] );
+
+		// A suffix on what untranslated rows show only with "edit the value they show".
+		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'suffix', text: ' (SE)', base: 'stored' }, 'i18n:se', items, fields )?.changes ).toBe( 2 );
+		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'suffix', text: ' (SE)', base: 'shown' }, 'i18n:se', items, fields )?.lines[ 1 ] ).toMatchObject( { before: '(not translated)', after: 'Sandal (SE)' } );
+		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'template', text: '{default_name} | {sku}' }, 'i18n:se', items, fields )?.lines[ 0 ]?.after ).toBe( 'Boot | S1' );
+		// Nothing to preview until the text is there.
+		expect( previewTransform( transformAction(), { fields: [ 'name' ], operation: 'replace', find: '' }, 'i18n:se', items, fields ) ).toBeNull();
+	} );
+
+	it( 'report settings typed and not run yet as unsaved, and not after the run', async () => {
+		const onDirtyChange = vi.fn();
+		const tools = editSettings( { actions: [ transformAction() ], languages: settings.languages } );
+
+		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ) ] } settings={ tools } run={ async () => undefined } onDone={ vi.fn() } onDirtyChange={ onDirtyChange } /> );
+		fireEvent.click( screen.getByText( /^Svenska tools: / ) );
+		fireEvent.change( screen.getByLabelText( 'Find (find & replace)' ), { target: { value: 'x' } } );
+		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Edit translated text: Svenska (1)' } ) );
+		await waitFor( () => expect( onDirtyChange ).toHaveBeenLastCalledWith( 0 ) );
+	} );
 } );
+
+function base( id: string, label: string, args: DeclarativeAction[ 'args' ] ): DeclarativeAction {
+	return { ...copyAction(), id, label, order: 500, args: [ { id: 'lang', label: 'Language', type: 'select', required: true, default: null, options: languages }, ...args ] };
+}
+
+function clearAction(): DeclarativeAction {
+	return base( 'i18n_clear', 'Clear translations', [ { id: 'fields', label: 'Fields', type: 'array', required: true, default: null, options: [ { value: 'name', label: 'Name' } ] } ] );
+}
+
+function transformAction(): DeclarativeAction {
+	return base( 'i18n_transform', 'Edit translated text', [
+		{ id: 'fields', label: 'Fields', type: 'array', required: true, default: [ 'name' ], options: [ { value: 'name', label: 'Name' } ] },
+		{
+			id: 'operation',
+			label: 'Operation',
+			type: 'select',
+			required: true,
+			default: 'replace',
+			options: [
+				{ value: 'replace', label: 'Find & replace' },
+				{ value: 'prefix', label: 'Add prefix' },
+				{ value: 'suffix', label: 'Add suffix' },
+				{ value: 'template', label: 'Set from template' },
+			],
+		},
+		{ id: 'find', label: 'Find (find & replace)', type: 'text', required: false, default: null, options: [] },
+		{ id: 'replace', label: 'Replace with (find & replace)', type: 'text', required: false, default: null, options: [] },
+		{ id: 'case_insensitive', label: 'Ignore case', type: 'boolean', required: false, default: true, options: [] },
+		{ id: 'text', label: 'Prefix, suffix or template, e.g. {name} | {brand}', type: 'text', required: false, default: null, options: [] },
+		{
+			id: 'base',
+			label: 'Products without their own translation',
+			type: 'select',
+			required: false,
+			default: 'stored',
+			options: [
+				{ value: 'stored', label: 'Leave them as they are' },
+				{ value: 'shown', label: 'Edit the value they show' },
+			],
+		},
+	] );
+}
+
+function pricesAction(): DeclarativeAction {
+	return base( 'i18n_prices', 'Adjust market prices', [
+		{
+			id: 'fields',
+			label: 'Prices',
+			type: 'array',
+			required: true,
+			default: [ 'regular_price' ],
+			options: [
+				{ value: 'regular_price', label: 'Regular price' },
+				{ value: 'sale_price', label: 'Sale price' },
+			],
+		},
+		{
+			id: 'operation',
+			label: 'Price operation',
+			type: 'select',
+			required: true,
+			default: 'increase_percent',
+			options: [
+				{ value: 'increase_percent', label: 'Increase by %' },
+				{ value: 'round', label: 'Round only' },
+			],
+		},
+		{ id: 'amount', label: 'Amount', type: 'number', required: false, default: null, options: [] },
+		{
+			id: 'rounding',
+			label: 'Round to',
+			type: 'select',
+			required: false,
+			default: 'none',
+			options: [
+				{ value: 'none', label: 'No rounding' },
+				{ value: 'x9', label: 'Ending in 9' },
+			],
+		},
+	] );
+}

@@ -116,7 +116,7 @@ export function ChangeCell( { item }: { item: LogRow } ) {
 		return <span className="wc-pl-history__change">{ item.message || ACTION_OPTIONS.find( ( option ) => option.value === item.action )?.label || item.action }</span>;
 	}
 
-	if ( ! item.field && item.status === 'error' && item.old_value === null && item.new_value === null ) {
+	if ( ( item.status === 'skipped' || ( ! item.field && item.status === 'error' ) ) && item.old_value === null && item.new_value === null ) {
 		return <span className="wc-pl-history__change">—</span>;
 	}
 
@@ -263,6 +263,8 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 			render: ( { item } ) =>
 				item.status === 'ok' ? (
 					<span>{ __( 'OK', 'wp-woocommerce-products-list' ) }</span>
+				) : item.status === 'skipped' ? (
+					<span className="wc-pl-history__skipped">{ item.message || __( 'Skipped.', 'wp-woocommerce-products-list' ) }</span>
 				) : (
 					<span className="wc-pl-history__error">
 						<strong>{ __( 'Error', 'wp-woocommerce-products-list' ) }</strong>

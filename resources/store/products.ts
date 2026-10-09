@@ -30,6 +30,47 @@ export function variationsKey( parentId: number, page: number ): string {
 
 const EMPTY: ProductListItem[] = [];
 
+/**
+ * Rows patched (saved, or changed by an action) since the list query last
+ * changed. A refetch of the same query keeps those that no longer match it
+ * (a "Missing in Svenska" row just translated) on screen, marked
+ * `_noLongerMatches`, like a quick edit that does not refetch: the rows the
+ * user just worked on do not vanish under the open editor. Changing the
+ * filter, search, page or tab drops them.
+ */
+const editedIds = new Set< number >();
+
+/** Forget the edited rows (the list query changed). */
+export function resetEditedRows(): void {
+	editedIds.clear();
+}
+
+/**
+ * Put the edited rows of `previous` that `next` no longer has back at their
+ * old positions, marked `_noLongerMatches`; `total` counts them so the
+ * footer agrees with the table.
+ */
+export function retainEditedRows( previous: ListResult< ProductListItem > | undefined, next: ListResult< ProductListItem >, edited: ReadonlySet< number > = editedIds ): ListResult< ProductListItem > {
+	if ( ! previous || ! edited.size ) {
+		return next;
+	}
+
+	const present = new Set( next.items.map( ( item ) => item.id ) );
+	const items = next.items.slice();
+	let kept = 0;
+
+	previous.items.forEach( ( item, index ) => {
+		if ( item._kind !== 'product' || item._placeholder || ! edited.has( item.id ) || present.has( item.id ) ) {
+			return;
+		}
+
+		items.splice( Math.min( index, items.length ), 0, { ...item, _noLongerMatches: true } );
+		kept += 1;
+	} );
+
+	return kept ? { ...next, items, total: next.total + kept } : next;
+}
+
 export interface ProductListState {
 	items: ProductListItem[];
 	total: number;
@@ -45,7 +86,26 @@ export function useProductList( view: View, tab: string, fields: ProductField[] 
 	const settings = getSettings();
 	const query = useMemo( () => buildProductListQuery( view, tab, fields, settings ), [ view, tab, fields, settings ] );
 	const key = productsKey( query );
-	const result = useQuery< ListResult< ProductListItem > >( key, ( signal ) => listProducts( query, { signal } ), { keepPreviousData: true } );
+	const result = useQuery< ListResult< ProductListItem > >(
+		key,
+		async ( signal ) => {
+			const previous = cache.get< ListResult< ProductListItem > >( key )?.data;
+			const next = await listProducts( query, { signal } );
+
+			return retainEditedRows( previous, next );
+		},
+		{ keepPreviousData: true }
+	);
+
+	// A new filter, search, page or tab is a new view: rows edited in the old one may leave.
+	const lastKeyRef = useRef( key );
+
+	useEffect( () => {
+		if ( lastKeyRef.current !== key ) {
+			lastKeyRef.current = key;
+			resetEditedRows();
+		}
+	}, [ key ] );
 	const data = result.data;
 
 	// `wcProductsList.loaded` once per completed list request: the cache's
@@ -123,6 +183,7 @@ export function patchItems( items: Array< Partial< ProductListItem > & { id: num
 
 	for ( const item of items ) {
 		byId.set( item.id, { ...( byId.get( item.id ) ?? {} ), ...item } );
+		editedIds.add( item.id );
 	}
 
 	for ( const key of [ ...cache.keys( PRODUCTS_PREFIX ), ...cache.keys( VARIATIONS_PREFIX ) ] ) {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { runRevert, splitResults } from '../../resources/history/revert';
+import { describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
 import { describeBatchScope, isRevertableRow, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
 import type { LogRow } from '../../resources/api/client';
 
@@ -23,9 +23,9 @@ describe( 'runRevert', () => {
 		const outcome = await runRevert( 'batch-a', { chunk: 2, chunks: [ [ 1, 2 ], [ 3, 4 ], [ 5 ] ] }, { onProgress: ( done, total ) => progress.push( [ done, total ] ) }, post );
 
 		expect( post.mock.calls.map( ( call ) => call[ 1 ] ) ).toEqual( [
-			{ ids: [ 1, 2 ], revertBatchId: 'revert-1', force: undefined, fields: [ 'id' ] },
-			{ ids: [ 3, 4 ], revertBatchId: 'revert-1', force: undefined, fields: [ 'id' ] },
-			{ ids: [ 5 ], revertBatchId: 'revert-1', force: undefined, fields: [ 'id' ] },
+			{ ids: [ 1, 2 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
+			{ ids: [ 3, 4 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
+			{ ids: [ 5 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
 		] );
 		expect( progress ).toEqual( [ [ 0, 5 ], [ 2, 5 ], [ 4, 5 ], [ 5, 5 ] ] );
 		expect( outcome.ok ).toBe( 3 );
@@ -94,5 +94,35 @@ describe( 'isRevertableRow', () => {
 
 		expect( summarizeBatch( rows, 4 ) ).toEqual( { changes: 3, objects: 2, fields: [ 'i18n.se.name', 'i18n.se.slug' ], partial: false } );
 		expect( describeBatchScope( { changes: 3, objects: 2, fields: [], partial: false, skipped: 1 } ) ).toBe( 'This will put back 3 changes on 2 items. 1 entry (trash, restore, delete or duplicate) is not reverted.' );
+	} );
+} );
+
+describe( 'conflict reports', () => {
+	const conflict = {
+		id: 24514,
+		ok: false,
+		code: 'conflict',
+		name: 'Pelsi Black 37-38',
+		fields: [ 'stock_quantity' ],
+		labels: [ 'Stock quantity' ],
+		current: { stock_quantity: 9 },
+		batch: { stock_quantity: 10 },
+		expected: { stock_quantity: 0 },
+		relative: true,
+	};
+
+	it( 'names the item, the field label and the value kept', () => {
+		expect( describeConflict( conflict ) ).toBe( 'Pelsi Black 37-38: Stock quantity 10 → 9 kept' );
+		// An older server without labels or values: the mapped label alone.
+		expect( describeConflict( { id: 3, ok: false, code: 'conflict', fields: [ 'sale_price' ] }, () => 'Sale price' ) ).toBe( '#3: Sale price' );
+	} );
+
+	it( 'offers a relative revert only for the conflicts the server marks relative, and posts relative: true for them', async () => {
+		expect( relativeConflicts( [ conflict, { ...conflict, id: 5, relative: false } ] ).map( ( result ) => result.id ) ).toEqual( [ 24514 ] );
+
+		const post = vi.fn( async ( _batch: string, _options?: object ) => response( [ { id: 24514, ok: true } ] ) );
+
+		await runRevert( 'batch-a', { chunk: 100, chunks: [] }, { ids: [ 24514 ], relative: true, revertBatchId: 'r1' }, post );
+		expect( post.mock.calls[ 0 ]?.[ 1 ] ).toEqual( { ids: [ 24514 ], revertBatchId: 'r1', force: undefined, relative: true, fields: [ 'id' ] } );
 	} );
 } );

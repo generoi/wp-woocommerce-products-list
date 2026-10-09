@@ -35,7 +35,7 @@ import { notify } from '../actions/notices';
 import { ACTIONS } from '../extensions/hooks';
 import { getItemId } from '../types/product';
 import type { BatchResult, ProductField } from '../types/extension';
-import type { ProductListItem, ProductRow, RawVariation, VariationRow } from '../types/product';
+import type { ProductListItem, ProductRow, RawImage, RawVariation, VariationRow } from '../types/product';
 import { flattenHierarchy } from './flatten';
 import type { ChildrenState } from './flatten';
 import { normalizeVariation } from './normalize';
@@ -177,6 +177,8 @@ let children: Map< number, ChildrenState > = new Map();
 const listeners = new Set< Listener >();
 const inflight = new Map< number, Inflight >();
 const idCache = new Map< number, number[] >();
+/** Each loaded parent's first image: what wc/v3 reads show for a variation without an image of its own. */
+const parentImages = new Map< number, RawImage | undefined >();
 
 /** What the mounted hook currently shows: used by the eviction and by the limiter's cancellation checks. */
 let currentExpanded: ReadonlySet< number > = new Set();
@@ -345,7 +347,7 @@ export function patchVariationRows( items: Array< Partial< ProductListItem > & {
 			items: state.items.map( ( item ) => {
 				const patch = byId.get( item.id );
 
-				return patch ? ( normalizeVariation( { ...item, ...patch } as RawVariation, parentId ) as VariationRow ) : item;
+				return patch ? ( normalizeVariation( withImageFallback( item, patch, parentId ), parentId ) as VariationRow ) : item;
 			} ),
 		} );
 	}
@@ -354,6 +356,29 @@ export function patchVariationRows( items: Array< Partial< ProductListItem > & {
 		children = next;
 		emit();
 	}
+}
+
+/**
+ * Merge a patch into a variation row without blanking its thumbnail. Write
+ * responses are serialised in the edit context, where a variation without an
+ * image of its own has `image: null` (and the client turns that into
+ * `images: []`), while reads fall back to the parent's image. So a patch that
+ * carries no image shows what a read would: the parent's image when known,
+ * else what the row already shows.
+ */
+function withImageFallback( item: VariationRow, patch: Partial< ProductListItem >, parentId: number ): RawVariation {
+	const merged = { ...item, ...patch } as RawVariation & { images?: RawImage[] };
+	const touchesImage = 'image' in patch || 'images' in patch;
+	const patchImages = ( patch as { images?: RawImage[] } ).images;
+	const hasOwn = Boolean( ( patch as { image?: RawImage | null } ).image ) || ( Array.isArray( patchImages ) && patchImages.length > 0 );
+
+	if ( touchesImage && ! hasOwn ) {
+		const fallback = parentImages.get( parentId );
+		merged.image = null;
+		merged.images = fallback ? [ fallback ] : ( ( item as { images?: RawImage[] } ).images ?? [] );
+	}
+
+	return merged;
 }
 
 /** Drop variations by id (after delete). Parents being removed drop their whole state. */
@@ -613,6 +638,8 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 	const parentId = parent.id;
 	const pending = inflight.get( parentId );
 
+	parentImages.set( parentId, parent.images?.[ 0 ] );
+
 	if ( pending ) {
 		return pending.promise;
 	}
@@ -643,9 +670,12 @@ function loadChildren( parent: ProductRow, fields: string[], fetch: FetchVariati
 			const wanted = Math.min( total, cap );
 			const lastPage = Math.max( 1, Math.ceil( wanted / perPage ) );
 
-			// A refetch keeps the stale rows until the whole list is back.
-			if ( lastPage > 1 && ! previous?.items.length ) {
-				void setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total }, false );
+			if ( lastPage > 1 ) {
+				// A first load shows page 1 at once; a refetch keeps the
+				// stale rows on screen until the whole list is back.
+				if ( ! previous?.items.length ) {
+					void setChildren( parentId, { status: 'loading', items: pages[ 0 ] ?? [], total }, false );
+				}
 
 				await Promise.all(
 					Array.from( { length: lastPage - 1 }, ( _, index ) => index + 2 ).map( async ( page ) => {
@@ -1131,6 +1161,7 @@ export function resetHierarchyStore(): void {
 	children = new Map();
 	inflight.clear();
 	idCache.clear();
+	parentImages.clear();
 	currentExpanded = new Set();
 	currentParents = new Set();
 	emit();

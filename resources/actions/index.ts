@@ -20,7 +20,7 @@ import { invalidateProducts, patchItems } from '../store/products';
 import type { ProductAction, Settings } from '../types';
 import type { ActionFactory, ProductActionsContext } from './context';
 import { errorMessage, rowFields, summarize, withScope } from './context';
-import { createDeleteAction } from './delete';
+import { createDeleteAction, createDeleteVariationsAction } from './delete';
 import { createDuplicateAction } from './duplicate';
 import { createEditAction } from './edit';
 import { createExpandAction } from './expand';
@@ -54,6 +54,7 @@ const CORE: ActionFactory[] = [
 	createRestoreAction,
 	createTrashAction,
 	createDeleteAction,
+	createDeleteVariationsAction,
 ];
 
 function allowed( action: ProductAction, settings: Settings ): boolean {
@@ -105,13 +106,32 @@ export function declarativeSummary( label: string, changed: number, unchanged: n
  * action's batch), and a failure names the first error. Rejects on a
  * request error so the action's modal can stay open and show it.
  */
-export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[] ): Promise< ActionResponse > {
+export interface RunDeclarativeOptions {
+	/**
+	 * The caller shows failures where they happened (a language tool under
+	 * its button): no error snackbar, and a run where rows failed rejects
+	 * with the first failure's message. The rows that did change still get
+	 * their success snackbar with Undo.
+	 */
+	inlineErrors?: boolean;
+}
+
+export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[], options: RunDeclarativeOptions = {} ): Promise< ActionResponse > {
 	let response: ActionResponse;
 
 	try {
 		response = await runAction( action, ids, args, { fields } );
 	} catch ( error ) {
-		notify.error( errorMessage( error ) );
+		if ( ! options.inlineErrors ) {
+			notify.error( errorMessage( error ) );
+		}
+
+		if ( options.inlineErrors && ! ( error instanceof Error ) ) {
+			const message = ( error as { message?: unknown } | null )?.message;
+
+			throw new Error( typeof message === 'string' && message ? message : errorMessage( error ) );
+		}
+
 		throw error;
 	}
 
@@ -123,6 +143,24 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 
 	if ( ok.length ) {
 		invalidateProducts( { counts: true } );
+	}
+
+	if ( failed.length && options.inlineErrors ) {
+		if ( ok.length ) {
+			notifyDeclarativeSuccess( response, label );
+		}
+
+		throw new Error(
+			ok.length
+				? sprintf(
+						/* translators: 1: items updated, 2: items that failed, 3: the first failure's message */
+						__( '%1$d updated, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
+						ok.length,
+						failed.length,
+						failed[ 0 ]?.message ?? ''
+				  )
+				: failed[ 0 ]?.message || __( 'The action failed.', 'wp-woocommerce-products-list' )
+		);
 	}
 
 	if ( failed.length ) {
@@ -145,7 +183,15 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 		return response;
 	}
 
-	const changed = response.results.filter( ( result ) => result.ok && changedFields( result ) > 0 ).length;
+	notifyDeclarativeSuccess( response, label );
+
+	return response;
+}
+
+/** The success snackbar of a declarative run: what changed, with Undo when something did. */
+function notifyDeclarativeSuccess( response: ActionResponse, label: string ): void {
+	const ok = response.results.filter( ( result ) => result.ok );
+	const changed = ok.filter( ( result ) => changedFields( result ) > 0 ).length;
 	const id = `wc-pl-action-${ response.batch_id }`;
 
 	notify.success(
@@ -165,8 +211,6 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 			  }
 			: { id }
 	);
-
-	return response;
 }
 
 /** Declarative (PHP) actions run on the server; returned rows refresh the cache, a snackbar with Undo reports the outcome. */

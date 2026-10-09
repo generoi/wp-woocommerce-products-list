@@ -10,7 +10,7 @@ import { notify } from '../actions/notices';
 import { getRevertPlan } from '../api/client';
 import { restoreFocus } from './focus';
 import type { FocusOrigin } from './focus';
-import { runRevert } from '../history/revert';
+import { describeConflict, runRevert } from '../history/revert';
 import { invalidateLog } from '../history/use-log';
 import { invalidateProducts } from '../store/products';
 
@@ -55,11 +55,19 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 		invalidateLog();
 
 		if ( outcome.conflicts.length ) {
+			// Which item and which field, with the value it kept: "Pelsi Black 37-38: Stock quantity 10 → 9 kept".
+			const shown = outcome.conflicts.slice( 0, 3 ).map( ( conflict ) => describeConflict( conflict ) );
+			const more = outcome.conflicts.length - shown.length;
+
 			notify.error(
 				sprintf(
-					/* translators: %d: number of items left alone */
-					_n( '%d item was changed again since and was left as it is; revert it from History.', '%d items were changed again since and were left as they are; revert them from History.', outcome.conflicts.length, 'wp-woocommerce-products-list' ),
-					outcome.conflicts.length
+					/* translators: 1: number of items left alone, 2: the items with the field and the value kept */
+					_n( '%1$d item was changed again since and was left as it is (%2$s); revert it from History.', '%1$d items were changed again since and were left as they are (%2$s); revert them from History.', outcome.conflicts.length, 'wp-woocommerce-products-list' ),
+					outcome.conflicts.length,
+					more > 0
+						? /* translators: 1: the first items, 2: number of further items */
+						  sprintf( __( '%1$s and %2$d more', 'wp-woocommerce-products-list' ), shown.join( '; ' ), more )
+						: shown.join( '; ' )
 				)
 			);
 		}

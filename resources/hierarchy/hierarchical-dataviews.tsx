@@ -77,6 +77,7 @@ export function HierarchicalDataViews( props: HierarchicalDataViewsProps ) {
 		onChangeExpandedItemIds,
 		childrenState,
 		onRetryChildren,
+		searchMatchIds,
 		onChangeSelection,
 		selection,
 		getItemLevel = defaultGetItemLevel,
@@ -89,8 +90,8 @@ export function HierarchicalDataViews( props: HierarchicalDataViewsProps ) {
 	const editorFields = useMemo( () => withEditorRenders( fields, hostFieldId ), [ fields, hostFieldId ] );
 
 	const viewValue = useMemo< HierarchyViewValue >(
-		() => ( { getItemParentId, getItemHasChildren, expandedItemIds, onChangeExpandedItemIds, childrenState, onRetryChildren } ),
-		[ getItemParentId, getItemHasChildren, expandedItemIds, onChangeExpandedItemIds, childrenState, onRetryChildren ]
+		() => ( { getItemParentId, getItemHasChildren, expandedItemIds, onChangeExpandedItemIds, childrenState, onRetryChildren, searchMatchIds } ),
+		[ getItemParentId, getItemHasChildren, expandedItemIds, onChangeExpandedItemIds, childrenState, onRetryChildren, searchMatchIds ]
 	);
 
 	const handleSelection = useCallback(

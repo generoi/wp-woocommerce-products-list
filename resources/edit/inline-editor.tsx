@@ -22,26 +22,28 @@
  * with it, the others on their first visit (six languages of descriptions
  * for a page of 100 products is over a megabyte nobody looks at).
  */
-import { Button, CheckboxControl, Notice, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
+import { Button, CheckboxControl, Notice, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
 import type { KeyboardEvent } from 'react';
-import { getVariations } from '../api/client';
+import { getVariations, logSkipped } from '../api/client';
+import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
 import { getCurrentRows } from '../store/rows';
-import type { ProductListItem, QuickEditTab } from '../types';
+import type { ProductListItem, QuickEditTab, Settings } from '../types';
 import { rowFields } from '../actions/context';
 import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
 import { editFetchFields, hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
-import { projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
-import { ChangeSummary } from './change-summary';
+import { lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
+import { ChangeSummary, describeSiteDateTime } from './change-summary';
+import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
 import { isGoneCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
@@ -53,7 +55,7 @@ import { labelsOf, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
-import { canEnableStock, rowsWithExistingSale, stockGatedRows } from './row-rules';
+import { canEnableStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { saveEdits } from './save';
 import type { SaveResult } from './save';
@@ -79,8 +81,30 @@ const PANEL_ID = 'wc-pl-edit-panel';
 /** The snackbar after a save: one at a time, a new save replaces the previous one's Undo. */
 export const SAVED_NOTICE_ID = 'wc-pl-saved';
 
-/** Where the last tab used is kept across editors (and reloads) in this browser tab. */
-export const LAST_TAB_KEY = 'wc-products-list:edit-tab';
+/**
+ * The tab "Update & next" carries to the next row's editor (fixing the
+ * Swedish names one after another stays on Svenska). Any other editor opens
+ * on General, or on the language of the list's translation filter: a
+ * restock after a translation session must not open on Svenska.
+ */
+let carriedTab: string | null = null;
+
+/** Hand the open tab to the editor "Update & next" opens next. */
+export function carryTabToNext( tab: string ): void {
+	carriedTab = tab;
+}
+
+/** The tab a new editor opens on: the filter's language, else the tab carried by "Update & next", else General. */
+export function openingTab( initialTab: string | undefined | null ): string {
+	const carried = carriedTab;
+
+	carriedTab = null;
+
+	return initialTab ?? carried ?? GENERAL_TAB_ID;
+}
+
+/** On <html> while an editor is open: the snackbars keep clear of its buttons. */
+export const EDITING_CLASS = 'wc-pl-editing';
 
 /** How many item names a notice lists before "and N more". */
 const NAMES_SHOWN = 5;
@@ -128,8 +152,9 @@ export function breakdown( items: ProductListItem[] ): string {
 	return parts.join( ', ' );
 }
 
-function focusFirstControl( root: HTMLElement | null ): void {
-	const first = root?.querySelector< HTMLElement >( 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])' );
+function focusFirstControl( root: HTMLElement | null, prefer?: string ): void {
+	const preferred = prefer ? root?.querySelector< HTMLElement >( prefer ) : null;
+	const first = preferred ?? root?.querySelector< HTMLElement >( 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])' );
 
 	// The editor positions itself (scrollEditorIntoView); a focus scroll would push its title under the sticky chrome.
 	first?.focus( { preventScroll: true } );
@@ -202,6 +227,13 @@ export function successMessage( result: SaveResult, skipped: StatusSkips = { tra
 		extras.push( sprintf( _n( '%d skipped (already on sale)', '%d skipped (already on sale)', result.saleSkipped, 'wp-woocommerce-products-list' ), result.saleSkipped ) );
 	}
 
+	if ( ( result.notLowerSkipped ?? 0 ) > 0 ) {
+		const count = result.notLowerSkipped ?? 0;
+
+		/* translators: %d: number of rows */
+		extras.push( sprintf( _n( '%d skipped (the sale price would not be lower)', '%d skipped (the sale price would not be lower)', count, 'wp-woocommerce-products-list' ), count ) );
+	}
+
 	if ( result.replacedSales > 0 ) {
 		/* translators: %d: number of rows */
 		extras.push( sprintf( _n( '%d existing sale replaced', '%d existing sales replaced', result.replacedSales, 'wp-woocommerce-products-list' ), result.replacedSales ) );
@@ -265,20 +297,25 @@ export function nextRowOnScreen( id: number, rows: ProductListItem[] = getCurren
 	return rows.slice( index + 1 ).find( ( row ) => ! row._placeholder && isVariation( row ) === isVariation( current ) && row.wc_products_list?.can_edit !== false ) ?? null;
 }
 
-function readLastTab(): string | null {
-	try {
-		return window.sessionStorage.getItem( LAST_TAB_KEY );
-	} catch {
-		return null;
+/**
+ * Whether an Escape belongs to the control it was pressed in: a native
+ * select (Chrome hands the Escape that closes its dropdown to the page), a
+ * combobox or an open popup. It closes that control, never the editor.
+ */
+export function escapeBelongsToControl( target: EventTarget | null ): boolean {
+	if ( ! ( target instanceof Element ) ) {
+		return false;
 	}
-}
 
-function writeLastTab( tab: string ): void {
-	try {
-		window.sessionStorage.setItem( LAST_TAB_KEY, tab );
-	} catch {
-		// Private mode or blocked storage: the tab is simply not remembered.
+	if ( target instanceof HTMLSelectElement ) {
+		return true;
 	}
+
+	if ( target.getAttribute( 'aria-expanded' ) === 'true' ) {
+		return true;
+	}
+
+	return target.closest( '[role="combobox"][aria-expanded="true"], [role="listbox"], [role="menu"], .components-popover' ) !== null;
 }
 
 function isTextEntry( target: EventTarget | null ): target is HTMLInputElement {
@@ -354,6 +391,47 @@ function kindLabel( item: ProductListItem, types: Array< { value: string; label:
 	return types.find( ( entry ) => entry.value === type )?.label ?? type;
 }
 
+/**
+ * The sales a bulk edit would end right now: how many rows are on sale at
+ * this moment, the lowest price they sell at, and when the new sale starts.
+ * A sale scheduled for later still replaces the running one on save (a
+ * WooCommerce product has one sale window), so those rows sell at their
+ * regular price until the new one starts; the message says so before Update.
+ */
+export function describeRunningSales( rows: ProductListItem[], edits: Record< string, unknown >, settings: Settings, now: number = Date.now() ): { count: number; message: string } {
+	const running = rows.filter( ( item ) => saleIsActive( item, now ) );
+
+	if ( running.length === 0 ) {
+		return { count: 0, message: '' };
+	}
+
+	const prices = running.map( ( item ) => parseNumeric( ( item as { sale_price?: unknown } ).sale_price, settings ) ).filter( ( value ): value is number => value !== undefined );
+	const lowest = prices.length ? formatPrice( Math.min( ...prices ), settings ) : '';
+	const from = edits.date_on_sale_from;
+	const startsLater = typeof from === 'string' && from !== '' && Number.isFinite( Date.parse( from ) ) && Date.parse( from ) > now;
+	const head = lowest
+		? sprintf(
+				/* translators: 1: number of rows, 2: the lowest price among them */
+				_n( '%1$d of them is on sale right now (at %2$s).', '%1$d of them are on sale right now (lowest %2$s).', running.length, 'wp-woocommerce-products-list' ),
+				running.length,
+				lowest
+		  )
+		: sprintf(
+				/* translators: %d: number of rows */
+				_n( '%d of them is on sale right now.', '%d of them are on sale right now.', running.length, 'wp-woocommerce-products-list' ),
+				running.length
+		  );
+	const tail = startsLater
+		? sprintf(
+				/* translators: %s: when the new sale starts */
+				__( 'A product has one sale at a time: replacing ends the current sale when you update, and these rows sell at their regular price until the new sale starts on %s.', 'wp-woocommerce-products-list' ),
+				describeSiteDateTime( from, settings )
+		  )
+		: __( 'Replacing changes the price customers pay as soon as you update.', 'wp-woocommerce-products-list' );
+
+	return { count: running.length, message: `${ head } ${ tail }` };
+}
+
 export function InlineEditor( { host }: InlineEditorProps ) {
 	const { session, fields: allFields, items: hostItems, close: onClose, advance: onAdvance, removeItem: onRemoveItem, setGuard, offPageCount, wholeList } = host;
 	const settings = getSettings();
@@ -365,12 +443,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ frozenRows, setFrozenRows ] = useState< ProductListItem[] | null >( null );
 	const selectedRows = frozenRows ?? liveRows;
 	const selectionKey = selectedRows.map( ( item ) => item.id ).join( ',' );
-	// The tab the editor opens on: the list's translation filter, else the last one used.
-	const [ tabId, setTabIdState ] = useState( () => initialTab ?? readLastTab() ?? GENERAL_TAB_ID );
-	const setTabId = useCallback( ( id: string ) => {
-		setTabIdState( id );
-		writeLastTab( id );
-	}, [] );
+	// The tab the editor opens on: the list's translation filter, else the one "Update & next" carried over, else General.
+	const [ tabId, setTabId ] = useState( () => openingTab( initialTab ) );
 	// The same rows reloaded with the editable fields of the open tabs (the list only carries the visible columns), by id.
 	const [ hydrated, setHydrated ] = useState< ReadonlyMap< number, ProductListItem > >( () => new Map() );
 	const [ loaded, setLoaded ] = useState( false );
@@ -391,9 +465,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	useEffect( () => {
 		mountedRef.current = true;
+		// While an editor is open the snackbars move to the other side, off its Update / Cancel buttons (edit/style.scss).
+		document.documentElement.classList.add( EDITING_CLASS );
 
 		return () => {
 			mountedRef.current = false;
+			document.documentElement.classList.remove( EDITING_CLASS );
 		};
 	}, [] );
 
@@ -508,7 +585,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const [ applyToVariations, setApplyToVariations ] = useState( false );
 	const [ enableManageStock, setEnableManageStock ] = useState( false );
-	const [ skipExistingSales, setSkipExistingSales ] = useState( false );
+	// What happens to the sales the edits replace: chosen explicitly when some run right now (null: not chosen yet).
+	const [ saleChoice, setSaleChoice ] = useState< 'replace' | 'skip' | null >( null );
+	const skipExistingSales = saleChoice === 'skip';
+	// "Only where it gets cheaper": a sale price op never raises what a row sells at.
+	const [ onlyLowerSale, setOnlyLowerSale ] = useState( false );
 	const [ errors, setErrors ] = useState< EditError[] >( [] );
 	const [ warnings, setWarnings ] = useState< EditError[] >( [] );
 	/** The fields whose problem is listed, in the order the editor shows them (tabs, then the form's order). */
@@ -524,10 +605,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const focusedRef = useRef( false );
 	const saveRef = useRef< ( advance?: boolean ) => Promise< void > >( async () => {} );
 
-	const rowOptions = useMemo< RowEditOptions >( () => ( { enableManageStock, skipExistingSales } ), [ enableManageStock, skipExistingSales ] );
 	const fieldsWithToggle = useMemo( () => withScheduleSale( allFields ), [ allFields ] );
 	// Bulk mode adds the add/remove/replace select in front of the list fields.
 	const editFields = useMemo( () => ( bulk ? withArrayOps( fieldsWithToggle ) : fieldsWithToggle ), [ fieldsWithToggle, bulk ] );
+	const rowOptions = useMemo< RowEditOptions >(
+		() => ( {
+			enableManageStock,
+			skipExistingSales,
+			...( onlyLowerSale ? { keepSale: ( item: ProductListItem, rowEdits: Record< string, unknown > ) => lowersPrice( item, rowEdits, editFields, settings ) } : {} ),
+		} ),
+		[ enableManageStock, skipExistingSales, onlyLowerSale, editFields, settings ]
+	);
 	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
 	// The edits belong to this editor: ticking another row into a bulk edit keeps what was typed.
 	const state = useEditState( items, editFields, mode );
@@ -631,7 +719,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const root = rootRef.current;
 
 		if ( root && ( ! root.contains( document.activeElement ) || document.activeElement === root ) ) {
-			focusFirstControl( formRef.current );
+			// A variation is quick-edited for its price (its status is a toggle seldom touched): the regular price first.
+			const variationQuick = mode === 'quick' && items.length === 1 && isVariation( items[ 0 ]! );
+
+			focusFirstControl( formRef.current, variationQuick ? 'input[id^="wc-pl-price-regular_price-"]:not([disabled])' : undefined );
 		}
 
 		// The form is in the row now: its height is known.
@@ -743,6 +834,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
 	// Rows whose current sale the edits replace (bulk only: quick edit shows the field itself).
 	const existingSales = useMemo( () => ( bulk && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ bulk, plannedCount, targetsForValidation, plannedEdits ] );
+	// Sales running now that the edits would end: the user says replace or skip before anything is written.
+	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
+	const saleChoiceNeeded = bulk && runningSales.count > 0 && saleChoice === null;
 
 	/** After a partial failure only the failed rows (and the parents whose variations failed) are sent again. */
 	const retryTargets = useMemo( () => {
@@ -782,7 +876,6 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				}
 			}, 0 );
 		},
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[ fieldTab, tab.id, fieldLabels ]
 	);
 
@@ -901,6 +994,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 
 			if ( advance && nextRow ) {
+				carryTabToNext( tab.id );
 				onAdvance( nextRow );
 			} else {
 				onClose();
@@ -933,6 +1027,26 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		if ( projected.length ) {
 			setErrors( projected );
+
+			return;
+		}
+
+		if ( saleChoiceNeeded ) {
+			setErrors( [
+				{
+					id: 0,
+					message: sprintf(
+						/* translators: %d: number of rows on sale now */
+						_n( 'Choose what happens to the %d sale running now: replace it or skip that row.', 'Choose what happens to the %d sales running now: replace them or skip those rows.', runningSales.count, 'wp-woocommerce-products-list' ),
+						runningSales.count
+					),
+				},
+			] );
+			setTimeout( () => {
+				if ( mountedRef.current ) {
+					focusWithin( rootRef.current, '.wc-pl-edit__sale-warning input[type="radio"]' );
+				}
+			}, 0 );
 
 			return;
 		}
@@ -991,6 +1105,19 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			} );
 
 			const updated = result.updated.length;
+
+			// What the save left out goes into the batch's audit trail as `skipped` rows (fire and forget).
+			const editKeys = Object.keys( pendingEdits );
+			const leftOut: SkippedItem[] = [
+				...changed.trashed.map( ( id ): SkippedItem => ( { id, reason: 'trashed', fields: editKeys } ) ),
+				...changed.missing.map( ( id ): SkippedItem => ( { id, reason: 'deleted', fields: editKeys } ) ),
+				...( result.skippedItems ?? [] ),
+			];
+
+			if ( leftOut.length ) {
+				void logSkipped( result.batchId, bulk ? 'bulk' : 'quick', leftOut );
+			}
+
 			// Rows that no longer exist cannot be retried; they leave the list once the editor closes.
 			const gone = result.errors.filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id );
 
@@ -1008,6 +1135,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 				if ( advance && nextRow ) {
 					if ( mountedRef.current ) {
+						carryTabToNext( tab.id );
 						onAdvance( nextRow );
 					}
 				} else {
@@ -1023,11 +1151,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// Who failed and why, always: the editor may be gone by now (its rows left the list mid-save), and the snackbar is then all there is.
 			const history = historyAction( result.batchId );
 
-			notify.error( partialFailureMessage( result, names ), {
-				id: SAVED_NOTICE_ID,
-				actions: [ ...( updated > 0 ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ],
-				explicitDismiss: true,
-			} );
+			const partialActions = [ ...( updated > 0 ? [ undoAction( result.batchId ) ] : [] ), ...( history ? [ history ] : [] ) ];
+
+			if ( mountedRef.current ) {
+				// The editor lists who failed and why; the snackbar carries the counts and the Undo, and expires like any other.
+				notify.info( partialFailureMessage( result, names, false ), { id: SAVED_NOTICE_ID, actions: partialActions.length ? partialActions : undefined } );
+			} else {
+				notify.error( partialFailureMessage( result, names ), { id: SAVED_NOTICE_ID, actions: partialActions, explicitDismiss: true } );
+			}
 
 			if ( mountedRef.current ) {
 				const goneSet = new Set( gone );
@@ -1042,10 +1173,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 		} catch ( error ) {
 			failed = true;
-			notify.error( error instanceof Error ? error.message : String( error ) );
 
+			// The open editor lists the failure next to its buttons; a snackbar only when the editor is gone (it would otherwise sit over Update until dismissed).
 			if ( mountedRef.current ) {
 				setErrors( [ { id: 0, message: error instanceof Error ? error.message : String( error ) } ] );
+			} else {
+				notify.error( error instanceof Error ? error.message : String( error ) );
 			}
 		} finally {
 			if ( mountedRef.current ) {
@@ -1079,7 +1212,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 	}, [ submitRequested ] );
 
-	const dirty = state.hasInput && pendingCount > 0;
+	// Settings typed into a language tool and not run yet count as unsaved too.
+	const [ toolsDirty, setToolsDirty ] = useState( 0 );
+	const unsavedCount = pendingCount + toolsDirty;
+	const dirty = ( state.hasInput && pendingCount > 0 ) || toolsDirty > 0;
 
 	// A running save keeps the editor mounted: the screen does not close it when the selection or the rows change meanwhile.
 	const setBusy = host.setBusy;
@@ -1158,8 +1294,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const onKeyDown = ( event: KeyboardEvent< HTMLFormElement > ) => {
 		if ( event.key === 'Escape' ) {
-			// A control that used Escape itself (a closed picker) keeps it; otherwise the editor closes, after a confirm when dirty.
-			if ( event.defaultPrevented ) {
+			// A control that used Escape itself (a closed picker, a native select's dropdown) keeps it; otherwise the editor closes, after a confirm when dirty.
+			if ( event.defaultPrevented || escapeBelongsToControl( event.target ) ) {
 				return;
 			}
 
@@ -1302,7 +1438,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		if ( plan ) {
-			return saveLabelFor( plan );
+			const base = saveLabelFor( plan );
+
+			// Replacing sales that run now ends them on save: the button says so.
+			return saleChoice === 'replace' && runningSales.count > 0 && plan.writes.length > 0
+				? sprintf(
+						/* translators: 1: "Update N items", 2: number of sales running now */
+						_n( '%1$s, ending %2$d running sale', '%1$s, ending %2$d running sales', runningSales.count, 'wp-woocommerce-products-list' ),
+						base,
+						runningSales.count
+				  )
+				: base;
 		}
 
 		/* translators: %d: number of rows */
@@ -1324,6 +1470,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		: __( 'Quick edit', 'wp-woocommerce-products-list' );
 
 	const listed = items.slice( 0, ITEMS_LISTED );
+
+	// Always in the layout (hidden once loaded) and beside the title, never above the fields: the form does not move when the values arrive, so a fast first click lands where it was aimed.
+	const loadingLine = (
+		<span className={ `wc-pl-inline-edit__loading${ tabReady ? ' is-done' : '' }` } role="status" aria-hidden={ tabReady || undefined }>
+			{ tabReady ? null : (
+				<>
+					<Spinner /> { __( 'Loading current values…', 'wp-woocommerce-products-list' ) }
+				</>
+			) }
+		</span>
+	);
 
 	return (
 		<form
@@ -1355,6 +1512,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			{ bulk ? (
 				<div className="wc-pl-inline-edit__items">
 					<h2 className="wc-pl-inline-edit__title">{ title }</h2>
+					{ loadingLine }
 					{ items.length > 1 ? <p className="wc-pl-edit__summary">{ breakdown( items ) }</p> : null }
 					{ wholeList ? (
 						<p className="wc-pl-inline-edit__whole">
@@ -1369,8 +1527,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 							{ offPageCount > 0 ? (
 								<p className="wc-pl-inline-edit__whole">
 									{ sprintf(
-										/* translators: %d: number of selected rows on other pages */
-										_n( '%d of them is on another page.', '%d of them are on other pages.', offPageCount, 'wp-woocommerce-products-list' ),
+										/* translators: %d: number of selected rows not shown in the current list view */
+										_n( '%d of them is not in this view.', '%d of them are not in this view.', offPageCount, 'wp-woocommerce-products-list' ),
 										offPageCount
 									) }
 								</p>
@@ -1424,19 +1582,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			) : null }
 
 			<div className="wc-pl-inline-edit__main">
-				{ ! bulk || ! tabReady ? (
+				{ ! bulk ? (
 					<div className="wc-pl-inline-edit__head">
-						{ ! bulk ? (
-							<h2 className="wc-pl-inline-edit__title">
-								{ title }
-								{ items[ 0 ] ? <span className="wc-pl-inline-edit__name">{ nameOf( items[ 0 ] ) }</span> : null }
-							</h2>
-						) : null }
-						{ ! tabReady ? (
-							<span className="wc-pl-inline-edit__loading" role="status">
-								<Spinner /> { __( 'Loading current values…', 'wp-woocommerce-products-list' ) }
-							</span>
-						) : null }
+						<h2 className="wc-pl-inline-edit__title">
+							{ title }
+							{ items[ 0 ] ? <span className="wc-pl-inline-edit__name">{ nameOf( items[ 0 ] ) }</span> : null }
+						</h2>
+						{ loadingLine }
 					</div>
 				) : null }
 
@@ -1523,14 +1675,19 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</div>
 				) : null }
 
-				{ tab.id.includes( ':' ) && tabReady ? (
+				{ /* Mounted through the tab's reload after a run, so what was typed into a tool stays. */ }
+				{ tab.id.includes( ':' ) && ! loading ? (
 					<LanguageTools
 						tabId={ tab.id }
 						tabLabel={ tab.label }
 						items={ items }
 						settings={ settings }
+						fields={ allFields }
 						disabled={ saving }
-						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ) ) }
+						onDirtyChange={ setToolsDirty }
+						defaultOpen={ bulk }
+						// A failure shows inline under the tool, not as a snackbar that outlives it.
+						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ), { inlineErrors: true } ) }
 						onDone={ () => {
 							if ( mountedRef.current ) {
 								// The tab's values reload: the copied (or cleared) texts show in the form.
@@ -1600,35 +1757,66 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 				{ existingSales.rows.length > 0 && ! loading ? (
 					<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning">
-						{ sprintf(
-							/* translators: 1: number of rows with a sale, 2: number of rows in total, 3: how many of those sales run right now */
-							_n(
-								'%1$d of the %2$d rows already has a sale price (%3$d active now). The new sale replaces it; a running discount stops until the new sale starts.',
-								'%1$d of the %2$d rows already have a sale price (%3$d active now). The new sale replaces them; running discounts stop until the new sale starts.',
+						<p>
+							{ sprintf(
+								/* translators: 1: number of rows with a sale, 2: number of rows in total */
+								_n( '%1$d of the %2$d rows already has a sale price.', '%1$d of the %2$d rows already have a sale price.', existingSales.rows.length, 'wp-woocommerce-products-list' ),
 								existingSales.rows.length,
-								'wp-woocommerce-products-list'
-							),
-							existingSales.rows.length,
-							targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length,
-							existingSales.active
-						) }
+								targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length
+							) }{ ' ' }
+							{ runningSales.count > 0 ? runningSales.message : null }
+						</p>
+						<RadioControl
+							className="wc-pl-edit__sale-choice"
+							label={ __( 'Existing sales', 'wp-woocommerce-products-list' ) }
+							selected={ saleChoice ?? ( runningSales.count > 0 ? '' : 'replace' ) }
+							options={ [
+								{
+									value: 'replace',
+									label:
+										runningSales.count > 0
+											? sprintf(
+													/* translators: %d: number of rows on sale now */
+													_n( 'Replace them (the %d sale running now ends when you update)', 'Replace them (the %d sales running now end when you update)', runningSales.count, 'wp-woocommerce-products-list' ),
+													runningSales.count
+											  )
+											: __( 'Replace them', 'wp-woocommerce-products-list' ),
+								},
+								{
+									value: 'skip',
+									label: sprintf(
+										/* translators: %d: number of rows */
+										_n( 'Skip the %d row that already has a sale', 'Skip the %d rows that already have a sale', existingSales.rows.length, 'wp-woocommerce-products-list' ),
+										existingSales.rows.length
+									),
+								},
+							] }
+							onChange={ ( value: string ) => {
+								setSaleChoice( value === 'skip' ? 'skip' : 'replace' );
+								setErrors( [] );
+								setWarnings( [] );
+								setAcknowledged( null );
+							} }
+							disabled={ saving }
+						/>
+					</Notice>
+				) : null }
+
+				{ bulk && plannedEdits.sale_price !== undefined && ! loading ? (
+					<div className="wc-pl-edit__options">
 						<CheckboxControl
 							__nextHasNoMarginBottom
-							label={ sprintf(
-								/* translators: %d: number of rows */
-								_n( 'Skip the %d row that already has a sale', 'Skip the %d rows that already have a sale', existingSales.rows.length, 'wp-woocommerce-products-list' ),
-								existingSales.rows.length
-							) }
-							checked={ skipExistingSales }
+							label={ __( 'Only where the new sale price is lower than the price the item sells at now', 'wp-woocommerce-products-list' ) }
+							checked={ onlyLowerSale }
 							disabled={ saving }
 							onChange={ ( checked ) => {
-								setSkipExistingSales( checked );
+								setOnlyLowerSale( checked );
 								setErrors( [] );
 								setWarnings( [] );
 								setAcknowledged( null );
 							} }
 						/>
-					</Notice>
+					</div>
 				) : null }
 
 				{ bulk && plannedCount > 0 && ! loading ? (
@@ -1695,8 +1883,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				>
 					{ sprintf(
 						/* translators: %d: number of changed fields */
-						_n( 'Discard %d unsaved change?', 'Discard %d unsaved changes?', pendingCount, 'wp-woocommerce-products-list' ),
-						pendingCount
+						_n( 'Discard %d unsaved change?', 'Discard %d unsaved changes?', unsavedCount, 'wp-woocommerce-products-list' ),
+						unsavedCount
 					) }
 				</ConfirmDialog>
 			) : null }

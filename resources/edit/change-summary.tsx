@@ -12,8 +12,9 @@ import { formatPrice } from '../fields/currency';
 import type { Option } from '../dataviews';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { applyArrayOp, arrayOpFieldId, describeArrayOperation, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
-import { describeRounding, editsForItem, isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
+import { describeRounding, editsForItem, isNumericOp, numericKindOf, parseNumeric, projectEdits } from './bulk-numeric';
 import type { NumericOp } from './bulk-numeric';
+import { currentSellingPrice } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { isVariableParent, readFieldValue } from './field-value';
 import { itemLabel } from './item-label';
@@ -32,6 +33,12 @@ export interface ChangeLine {
 	example?: string;
 	/** The rows counted (each once), so the heading counts every row once across the lines. */
 	rowIds: number[];
+	/**
+	 * A numeric edit's direction per row: how many rows go up and down (a
+	 * sale price against what the row sells at now), the lowest and highest
+	 * result, and a row that goes up when the edit is meant to lower prices.
+	 */
+	direction?: { higher: number; lower: number; same: number; min: string; max: string; higherExample?: string; againstSelling: boolean };
 }
 
 /** The currency a price field is in: a language's market currency (SEK) for its prices, else the shop's. */
@@ -249,6 +256,9 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 
 			let example: string | undefined;
 			const changed: number[] = [];
+			// The core sale price is compared with what the row sells at now: an empty sale price under a 159 € regular price is 159 €, not nothing.
+			const againstSelling = id === 'sale_price';
+			const direction = { higher: 0, lower: 0, same: 0, min: Infinity, max: -Infinity, higherExample: undefined as string | undefined };
 
 			for ( const item of reached ) {
 				const projected = projectEdits( item, editsForItem( item, edits, fields, options ), fields, settings );
@@ -260,14 +270,61 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 
 				changed.push( item.id );
 
-				if ( ! example ) {
-					const current = readFieldValue( field, item );
+				const current = readFieldValue( field, item );
+				const line = `${ itemLabel( item ) }: ${ describeValue( field, current, settings ) } → ${ describeValue( field, next, settings ) }`;
 
-					example = `${ itemLabel( item ) }: ${ describeValue( field, current, settings ) } → ${ describeValue( field, next, settings ) }`;
+				if ( ! example ) {
+					example = line;
+				}
+
+				const after = parseNumeric( next, settings );
+				const before = parseNumeric( againstSelling ? currentSellingPrice( item ) : current, settings );
+
+				if ( after === undefined ) {
+					continue;
+				}
+
+				direction.min = Math.min( direction.min, after );
+				direction.max = Math.max( direction.max, after );
+
+				if ( before === undefined || after === before ) {
+					direction.same += before === undefined ? 0 : 1;
+				} else if ( after > before ) {
+					direction.higher += 1;
+
+					if ( ! direction.higherExample ) {
+						const shown = againstSelling ? `${ itemLabel( item ) }: ${ describeValue( field, String( before ), settings ) } → ${ describeValue( field, next, settings ) }` : line;
+
+						direction.higherExample = shown;
+					}
+				} else {
+					direction.lower += 1;
 				}
 			}
 
-			lines.push( { field: id, label, change: describeOp( value, kind, settings, currencyOf( field ) ), count: changed.length, example, rowIds: changed } );
+			const counted = direction.min <= direction.max;
+
+			lines.push( {
+				field: id,
+				label,
+				change: describeOp( value, kind, settings, currencyOf( field ) ),
+				count: changed.length,
+				example,
+				rowIds: changed,
+				...( counted
+					? {
+							direction: {
+								higher: direction.higher,
+								lower: direction.lower,
+								same: direction.same,
+								min: describeValue( field, String( direction.min ), settings ),
+								max: describeValue( field, String( direction.max ), settings ),
+								higherExample: direction.higherExample,
+								againstSelling,
+							},
+					  }
+					: {} ),
+			} );
 			continue;
 		}
 
@@ -275,6 +332,46 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 	}
 
 	return lines;
+}
+
+/** "Lower on 47 rows, HIGHER on 16 (e.g. …); from 59,00 € to 119,25 €." under a numeric line. */
+export function describeDirection( direction: NonNullable< ChangeLine[ 'direction' ] > ): string {
+	const parts: string[] = [];
+
+	if ( direction.lower ) {
+		/* translators: %d: number of rows */
+		parts.push( sprintf( _n( 'lower on %d row', 'lower on %d rows', direction.lower, 'wp-woocommerce-products-list' ), direction.lower ) );
+	}
+
+	if ( direction.higher ) {
+		parts.push(
+			direction.againstSelling
+				? /* translators: %d: number of rows */
+				  sprintf( _n( 'HIGHER than the current selling price on %d row', 'HIGHER than the current selling price on %d rows', direction.higher, 'wp-woocommerce-products-list' ), direction.higher )
+				: /* translators: %d: number of rows */
+				  sprintf( _n( 'higher on %d row', 'higher on %d rows', direction.higher, 'wp-woocommerce-products-list' ), direction.higher )
+		);
+	}
+
+	if ( direction.same ) {
+		/* translators: %d: number of rows */
+		parts.push( sprintf( _n( 'the same on %d row', 'the same on %d rows', direction.same, 'wp-woocommerce-products-list' ), direction.same ) );
+	}
+
+	const range =
+		direction.min === direction.max
+			? /* translators: %s: a price or number */
+			  sprintf( __( 'all %s', 'wp-woocommerce-products-list' ), direction.min )
+			: /* translators: 1: lowest result, 2: highest result */
+			  sprintf( __( 'from %1$s to %2$s', 'wp-woocommerce-products-list' ), direction.min, direction.max );
+	const head = parts.length ? parts.join( ', ' ) : '';
+	const example = direction.higher && direction.higherExample ? ` (${ sprintf( /* translators: %s: an example "Name: old → new" */ __( 'e.g. %s', 'wp-woocommerce-products-list' ), direction.higherExample ) })` : '';
+
+	return `${ head ? `${ head.charAt( 0 ).toUpperCase() }${ head.slice( 1 ) }${ example }; ` : '' }${ range }.`;
+}
+
+function DirectionNote( { direction }: { direction: NonNullable< ChangeLine[ 'direction' ] > } ) {
+	return <span className={ `wc-pl-edit__summary-direction${ direction.higher && direction.againstSelling ? ' is-warning' : '' }` }>{ describeDirection( direction ) }</span>;
 }
 
 export interface ChangeSummaryProps {
@@ -323,6 +420,7 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 							</span>
 						) : null }
 						{ line.example ? <span className="wc-pl-edit__summary-example"> — { sprintf( /* translators: %s: an example "Name: old → new" */ __( 'e.g. %s', 'wp-woocommerce-products-list' ), line.example ) }</span> : null }
+						{ line.direction ? <DirectionNote direction={ line.direction } /> : null }
 					</li>
 				) ) }
 				{ unchanged > 0 ? (

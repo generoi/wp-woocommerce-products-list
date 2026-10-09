@@ -6,6 +6,7 @@
  * since the batch come back as `conflict` and are left alone; the caller
  * may post them again with `force`.
  */
+import { __, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertPlan } from '../api/client';
 import { getRevertPlan, newBatchId, revertBatch } from '../api/client';
 
@@ -25,6 +26,8 @@ export interface RunRevertOptions {
 	/** Only these objects (a retry of conflicts); the plan's chunks otherwise. */
 	ids?: number[];
 	force?: boolean;
+	/** Take the batch's change off the current value for relative fields (stock) instead of overwriting. */
+	relative?: boolean;
 	/** The id to keep logging under (a forced retry joins the first pass). */
 	revertBatchId?: string;
 	onProgress?( done: number, total: number ): void;
@@ -74,7 +77,7 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 			continue;
 		}
 
-		const response = await post( batchId, { ids, revertBatchId, force: options.force, fields: [ 'id' ] } );
+		const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ] } );
 
 		results.push( ...( response.results ?? [] ) );
 		done += ids.length;
@@ -90,4 +93,44 @@ export async function revertWholeBatch( batchId: string, options: Omit< RunRever
 	const outcome = await runRevert( batchId, plan, options );
 
 	return { ...outcome, plan };
+}
+
+function shown( value: unknown ): string {
+	if ( value === null || value === undefined || value === '' ) {
+		return '—';
+	}
+
+	return typeof value === 'object' ? JSON.stringify( value ) : String( value );
+}
+
+/**
+ * One conflict as a sentence: "Pelsi Black 37-38: Stock quantity 10 → 9
+ * kept" (the value the batch left → the value now, which the revert kept).
+ * `label` maps a field key to its label when the server sent none.
+ */
+export function describeConflict( result: ActionResult, label: ( key: string ) => string = ( key ) => key ): string {
+	const name = result.name || `#${ result.id }`;
+	const keys = result.fields ?? [];
+	const parts = keys.map( ( key, index ) => {
+		const fieldLabel = result.labels?.[ index ] || label( key );
+
+		if ( result.batch && result.current && key in result.batch && key in result.current ) {
+			return sprintf(
+				/* translators: 1: field label, 2: value the batch left, 3: value now (kept) */
+				__( '%1$s %2$s → %3$s kept', 'wp-woocommerce-products-list' ),
+				fieldLabel,
+				shown( result.batch[ key ] ),
+				shown( result.current[ key ] )
+			);
+		}
+
+		return fieldLabel;
+	} );
+
+	return parts.length ? `${ name }: ${ parts.join( '; ' ) }` : name;
+}
+
+/** The conflicts a relative revert can resolve (a stock count changed since: take the batch's change off it). */
+export function relativeConflicts( conflicts: ActionResult[] ): ActionResult[] {
+	return conflicts.filter( ( result ) => result.relative === true );
 }

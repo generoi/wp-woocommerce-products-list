@@ -23,6 +23,8 @@ export interface HierarchyViewValue {
 	childrenState?: ReadonlyMap< number, ChildrenState >;
 	/** Reload one parent's children after an error. */
 	onRetryChildren?( parentId: number ): void;
+	/** Variation rows the current search matched by SKU (hierarchy/search-match.ts). */
+	searchMatchIds?: ReadonlySet< number >;
 }
 
 const HierarchyContext = createContext< Hierarchy | null >( null );

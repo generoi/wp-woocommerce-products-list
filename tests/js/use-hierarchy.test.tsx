@@ -162,6 +162,32 @@ describe( 'useHierarchy', () => {
 		expect( result.current.rows.slice( 1 ).map( ( row ) => row.id ) ).toEqual( Array.from( { length: 250 }, ( _, i ) => 1001 + i ) );
 	} );
 
+	it( 'refetches every page of a parent with more than 100 variations, keeping the stale rows until done', async () => {
+		const { fetch, calls } = fakeFetch( { 1: 250 }, { delay: 2 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1, 250 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( result.current.rows ).toHaveLength( 251 );
+
+		act( () => invalidateVariations() );
+		// While the refetch runs the 250 stale rows stay on screen.
+		expect( result.current.rows.filter( ( row ) => row._parentId === 1 && ! row._placeholder ) ).toHaveLength( 250 );
+
+		await waitFor( () => expect( calls.map( ( c ) => c.page ) ).toEqual( [ 1, 2, 3, 1, 2, 3 ] ) );
+		await waitFor( () => expect( result.current.childrenOf( 1 )?.status ).toBe( 'loaded' ) );
+		const ids = result.current.rows.map( getItemId );
+		expect( ids ).toHaveLength( 251 );
+		expect( ids ).not.toContain( '1:more' );
+
+		let selection: string[] = [];
+		await act( async () => {
+			selection = await result.current.selectVariations( 1, [] );
+		} );
+		expect( selection.filter( ( id ) => id !== '1' ) ).toHaveLength( 250 );
+	} );
+
 	it( 'stops fetching at maxChildrenPerParent and shows the "more" row', async () => {
 		const { fetch, calls } = fakeFetch( { 1: 450 } );
 		const { result } = renderHook( () => useHierarchy( [ parent( 1, 450 ) ], fields, { fetchVariations: fetch, storage: null, maxChildren: 150 } ) );
@@ -444,6 +470,35 @@ describe( 'useHierarchy', () => {
 		act( () => result.current.collapse( 1 ) );
 		act( () => removeVariationRows( [ 1 ] ) );
 		expect( result.current.childrenOf( 1 ) ).toBeUndefined();
+	} );
+
+	it( 'keeps a variation thumbnail when a write response carries no image of its own', async () => {
+		const withImage = { ...parent( 1 ), images: [ { id: 77, src: 'parent.jpg' } ] } as ProductRow;
+		const fetch: FetchVariations = async () => ( {
+			items: [ { ...rawVariation( 1, 1 ), image: { id: 77, src: 'parent.jpg' } }, { ...rawVariation( 1, 2 ), image: { id: 5, src: 'own.jpg' } } ],
+			total: 2,
+			totalPages: 1,
+		} );
+		const { result } = renderHook( () => useHierarchy( [ withImage ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		expect( result.current.rows[ 1 ]?.images ).toEqual( [ { id: 77, src: 'parent.jpg' } ] );
+
+		// Edit-context write responses: image null, normalised to images [].
+		act( () => patchVariationRows( [ { id: 1001, stock_quantity: 5, image: null, images: [] } as never ] ) );
+		expect( result.current.rows[ 1 ] ).toMatchObject( { id: 1001, stock_quantity: 5, images: [ { id: 77, src: 'parent.jpg' } ] } );
+
+		// Removing a variation's own image shows the parent's, as a read would.
+		act( () => patchVariationRows( [ { id: 1002, image: null, images: [] } as never ] ) );
+		expect( result.current.rows[ 2 ]?.images ).toEqual( [ { id: 77, src: 'parent.jpg' } ] );
+
+		// A patch that sets an image still wins; one without image keys leaves it alone.
+		act( () => patchVariationRows( [ { id: 1002, image: { id: 9, src: 'new.jpg' } } as never ] ) );
+		expect( result.current.rows[ 2 ]?.images ).toEqual( [ { id: 9, src: 'new.jpg' } ] );
+		act( () => patchVariationRows( [ { id: 1002, sku: 'X' } ] ) );
+		expect( result.current.rows[ 2 ]?.images ).toEqual( [ { id: 9, src: 'new.jpg' } ] );
 	} );
 
 	it( 'follows the saved and deleted actions', async () => {

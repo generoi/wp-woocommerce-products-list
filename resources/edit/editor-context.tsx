@@ -6,7 +6,8 @@
  * `hidden` on the sibling cells: DataViews sets neither, and the row
  * unmounts whole on close) and mounts the editor chunk on first use.
  */
-import { Spinner } from '@wordpress/components';
+import { Button, Notice, Spinner } from '@wordpress/components';
+import { ErrorBoundary } from '../ui/error-boundary';
 import { createContext, lazy, Suspense, useContext, useLayoutEffect, useRef } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ProductField, ProductListItem } from '../types';
@@ -181,15 +182,38 @@ export function InlineEditorCell( { item }: { item: ProductListItem } ) {
 
 	return (
 		<div ref={ ref } className={ `wc-pl-inline-edit-host is-${ host.session.mode } is-level-${ item._level }` } role="region" aria-label={ editorRegionLabel( host ) }>
-			<Suspense
-				fallback={
-					<div className="wc-pl-inline-edit__loading" role="status">
-						<Spinner /> { __( 'Opening the editor…', 'wp-woocommerce-products-list' ) }
-					</div>
-				}
+			<ErrorBoundary
+				context="editor"
+				fallback={ ( { isChunkError, retry } ) => (
+					<Notice status="error" isDismissible={ false } className="wc-pl-inline-edit__failed">
+						{ isChunkError
+							? __( 'The editor could not be loaded. The plugin may have been updated, or the connection dropped.', 'wp-woocommerce-products-list' )
+							: __( 'Something went wrong in the editor.', 'wp-woocommerce-products-list' ) }{ ' ' }
+						{ isChunkError ? (
+							<Button variant="link" onClick={ () => window.location.reload() }>
+								{ __( 'Reload the page', 'wp-woocommerce-products-list' ) }
+							</Button>
+						) : (
+							<Button variant="link" onClick={ retry }>
+								{ __( 'Try again', 'wp-woocommerce-products-list' ) }
+							</Button>
+						) }{ ' ' }
+						<Button variant="secondary" size="compact" onClick={ () => host.close() }>
+							{ __( 'Cancel', 'wp-woocommerce-products-list' ) }
+						</Button>
+					</Notice>
+				) }
 			>
-				<InlineEditor host={ host } />
-			</Suspense>
+				<Suspense
+					fallback={
+						<div className="wc-pl-inline-edit__loading" role="status">
+							<Spinner /> { __( 'Opening the editor…', 'wp-woocommerce-products-list' ) }
+						</div>
+					}
+				>
+					<InlineEditor host={ host } />
+				</Suspense>
+			</ErrorBoundary>
 		</div>
 	);
 }

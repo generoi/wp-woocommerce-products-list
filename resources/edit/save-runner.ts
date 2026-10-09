@@ -14,6 +14,7 @@
  * Rows are patched optimistically before each request and replaced by the
  * returned objects after; failed rows roll back and are reported per id.
  */
+import { __ } from '@wordpress/i18n';
 import type { BatchItemError, BatchResponse, BatchResult, ProductField, ProductListItem, RawProduct, RawVariation, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import type { FetchVariations } from './apply-to-variations';
@@ -96,8 +97,19 @@ export interface SavePlan {
 	stockSkipped: ProductListItem[];
 	/** Rows left alone because they already have a sale. */
 	saleSkipped: ProductListItem[];
+	/** Rows left alone because the new sale price would not be lower than what they sell at now. */
+	notLowerSkipped: ProductListItem[];
 	/** Rows written whose existing sale the edits replace. */
 	replacedSales: number;
+	/** Every row the plan left out, with why and the edit keys it would have changed (for the audit log). */
+	skippedItems: PlanSkip[];
+}
+
+export interface PlanSkip {
+	id: number;
+	reason: 'no_stock_management' | 'has_sale' | 'other';
+	fields: string[];
+	message?: string;
 }
 
 /** What `runSave` reports: the batch result plus what the plan left out. */
@@ -105,7 +117,11 @@ export interface SaveResult extends BatchResult {
 	unchanged: number;
 	stockSkipped: number;
 	saleSkipped: number;
+	/** Rows the "only where it gets cheaper" guard left alone. */
+	notLowerSkipped?: number;
 	replacedSales: number;
+	/** The rows the plan left out, for POST /log/skipped. */
+	skippedItems?: PlanSkip[];
 }
 
 function chunk< T >( list: T[], size: number ): T[][] {
@@ -223,17 +239,26 @@ function snapshotOf( target: SaveTarget, patch: Record< string, unknown > ): Rec
 
 /** Turn resolved targets into the plan: payloads for the rows that change, counts for the rest. */
 export function planTargets( targets: SaveTarget[], fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): SavePlan {
-	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], replacedSales: 0 };
+	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], notLowerSkipped: [], replacedSales: 0, skippedItems: [] };
 
 	for ( const target of targets ) {
 		const own = resolveRowEdits( target.item, target.edits, options );
+		const dropped = Object.keys( target.edits ).filter( ( key ) => ! ( key in own ) );
 
 		if ( hasStockGatedEdit( target.edits ) && ! hasStockGatedEdit( own ) ) {
 			plan.stockSkipped.push( target.item );
+			plan.skippedItems.push( { id: target.item.id, reason: 'no_stock_management', fields: dropped } );
 		}
 
 		if ( hasSaleEdit( target.edits ) && ! hasSaleEdit( own ) ) {
-			plan.saleSkipped.push( target.item );
+			// Dropped by the "only where it gets cheaper" guard, or for having a sale already.
+			if ( options.keepSale && hasSaleEdit( resolveRowEdits( target.item, target.edits, { ...options, keepSale: undefined } ) ) ) {
+				plan.notLowerSkipped.push( target.item );
+				plan.skippedItems.push( { id: target.item.id, reason: 'other', fields: dropped, message: __( 'Skipped: the new sale price would not be lower than the price it sells at now.', 'wp-woocommerce-products-list' ) } );
+			} else {
+				plan.saleSkipped.push( target.item );
+				plan.skippedItems.push( { id: target.item.id, reason: 'has_sale', fields: dropped } );
+			}
 		}
 
 		if ( Object.keys( own ).length === 0 ) {
@@ -282,11 +307,11 @@ export function planSave(
 }
 
 /** Prepare the per-row payloads; rows with nothing to send are left out. */
-export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' > ): Promise< Prepared[] > {
+export async function prepareSave( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' > ): Promise< Prepared[] > {
 	return ( await preparePlan( deps, items, edits, fields, settings, options ) ).writes;
 }
 
-async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' > ): Promise< SavePlan > {
+async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: Pick< SaveOptions, 'applyToVariations' | 'prefetchedVariations' | 'enableManageStock' | 'skipExistingSales' | 'keepSale' > ): Promise< SavePlan > {
 	const prefetched = options.prefetchedVariations;
 	const fetchVariations: FetchVariations = ( parentId, fieldList ) => {
 		const rows = prefetched?.get( parentId );
@@ -295,7 +320,7 @@ async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: Pr
 	};
 	const targets = await resolveSaveTargets( items, edits, fields, { applyToVariations: options.applyToVariations, fetchVariations } );
 
-	return planTargets( targets, fields, settings, { enableManageStock: options.enableManageStock, skipExistingSales: options.skipExistingSales } );
+	return planTargets( targets, fields, settings, { enableManageStock: options.enableManageStock, skipExistingSales: options.skipExistingSales, keepSale: options.keepSale } );
 }
 
 export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: SaveOptions ): Promise< SaveResult > {
@@ -309,7 +334,9 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		unchanged: plan.unchanged,
 		stockSkipped: plan.stockSkipped.length,
 		saleSkipped: plan.saleSkipped.length,
+		notLowerSkipped: plan.notLowerSkipped.length,
 		replacedSales: plan.replacedSales,
+		skippedItems: plan.skippedItems,
 	};
 	const total = prepared.length;
 	let done = 0;
@@ -322,6 +349,43 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 
 	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ) };
 	const byId = new Map( prepared.map( ( entry ) => [ entry.target.item.id, entry ] ) );
+
+	/*
+	 * The returned rows go into the cache on the next task, not inside the
+	 * request loop: patching re-renders the list (hundreds of expanded
+	 * variation rows), and done synchronously that render sat between one
+	 * response and the next request of its lane, seconds of idle network on
+	 * a 261-variation campaign. Responses that land together share one
+	 * render. Optimistic patches flush what is queued first, so the order
+	 * of writes to a row never changes, and the save flushes before it
+	 * resolves.
+	 */
+	let queued: Array< Partial< ProductListItem > & { id: number } > = [];
+	let flushTimer: ReturnType< typeof setTimeout > | null = null;
+	const flush = (): void => {
+		if ( flushTimer !== null ) {
+			clearTimeout( flushTimer );
+			flushTimer = null;
+		}
+
+		if ( queued.length ) {
+			const patches = queued;
+
+			queued = [];
+			deps.patchItems( patches );
+		}
+	};
+	const queuePatches = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {
+		queued = queued.concat( patches );
+
+		if ( flushTimer === null ) {
+			flushTimer = setTimeout( flush, 0 );
+		}
+	};
+	const patchNow = ( patches: Array< Partial< ProductListItem > & { id: number } > ): void => {
+		flush();
+		deps.patchItems( patches );
+	};
 
 	// One patch per response: every patch re-renders the list (and the
 	// expanded variations), so 100 rows go into the cache in one go, not 100.
@@ -363,7 +427,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		}
 
 		if ( patches.length ) {
-			deps.patchItems( patches );
+			queuePatches( patches );
 		}
 	};
 
@@ -375,7 +439,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 			result.errors.push( { id: entry.target.item.id, message, code } );
 		}
 
-		deps.patchItems( group.map( ( entry ) => entry.snapshot as Partial< ProductListItem > & { id: number } ) );
+		queuePatches( group.map( ( entry ) => entry.snapshot as Partial< ProductListItem > & { id: number } ) );
 	};
 
 	const variations = prepared.filter( ( entry ) => isVariation( entry.target.item ) );
@@ -402,7 +466,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		const lanes = packVariationLanes( Array.from( byParent.values() ), deps.variationsBatchSize ?? deps.batchSize );
 
 		// Every row shows its new value at once, not chunk by chunk.
-		deps.patchItems( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+		patchNow( ordered.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 		await runConcurrently(
 			lanes.map( ( lane ) => async () => {
@@ -427,7 +491,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	} else {
 		for ( const [ parentId, entries ] of byParent ) {
 			for ( const group of chunk( entries, deps.batchSize ) ) {
-				deps.patchItems( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+				patchNow( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 				try {
 					const response = await deps.batchVariations( parentId, group.map( ( entry ) => ( { id: entry.target.item.id, ...entry.payload } ) ), requestOptions );
@@ -450,7 +514,7 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 		const concurrency = deps.concurrency ?? DEFAULT_CONCURRENCY;
 		const size = Math.max( 1, Math.min( deps.batchSize, Math.ceil( parents.length / concurrency ) ) );
 
-		deps.patchItems( parents.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
+		patchNow( parents.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 		await runConcurrently(
 			chunk( parents, size ).map( ( group ) => async () => {
@@ -468,6 +532,8 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 			concurrency
 		);
 	}
+
+	flush();
 
 	return result;
 }

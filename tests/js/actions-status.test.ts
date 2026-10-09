@@ -15,6 +15,7 @@ vi.mock( '../../resources/api/client', () => ( {
 } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() } } ) );
 vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), invalidateProducts: vi.fn() } ) );
+vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn( async () => undefined ) } ) );
 
 describe( 'optimisticBatch', () => {
 	beforeEach( () => setSettings( editSettings() ) );
@@ -26,15 +27,15 @@ describe( 'optimisticBatch', () => {
 		vi.mocked( patchItems ).mockClear();
 	} );
 
-	it( 'logs one row as a quick change and several as a bulk one, and resolves with the ids updated', async () => {
+	it( 'logs status changes as menu actions (source action), and resolves with the ids updated', async () => {
 		const one = await optimisticBatch( [ simple( 1 ) ], { patch: ( item ) => ( { id: item.id, featured: true } ), refetch: false, success: () => '' } );
 		expect( one ).toEqual( [ 1 ] );
-		expect( vi.mocked( batchProducts ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'quick' } );
+		expect( vi.mocked( batchProducts ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'action' } );
 
 		const many = await optimisticBatch( [ simple( 1 ), simple( 2 ), variation( 31, 3 ) ], { patch: ( item ) => ( { id: item.id, status: 'draft' } ), refetch: false, success: () => '' } );
 		expect( many ).toEqual( [ 31, 1, 2 ] );
-		expect( vi.mocked( batchProducts ).mock.calls[ 1 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'bulk' } );
-		expect( vi.mocked( batchVariationsAcross ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'bulk' } );
+		expect( vi.mocked( batchProducts ).mock.calls[ 1 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'action' } );
+		expect( vi.mocked( batchVariationsAcross ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'batch-x', source: 'action' } );
 	} );
 
 	it( 'sends the variations of every parent in one cross-parent request, with their parent ids, and patches the returned rows in one go', async () => {
@@ -67,7 +68,14 @@ describe( 'optimisticBatch', () => {
 		expect( ok ).toEqual( [ 2 ] );
 		expect( vi.mocked( batchProducts ).mock.calls[ 0 ]?.[ 0 ] ).toEqual( [ { id: 2, featured: true } ] );
 		expect( vi.mocked( batchProducts ).mock.calls[ 0 ]?.[ 1 ] ).toMatchObject( { fields: expect.arrayContaining( [ 'id', 'featured', 'name' ] ) } );
-		expect( vi.mocked( notify.success ) ).toHaveBeenCalledWith( '1 featured' );
+		// The snackbar can undo the batch (disabling a colour's variations, featuring products).
+		expect( vi.mocked( notify.success ) ).toHaveBeenCalledWith( '1 featured', expect.objectContaining( { id: 'wc-pl-action-batch-x', actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
+
+		const { undoBatch } = await import( '../../resources/edit/undo' );
+		const [ , noticeOptions ] = vi.mocked( notify.success ).mock.calls[ 0 ] as unknown as [ string, { actions: Array< { onClick: () => void } > } ];
+
+		noticeOptions.actions[ 0 ]!.onClick();
+		expect( undoBatch ).toHaveBeenCalledWith( 'batch-x' );
 
 		// Nothing eligible: no request, no notice.
 		expect( await optimisticBatch( [ simple( 3, { featured: true } ) ], { patch: ( item ) => ( { id: item.id, featured: true } ), refetch: false, success: () => '', eligible: ( item ) => item.featured !== true } ) ).toEqual( [] );
