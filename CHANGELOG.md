@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 - 2026-10-09
+
+- Side by side, the editor panel is a card like the list: the same 8px gap under the admin bar, the same border and 4px radius, the list's 15px right gutter and a 16px gap between them.
+- While the panel is open the list hides the History / Add new links and the filter chips, so the narrowed list does not grow and jump as they wrap.
+
 ## 0.1.3 - 2026-10-09
 
 - Browser errors from the app are reported to `POST /wc-products-list/v1/client-errors` and written to WooCommerce → Status → Logs under the source `wc-products-list-client`: render crashes (error boundary), uncaught errors and unhandled rejections from the bundle, and failed REST calls (5xx and network errors). Deduplicated, at most 25 per page load and 60 per user per 10 minutes.
