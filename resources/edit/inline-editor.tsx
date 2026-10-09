@@ -29,7 +29,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
 import type { KeyboardEvent } from 'react';
-import { batchProducts, getVariations, logSkipped, newBatchId, toRow } from '../api/client';
+import { batchProducts, closeBatch, getVariations, logSkipped, newBatchId, toRow } from '../api/client';
 import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
@@ -64,9 +64,8 @@ import type { EditError } from './progress';
 import { canEnableStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { saveEdits, saveFields } from './save';
-import { buildPayload } from './payload';
 import { resetHtmlEditorMode } from './html-text-control';
-import { TranslationGrid, TranslationStore } from './translation-grid';
+import { TranslationGrid, TranslationStore, translationWriteItem } from './translation-grid';
 import type { SaveResult } from './save';
 import { planSave, runConcurrently, UNCERTAIN_CODE } from './save-runner';
 import type { SavePlan } from './save-runner';
@@ -1245,11 +1244,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}, 0 );
 	};
 
+	/** The rows the staged tools and the grid's translations write for `rows` (the planned header of a shared batch). */
+	const stagedToolRows = ( rows: ProductListItem[] ): number =>
+		Array.from( staged.values() ).reduce( ( sum, entry ) => sum + stagedToolIds( entry, rows, parentVariations ).length, 0 ) + translations.count();
+
 	/**
 	 * Run the staged tools under the Update's batch, one after the other in the order they were added. A tool
 	 * that ran leaves the staged list; one that failed stays there (the next Update runs it again) and is reported.
 	 */
-	const runStagedTools = async ( rows: ProductListItem[], batchId: string ): Promise< { ran: number; errors: EditError[] } > => {
+	const runStagedTools = async ( rows: ProductListItem[], batchId: string, planned?: number ): Promise< { ran: number; errors: EditError[] } > => {
 		const errors: EditError[] = [];
 		let ran = 0;
 		const ranTabs = new Set< string >();
@@ -1264,7 +1267,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 
 			try {
-				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true } );
+				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true, ...( planned ? { planned } : {} ) } );
 				ran++;
 				ranTabs.add( entry.tabId );
 				reachedVariations ||= Boolean( parentVariations?.length ) && ids.some( ( id ) => parentVariations!.some( ( variation ) => variation.id === id ) );
@@ -1296,7 +1299,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					keys.add( key );
 					ranTabs.add( key.slice( 0, key.indexOf( '.' ) ) );
 				} );
-				updates.push( { ...buildPayload( row, edits, allFields, settings ), id } );
+				// With the values the grid loaded as `_wcpl_expect`: a translation saved meanwhile elsewhere is refused, not overwritten.
+				updates.push( translationWriteItem( row, edits, translations.originalsOf( id ), allFields, settings ) );
 			}
 
 			const size = Math.max( 1, settings.limits.batchSize );
@@ -1311,7 +1315,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			await runConcurrently(
 				parts.map( ( part ) => async () => {
 					try {
-						const response = await batchProducts( part, { batchId, source: 'bulk', fields: returned } );
+						const response = await batchProducts( part, { batchId, source: 'bulk', fields: returned, ...( planned ? { planned } : {} ) } );
 						const saved: number[] = [];
 						const patches: ProductListItem[] = [];
 
@@ -1509,6 +1513,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		let failed = false;
 		// The list's indicator, row locks and leave-page guard start with the re-checks, not with the first write (finished below on every path).
 		let saveJob: number | undefined;
+		// The shared batch of field edits and staged tools: running on the server until every write of the Update is done (closed below).
+		let openBatch: string | undefined;
 
 		try {
 			// Rows trashed or deleted since the editor loaded them are left out and named, not written in the Trash as if nothing happened.
@@ -1582,14 +1588,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			const refreshing = holdBack ? refreshStale( stale ).catch( () => {} ) : null;
 
 			// The field edits and the staged tool runs of one Update are one History batch: one Undo takes all of it back.
+			// It stays `running` on the server (History will not plan, check or revert it) until the tools are done too.
 			const sharedBatch = stagedCount ? newBatchId() : undefined;
+			const toolRows = sharedBatch ? stagedToolRows( toolItems ) : 0;
+
+			openBatch = sharedBatch;
 			const result: SaveResult = runFields
 				? await saveEdits( saveItems, pendingEdits, editFields, {
 						applyToVariations,
 						source: bulk ? 'bulk' : 'quick',
 						prefetchedVariations: retryTargets.prefetched,
 						...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
-						...( sharedBatch ? { batchId: sharedBatch } : {} ),
+						...( sharedBatch ? { batchId: sharedBatch, keepBatchOpen: true, plannedExtra: toolRows } : {} ),
 						saveJob,
 						...rowOptions,
 						onProgress: ( done, total ) => {
@@ -1601,7 +1611,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				: { updated: [], errors: [], batchId: sharedBatch ?? '', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 };
 
 			// Then the staged tools, in the order they were added, once the field edits all saved (a failed field edit keeps them for the retry).
-			const tools = result.errors.length === 0 ? await runStagedTools( toolItems, result.batchId ) : { ran: 0, errors: [] as EditError[] };
+			const tools = result.errors.length === 0 ? await runStagedTools( toolItems, result.batchId, sharedBatch ? result.updated.length + result.errors.length + toolRows : undefined ) : { ran: 0, errors: [] as EditError[] };
+
+			// Every write of the Update is done: the batch can be planned and reverted (before any Undo is offered).
+			if ( openBatch ) {
+				const closing = openBatch;
+
+				openBatch = undefined;
+				await closeBatch( closing );
+			}
 
 			if ( tools.errors.length ) {
 				failed = true;
@@ -1630,6 +1648,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				...changed.trashed.map( ( id ): SkippedItem => ( { id, reason: 'trashed', fields: editKeys } ) ),
 				...changed.missing.map( ( id ): SkippedItem => ( { id, reason: 'deleted', fields: editKeys } ) ),
 				...( result.skippedItems ?? [] ),
+				// The rows held back because someone else saved them meanwhile: History lists them as left out of the campaign.
+				...( holdBack ? stale.map( ( item ): SkippedItem => ( { id: item.id, reason: 'conflict', fields: editKeys, message: __( 'Saved by someone else meanwhile; not updated.', 'wp-woocommerce-products-list' ) } ) ) : [] ),
 				// The rows that did not save are recorded too: the batch in History then says which rows of the campaign are missing.
 				// (Conflicts, locks and the Trash are refused and logged by the server itself.)
 				...result.errors.filter( ( error ) => error.id > 0 && ! isServerLoggedCode( error.code ) ).map( ( error ): SkippedItem => ( { id: error.id, reason: isGoneCode( error.code ) ? 'deleted' : 'failed', fields: editKeys, message: error.message } ) ),
@@ -1685,6 +1705,29 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					  )
 					: '';
 
+				if ( holdBack && ! mountedRef.current ) {
+					// The panel is closed: the held-back rows are only in this notice, so it stays and can select them for another look.
+					const heldIds = Array.from( staleIds );
+
+					notify.info( [ fieldsLine, toolsLine, heldLine ].filter( Boolean ).join( ' ' ), {
+						id: SAVED_NOTICE_ID,
+						explicitDismiss: true,
+						actions: [
+							...savedActions,
+							{
+								label: sprintf(
+									/* translators: %d: number of rows held back */
+									_n( 'Select the %d held back', 'Select the %d held back', heldIds.length, 'wp-woocommerce-products-list' ),
+									heldIds.length
+								),
+								onClick: () => void selectRows( heldIds ),
+							},
+						],
+					} );
+
+					return;
+				}
+
 				notify.success( [ fieldsLine, toolsLine, heldLine ].filter( Boolean ).join( ' ' ), {
 					id: SAVED_NOTICE_ID,
 					actions: savedActions.length ? savedActions : undefined,
@@ -1736,7 +1779,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			const history = historyAction( result.batchId );
 
 			// With the panel closed the snackbar is all there is: it can select the rows that failed, to reopen the editor on them and retry.
-			const retryIds = Array.from( new Set( result.errors.filter( ( error ) => error.id > 0 && ! isGoneCode( error.code ) ).map( ( error ) => error.id ) ) );
+			const retryIds = Array.from( new Set( [ ...result.errors.filter( ( error ) => error.id > 0 && ! isGoneCode( error.code ) ).map( ( error ) => error.id ), ...( holdBack ? staleIds : [] ) ] ) );
 			const selectFailed =
 				! mountedRef.current && bulk && retryIds.length
 					? [
@@ -1852,6 +1895,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				notify.error( error instanceof Error ? error.message : String( error ) );
 			}
 		} finally {
+			// A failure before the tools ran: the shared batch is over all the same.
+			if ( openBatch ) {
+				await closeBatch( openBatch );
+			}
+
 			if ( saveJob !== undefined ) {
 				finishSaveJob( saveJob );
 			}

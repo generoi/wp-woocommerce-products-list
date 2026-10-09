@@ -22,7 +22,9 @@ import type { KeyboardEvent } from 'react';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { CheckboxControl } from '../ui/checkbox-control';
 import { getPath } from '../extensions/declarative';
-import { isVariation, readFieldValue, readReference } from './field-value';
+import { isPlainObject, isVariation, mergeFragments, readFieldValue, readReference } from './field-value';
+import { writeItem } from './expect';
+import { buildPayload } from './payload';
 import { hydrateSelection } from './hydrate';
 import { itemLabel } from './item-label';
 
@@ -37,6 +39,8 @@ type Listener = ( count: number ) => void;
 /** Edits by product id, then by registry field id (`i18n:se.name`). */
 export class TranslationStore {
 	private edits = new Map< number, Map< string, string > >();
+	/** The stored value each edit was typed over, as the grid loaded it: the save's expected value (`_wcpl_expect`). */
+	private originals = new Map< number, Map< string, string > >();
 	private listeners = new Set< Listener >();
 
 	get( id: number, fieldId: string ): string | undefined {
@@ -47,17 +51,22 @@ export class TranslationStore {
 	set( id: number, fieldId: string, value: string, original: string ): void {
 		const before = this.count();
 		const row = this.edits.get( id ) ?? new Map< string, string >();
+		const bases = this.originals.get( id ) ?? new Map< string, string >();
 
 		if ( value === original ) {
 			row.delete( fieldId );
+			bases.delete( fieldId );
 		} else {
 			row.set( fieldId, value );
+			bases.set( fieldId, original );
 		}
 
 		if ( row.size ) {
 			this.edits.set( id, row );
+			this.originals.set( id, bases );
 		} else {
 			this.edits.delete( id );
+			this.originals.delete( id );
 		}
 
 		if ( this.count() !== before ) {
@@ -75,14 +84,23 @@ export class TranslationStore {
 		return Array.from( this.edits.entries(), ( [ id, row ] ) => [ id, Object.fromEntries( row ) ] );
 	}
 
+	/** The stored values a product's edits were typed over, by field id (what the save expects to find). */
+	originalsOf( id: number ): Record< string, string > {
+		return Object.fromEntries( this.originals.get( id ) ?? [] );
+	}
+
 	/** Drop the given products' edits (saved), or all of them. */
 	clear( ids?: number[] ): void {
 		const before = this.count();
 
 		if ( ids ) {
-			ids.forEach( ( id ) => this.edits.delete( id ) );
+			ids.forEach( ( id ) => {
+				this.edits.delete( id );
+				this.originals.delete( id );
+			} );
 		} else {
 			this.edits.clear();
+			this.originals.clear();
 		}
 
 		if ( this.count() !== before ) {
@@ -103,6 +121,28 @@ export class TranslationStore {
 
 		this.listeners.forEach( ( listener ) => listener( count ) );
 	}
+}
+
+/**
+ * The request item of one product's grid edits: the payload from the field
+ * registry plus `_wcpl_expect` with the stored values the edits were typed
+ * over (as the grid loaded them), so a translation saved meanwhile in another
+ * tab or by another user is refused (409), never overwritten.
+ */
+export function translationWriteItem( row: ProductListItem, edits: Record< string, string >, originals: Record< string, string >, fields: ProductField[], settings: Settings ): { id: number } & Record< string, unknown > {
+	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
+	// The row as the grid saw it: each edited field's loaded value written back at its read path (`i18n.se.name.value`).
+	let base: Record< string, unknown > = row as Record< string, unknown >;
+
+	for ( const [ fieldId, original ] of Object.entries( originals ) ) {
+		const fragment = byId.get( fieldId )?.setValue?.( { item: row, value: original } );
+
+		if ( isPlainObject( fragment ) ) {
+			base = mergeFragments( base, fragment );
+		}
+	}
+
+	return writeItem( base as ProductListItem, buildPayload( row, edits, fields, settings ) );
 }
 
 const ENTITIES: Record< string, string > = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&#039;': "'", '&nbsp;': ' ' };

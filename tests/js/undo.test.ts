@@ -9,6 +9,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: () => 'revert-1',
 	revertBatch: ( ...args: unknown[] ) => revertBatch( ...args ),
 	getRevertPlan: ( ...args: unknown[] ) => getRevertPlan( ...args ),
+	closeBatch: vi.fn( async () => undefined ),
 } ) );
 vi.mock( '../../resources/store/products', () => ( { invalidateProducts: vi.fn() } ) );
 vi.mock( '../../resources/history/use-log', () => ( { invalidateLog: vi.fn() } ) );
@@ -47,6 +48,23 @@ describe( 'undoBatch', () => {
 		expect( notify.remove ).toHaveBeenCalledWith( undoNoticeId( 'batch-b' ) );
 		expect( notify.error ).toHaveBeenCalledWith( 'Gone' );
 		expect( notify.success ).not.toHaveBeenCalled();
+	} );
+
+	it( 'refuses an Undo while a save in this tab still writes one of the batch\'s rows, and says so', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const job = activity.beginSaveJob( [ { id: 2, parent_id: 0 } ] );
+
+		getRevertPlan.mockResolvedValueOnce( { chunk: 2, chunks: [ [ 1, 2 ] ], rows: 2, objects: 2, skipped: [], revertable: true } );
+
+		try {
+			await undoBatch( 'batch-c' );
+		} finally {
+			activity.finishSaveJob( job );
+		}
+
+		expect( revertBatch ).not.toHaveBeenCalled();
+		expect( notify.remove ).toHaveBeenCalledWith( undoNoticeId( 'batch-c' ) );
+		expect( String( notify.error.mock.calls[ 0 ]?.[ 0 ] ) ).toContain( 'still being saved in this tab' );
 	} );
 
 	it( 'formats the progress', () => {

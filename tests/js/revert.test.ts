@@ -9,6 +9,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	revertBatch: vi.fn(),
 	getRevertPlan: vi.fn(),
 	checkRevert: vi.fn(),
+	closeBatch: vi.fn( async () => undefined ),
 } ) );
 
 function response( results: ActionResponse[ 'results' ] ): ActionResponse {
@@ -56,9 +57,9 @@ describe( 'runRevert', () => {
 		const outcome = await runRevert( 'batch-a', { chunk: 2, chunks: [ [ 1, 2 ], [ 3, 4 ], [ 5 ] ] }, { onProgress: ( done, total ) => progress.push( [ done, total ] ) }, post );
 
 		expect( post.mock.calls.map( ( call ) => call[ 1 ] ) ).toEqual( [
-			{ ids: [ 1, 2 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
-			{ ids: [ 3, 4 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
-			{ ids: [ 5 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ] },
+			{ ids: [ 1, 2 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ], batchId: 'revert-1', planned: 5 },
+			{ ids: [ 3, 4 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ], batchId: 'revert-1', planned: 5 },
+			{ ids: [ 5 ], revertBatchId: 'revert-1', force: undefined, relative: undefined, fields: [ 'id' ], batchId: 'revert-1', planned: 5 },
 		] );
 		expect( progress ).toEqual( [ [ 0, 5 ], [ 2, 5 ], [ 4, 5 ], [ 5, 5 ] ] );
 		expect( outcome.ok ).toBe( 3 );
@@ -72,8 +73,8 @@ describe( 'runRevert', () => {
 		const outcome = await runRevert( 'batch-a', { chunk: 2, chunks: [] }, { ids: [ 3, 7, 9 ], force: true, revertBatchId: 'revert-1' }, post );
 
 		expect( post.mock.calls.map( ( call ) => call[ 1 ] ) ).toEqual( [
-			{ ids: [ 3, 7 ], revertBatchId: 'revert-1', force: true, fields: [ 'id' ] },
-			{ ids: [ 9 ], revertBatchId: 'revert-1', force: true, fields: [ 'id' ] },
+			{ ids: [ 3, 7 ], revertBatchId: 'revert-1', force: true, fields: [ 'id' ], batchId: 'revert-1', planned: 3 },
+			{ ids: [ 9 ], revertBatchId: 'revert-1', force: true, fields: [ 'id' ], batchId: 'revert-1', planned: 3 },
 		] );
 		expect( outcome.ok ).toBe( 3 );
 	} );
@@ -172,7 +173,8 @@ describe( 'conflict reports', () => {
 		const post = vi.fn( async ( _batch: string, _options?: object ) => response( [ { id: 24514, ok: true } ] ) );
 
 		await runRevert( 'batch-a', { chunk: 100, chunks: [] }, { ids: [ 24514 ], relative: true, revertBatchId: 'r1' }, post );
-		expect( post.mock.calls[ 0 ]?.[ 1 ] ).toEqual( { ids: [ 24514 ], revertBatchId: 'r1', force: undefined, relative: true, fields: [ 'id' ] } );
+		// One chunk is one request: no planned header, the revert batch id as the batch header.
+		expect( post.mock.calls[ 0 ]?.[ 1 ] ).toEqual( { ids: [ 24514 ], revertBatchId: 'r1', force: undefined, relative: true, fields: [ 'id' ], batchId: 'r1' } );
 	} );
 } );
 
@@ -225,5 +227,83 @@ describe( 'checkRevertPlan', () => {
 		expect( check ).toHaveBeenCalledTimes( 12 );
 		expect( most ).toBe( 3 );
 		expect( summary.changed ).toBe( 12 );
+	} );
+} );
+
+describe( 'runRevert and the list', () => {
+	it( 'shows a revert in the list while it runs: its objects locked, "Reverting" in the bar, leaving guarded, the batch closed at the end', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const client = await import( '../../resources/api/client' );
+		const add = vi.spyOn( window, 'addEventListener' );
+		const releases: Array< () => void > = [];
+		const release = () => releases.shift()?.();
+		const post = vi.fn(
+			( _batch: string, options?: { ids?: number[] } ) =>
+				new Promise< ActionResponse >( ( resolve ) => {
+					releases.push( () => resolve( response( ( options?.ids ?? [] ).map( ( id ) => ( { id, ok: true } ) ) ) ) );
+				} )
+		);
+		const close = vi.fn( async () => undefined );
+		const run = runRevert( 'batch-a', { chunk: 2, chunks: [ [ 11, 12 ], [ 13 ] ] }, { close }, post );
+
+		await Promise.resolve();
+		expect( activity.isRowPending( 11 ) ).toBe( true );
+		expect( activity.isRowPending( 13 ) ).toBe( true );
+		expect( add ).toHaveBeenCalledWith( 'beforeunload', expect.any( Function ) );
+
+		const { renderHook } = await import( '@testing-library/react' );
+		const { result } = renderHook( () => activity.useSaveActivity() );
+
+		expect( result.current ).toMatchObject( { reverting: true, total: 3 } );
+
+		// Both chunks are in flight at once (REVERT_PARALLEL); answer them one by one.
+		while ( post.mock.calls.length < 2 ) {
+			await Promise.resolve();
+		}
+		release();
+		await new Promise( ( resolve ) => setTimeout( resolve, 0 ) );
+		expect( close ).not.toHaveBeenCalled();
+		release();
+		await run;
+
+		expect( close ).toHaveBeenCalledWith( 'revert-1' );
+		expect( activity.isRowPending( 11 ) ).toBe( false );
+		expect( client.closeBatch ).not.toHaveBeenCalled();
+		add.mockRestore();
+	} );
+
+	it( 'refuses a revert while a save in this tab still writes one of its objects, and posts nothing', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const { RevertBusyError } = await import( '../../resources/history/revert' );
+		const job = activity.beginSaveJob( [ { id: 21, parent_id: 20 } ] );
+		const post = vi.fn();
+
+		try {
+			await expect( runRevert( 'batch-a', { chunk: 2, chunks: [ [ 20, 21 ], [ 30 ] ] }, {}, post ) ).rejects.toBeInstanceOf( RevertBusyError );
+			await expect( runRevert( 'batch-a', { chunk: 2, chunks: [ [ 21 ] ] }, {}, post ) ).rejects.toThrow( '1 item of this batch is still being saved in this tab' );
+			expect( post ).not.toHaveBeenCalled();
+		} finally {
+			activity.finishSaveJob( job );
+		}
+	} );
+
+	it( 'closes the revert batch and unlocks its objects when a chunk fails, after the other chunks are back', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const close = vi.fn( async () => undefined );
+		const post = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => {
+			if ( options?.ids?.includes( 2 ) ) {
+				throw new Error( 'Gateway timeout' );
+			}
+
+			await new Promise( ( resolve ) => setTimeout( resolve, 5 ) );
+
+			return response( ( options?.ids ?? [] ).map( ( id ) => ( { id, ok: true } ) ) );
+		} );
+
+		await expect( runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ], [ 3 ] ] }, { close }, post ) ).rejects.toThrow( 'Gateway timeout' );
+		expect( post ).toHaveBeenCalledTimes( 3 );
+		expect( close ).toHaveBeenCalledTimes( 1 );
+		expect( activity.isRowPending( 1 ) ).toBe( false );
+		expect( activity.isRowPending( 3 ) ).toBe( false );
 	} );
 } );

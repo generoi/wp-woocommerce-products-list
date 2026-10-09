@@ -226,6 +226,13 @@ export interface SaveOptions extends RowEditOptions {
 	carriersOnly?: ReadonlySet< number >;
 	/** The History batch to write under (the editor shares one with the tool runs of the same Update); a new one when missing. */
 	batchId?: string;
+	/**
+	 * The caller writes more under `batchId` after this save (the editor's staged tools) and closes the batch itself
+	 * (`closeBatch`) once those are done: every request sends the planned header, and the runner does not close it.
+	 */
+	keepBatchOpen?: boolean;
+	/** Rows the caller writes under the batch after this save (added to the planned header). */
+	plannedExtra?: number;
 }
 
 export interface Prepared {
@@ -516,14 +523,16 @@ export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: 
 	}
 
 	// A save of more than one row may take several requests: the server keeps the batch `running` (History will not revert it
-	// half-written) until it is closed below. One row is one request, done when it ends.
-	const planned = total > 1 && deps.closeBatch ? total : 0;
+	// half-written) until it is closed below. One row is one request, done when it ends. A batch the caller keeps open
+	// (more writes follow under it) is planned with those writes and closed by the caller.
+	const planned = options.keepBatchOpen ? total + Math.max( 0, options.plannedExtra ?? 0 ) : total > 1 && deps.closeBatch ? total : 0;
+	const closes = planned > 0 && ! options.keepBatchOpen;
 	const requestOptions: SaveRequestOptions = { batchId, source: options.source, ...( options.fields?.length ? { fields: options.fields } : {} ), ...( planned ? { planned } : {} ) };
 
 	try {
 		return await writePlan( deps, prepared, result, requestOptions, options, total );
 	} finally {
-		if ( planned ) {
+		if ( closes ) {
 			await deps.closeBatch!( batchId );
 		}
 	}

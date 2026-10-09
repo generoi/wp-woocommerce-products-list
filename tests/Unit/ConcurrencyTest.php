@@ -28,6 +28,18 @@ class ConcurrencyTest extends TestCase
         $this->assertFalse(Concurrency::same('true', 'false'));
     }
 
+    public function test_a_stale_refresh_reapplies_every_prop_the_request_names(): void
+    {
+        $data = ['manage_stock' => false, 'regular_price' => '11', 'stock_quantity' => 4, 'category_ids' => [3], 'image_id' => 0, 'gallery_image_ids' => [], 'length' => '', 'width' => '', 'height' => '', 'sku' => 'A1'];
+
+        $this->assertSame(['manage_stock', 'regular_price'], Concurrency::requestedProps(['id' => 1, 'manage_stock' => false, 'regular_price' => '11.00'], $data));
+        $this->assertSame(['manage_stock'], Concurrency::requestedProps(['manage_stock' => 'no'], $data));
+        $this->assertSame(['category_ids', 'image_id', 'gallery_image_ids'], Concurrency::requestedProps(['categories' => [['id' => 3]], 'images' => []], $data));
+        $this->assertSame(['width'], Concurrency::requestedProps(['dimensions' => ['width' => '2']], $data), 'only the dimensions sent');
+        $this->assertSame([], Concurrency::requestedProps(['stock_quantity' => 5], $data), 'a value WooCommerce did not take is not put back');
+        $this->assertSame([], Concurrency::requestedProps(['manage_stock' => true, 'meta_data' => [], Concurrency::EXPECT_KEY => []], $data));
+    }
+
     public function test_the_expect_key_is_addressing_not_a_logged_field(): void
     {
         $this->assertSame(['regular_price'], Recorder::paths(['id' => 1, 'regular_price' => '10', Concurrency::EXPECT_KEY => ['regular_price' => '15']]));

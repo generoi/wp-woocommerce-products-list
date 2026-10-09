@@ -171,6 +171,59 @@ class ConcurrencyTest extends RestTestCase
         $this->assertSame('12', get_post_meta($v38, '_sale_price', true));
     }
 
+    /**
+     * WooCommerce prepares a batch item against the cache primed at the
+     * start of the batch. A requested value equal to that stale copy
+     * records no change, but must still win over what another process
+     * stored since, and be logged.
+     */
+    public function test_a_requested_value_equal_to_the_stale_copy_still_overwrites_the_stored_one(): void
+    {
+        $first = $this->simpleProduct();
+        $flag = $this->simpleProduct(['manage_stock' => false]);
+        $price = $this->simpleProduct(['regular_price' => '11']);
+        $delta = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 10]);
+
+        add_filter('woocommerce_rest_pre_insert_product_object', function ($object) use ($first, $flag, $price, $delta) {
+            static $done = false;
+
+            if (! $done && $object instanceof \WC_Product && $object->get_id() === $first->get_id()) {
+                $done = true;
+                $this->writeBehindTheCache($flag->get_id(), '_manage_stock', 'yes');
+                $this->writeBehindTheCache($price->get_id(), '_regular_price', '9');
+                $this->writeBehindTheCache($delta->get_id(), '_stock', '8');
+            }
+
+            return $object;
+        }, 1);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $first->get_id(), 'sale_price' => '100'],
+            ['id' => $flag->get_id(), 'manage_stock' => false],
+            ['id' => $price->get_id(), 'regular_price' => '11'],
+            ['id' => $delta->get_id(), 'inventory_delta' => -1],
+        ]], [Logger::SOURCE_HEADER => 'bulk']);
+
+        $this->assertStatus(200, $response);
+
+        foreach ([$flag, $price, $delta] as $product) {
+            Concurrency::forget($product->get_id());
+        }
+
+        $this->assertSame('no', get_post_meta($flag->get_id(), '_manage_stock', true));
+        $this->assertSame('11', get_post_meta($price->get_id(), '_regular_price', true));
+        $this->assertEquals(7, get_post_meta($delta->get_id(), '_stock', true), 'the delta is added to the stored quantity');
+
+        $fields = [];
+
+        foreach ($this->rows() as $row) {
+            $fields[(int) $row['object_id']][] = $row['field'];
+        }
+
+        $this->assertContains('manage_stock', $fields[$flag->get_id()] ?? [], 'the overwrite is logged');
+        $this->assertContains('regular_price', $fields[$price->get_id()] ?? [], 'the overwrite is logged');
+    }
+
     public function test_a_trashed_product_is_not_written_unless_the_request_restores_it(): void
     {
         $product = $this->simpleProduct(['regular_price' => '15']);
@@ -368,6 +421,49 @@ class ConcurrencyTest extends RestTestCase
         $this->assertSame(BatchState::STATE_INTERRUPTED, BatchState::state($this->batchId()));
         $this->assertSame([], BatchState::get($this->batchId())['parents']);
         $this->assertContains('99', get_post_meta($parent->get_id(), '_price'));
+    }
+
+    public function test_a_revert_of_several_requests_marks_its_revert_batch_until_closed(): void
+    {
+        $a = $this->simpleProduct(['regular_price' => '20']);
+        $b = $this->simpleProduct(['regular_price' => '20']);
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $a->get_id(), 'sale_price' => '11'], ['id' => $b->get_id(), 'sale_price' => '12']]]));
+        $this->assertNull(BatchState::get($this->batchId()));
+
+        $route = '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert';
+        $revert = wp_generate_uuid4();
+        $chunk = [ListMode::BATCH_HEADER => $revert, BatchState::PLANNED_HEADER => '2'];
+
+        // The first chunk marks the revert batch, not the reverted one...
+        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$a->get_id()], 'revert_batch_id' => $revert], $chunk));
+        $this->assertSame(2, BatchState::get($revert)['planned']);
+        $this->assertNull(BatchState::get($this->batchId()));
+        $this->assertSame(BatchState::STATE_RUNNING, BatchState::stateOf(BatchState::get($revert)));
+
+        // ...the revert batch cannot be reverted while it runs...
+        $this->assertStatus(409, $this->request('GET', '/wc-products-list/v1/log/batch/'.$revert));
+
+        // ...its own next chunk is not held back by its marker...
+        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$b->get_id()], 'revert_batch_id' => $revert], $chunk));
+        $this->assertSame('', get_post_meta($b->get_id(), '_sale_price', true));
+
+        // ...and a revert cut short reads as interrupted.
+        $marker = BatchState::get($revert);
+        $marker['updated'] = time() - BatchState::ttl() - 5;
+        update_option(BatchState::option($revert), $marker, false);
+        $list = $this->data($this->request('GET', '/wc-products-list/v1/log/batches', [], [], ['batch' => $revert]));
+        $this->assertSame(BatchState::STATE_INTERRUPTED, $list['items'][0]['state']);
+        $this->assertSame(2, $list['items'][0]['planned']);
+
+        $this->assertTrue($this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$revert.'/close', [], [ListMode::BATCH_HEADER => '']))['closed']);
+        $this->assertNull(BatchState::get($revert));
+
+        // A revert in one request (no planned header) leaves no marker.
+        $single = wp_generate_uuid4();
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$revert.'/revert', ['revert_batch_id' => $single], [ListMode::BATCH_HEADER => $single]));
+        $this->assertNull(BatchState::get($single));
+        delete_transient(Concurrency::revertClaim($this->batchId()));
+        delete_transient(Concurrency::revertClaim($revert));
     }
 
     public function test_another_user_cannot_mark_or_close_someone_elses_running_batch(): void

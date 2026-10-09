@@ -117,6 +117,8 @@ export interface RunDeclarativeOptions {
 	inlineErrors?: boolean;
 	/** Write under this History batch (the editor's Update: its field edits and its staged tools are one batch, one Undo). */
 	batchId?: string;
+	/** The rows the whole Update writes under `batchId` (the planned header: the batch stays running until the caller closes it). */
+	planned?: number;
 	/** No success snackbar: the caller reports the whole Update itself. */
 	silent?: boolean;
 }
@@ -125,7 +127,7 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 	let response: ActionResponse;
 
 	try {
-		response = await runAction( action, ids, args, { fields, ...( options.batchId ? { batchId: options.batchId } : {} ) } );
+		response = await runAction( action, ids, args, { fields, ...( options.batchId ? { batchId: options.batchId } : {} ), ...( options.planned ? { planned: options.planned } : {} ) } );
 	} catch ( error ) {
 		if ( ! options.inlineErrors ) {
 			notify.error( errorMessage( error ) );

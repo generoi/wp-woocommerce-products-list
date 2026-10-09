@@ -309,14 +309,42 @@ final class BatchState
     }
 
     /**
-     * Writes that mark their batch: the app's saves and actions, not the
-     * log routes (a revert is its own batch, guarded by its own lock).
+     * Writes that mark their batch: the app's saves and actions, and the
+     * chunks of a History revert posted in several requests. Other log
+     * routes do not; a one-request revert is guarded by its revert claim
+     * alone (`Concurrency::claimRevert()`).
      */
     private static function marks(WP_REST_Request $request): bool
     {
-        return $request->get_method() !== 'GET'
-            && ListMode::source() !== 'revert'
-            && ! str_starts_with($request->get_route(), '/wc-products-list/v1/log');
+        if ($request->get_method() === 'GET') {
+            return false;
+        }
+
+        if (str_starts_with($request->get_route(), '/wc-products-list/v1/log')) {
+            return self::revertChunk($request);
+        }
+
+        return ListMode::source() !== 'revert';
+    }
+
+    /**
+     * A chunk of a revert of several requests: `POST /log/batch/{id}/revert`
+     * whose batch header is its `revert_batch_id` and that names a planned
+     * count. Its marker sits on the revert batch, so History reports a revert
+     * cut short as `interrupted`; the chunks themselves are only checked
+     * against the reverted batch, never against their own marker.
+     */
+    private static function revertChunk(WP_REST_Request $request): bool
+    {
+        if (preg_match('#^/wc-products-list/v1/log/batch/[A-Za-z0-9_-]{1,64}/revert$#', $request->get_route()) !== 1) {
+            return false;
+        }
+
+        $revertBatchId = $request->get_param('revert_batch_id');
+
+        return is_string($revertBatchId)
+            && $revertBatchId === ListMode::batchId()
+            && (int) $request->get_header(self::PLANNED_HEADER) > 0;
     }
 
     /**

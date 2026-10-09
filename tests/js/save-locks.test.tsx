@@ -122,6 +122,30 @@ describe( 'progress announcements', () => {
 		expect( saveAnnouncement( 0, 0 ) ).toBe( 'Preparing the update…' );
 		expect( Array.from( said ) ).toEqual( [ `Updating ${ ( 1000 ).toLocaleString() } rows.`, 'Update 25 % done.', 'Update 50 % done.', 'Update 75 % done.', 'All rows written; finishing the update…' ] );
 	} );
+
+	it( 'say "Reverting" while every job in flight is a revert (Undo, History)', () => {
+		expect( saveAnnouncement( 0, 0, true ) ).toBe( 'Preparing the revert…' );
+		expect( saveAnnouncement( 0, 40, true ) ).toBe( 'Reverting 40 rows.' );
+		expect( saveAnnouncement( 20, 40, true ) ).toBe( 'Revert 50 % done.' );
+		expect( saveAnnouncement( 40, 40, true ) ).toBe( 'All rows put back; finishing the revert…' );
+	} );
+
+	it( 'the activity is a revert only while no save runs next to it', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const { renderHook } = await import( '@testing-library/react' );
+		const revert = activity.beginSaveJob( [ { id: 501, parent_id: 0 } ], 'revert' );
+		const { result, rerender } = renderHook( () => activity.useSaveActivity() );
+
+		expect( result.current?.reverting ).toBe( true );
+
+		const save = activity.beginSaveJob( [ { id: 502, parent_id: 0 } ] );
+
+		rerender();
+		expect( result.current?.reverting ).toBe( false );
+		expect( activity.pendingAmong( [ 500, 501, 502 ] ) ).toEqual( [ 501, 502 ] );
+		activity.finishSaveJob( save );
+		activity.finishSaveJob( revert );
+	} );
 } );
 
 describe( 'logSkipped with failed rows', () => {

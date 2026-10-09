@@ -265,22 +265,24 @@ final class Revisions
 
     /**
      * Whether the save happens where a revision is wanted for any change:
-     * the app, a REST write other than the Store API, a forced batch
-     * (undo), WP-CLI, an import or the admin's own screens. Elsewhere
-     * (the storefront, a checkout, a cron job) only a change beyond
-     * DERIVED_ONLY takes one.
+     * the app, a forced batch (undo), WP-CLI, an import, or WooCommerce's
+     * own product editing screens (the product form, its variations panel,
+     * the product list's Quick Edit and Bulk Edit).
+     * Everywhere else (the storefront and checkout, a wc/v3 or webhook
+     * REST write, an admin order screen, a refund's restock, a cron job)
+     * a change of DERIVED_ONLY props alone takes no revision: an order's
+     * stock is derived, whichever route placed or paid it.
      */
     public static function explicitContext(): bool
     {
-        $rest = ListMode::request();
-
         return ListMode::active()
-            // A REST write (wc/v3 by an integration), but not the Store API's checkout.
-            || ($rest !== null && ! str_starts_with($rest->get_route(), '/wc/store'))
             || Batches::forced()
             || Batches::importingNow()
             || (defined('WP_CLI') && WP_CLI)
-            || (is_admin() && ! wp_doing_ajax() && ! wp_doing_cron());
+            || doing_action('woocommerce_process_product_meta')
+            || doing_action('wp_ajax_woocommerce_save_variations')
+            // The product list's Quick Edit and Bulk Edit (WC_Admin_Post_Types, on save_post).
+            || (doing_action('save_post') && isset($_REQUEST['woocommerce_quick_edit_nonce'])); // phpcs:ignore WordPress.Security.NonceVerification
     }
 
     public static function isOurs(mixed $post): bool
@@ -519,7 +521,7 @@ final class Revisions
 
         // Before the flag: while it is set, core reports no revisions (toKeep() is 0).
         if ($fields !== [] && $post->post_status !== 'auto-draft') {
-            self::baseline($post);
+            self::beforeChange($post);
         }
 
         self::$saving[$post->ID] = true;
@@ -606,12 +608,49 @@ final class Revisions
         }
     }
 
+    /** The state before the first change of an object with no revision. */
     public static function baseline(WP_Post $post): void
     {
-        if (self::hasRevision($post->ID)) {
-            return;
+        if (! self::hasRevision($post->ID)) {
+            self::unbatched($post);
         }
+    }
 
+    /**
+     * Before a tracked change: the baseline of an object with no
+     * revision, or a catch-up revision when its latest one is out of
+     * date because something changed the object without one (an order's
+     * stock, a review, a save while History was in `log` mode). The
+     * catch-up has no batch term, so the save's revision has the state
+     * right before it as its predecessor, and an undo of the save puts
+     * back only what the save changed (docs/revisions.md).
+     */
+    private static function beforeChange(WP_Post $post): void
+    {
+        $latest = self::revisionIds($post->ID, 1)[0] ?? 0;
+
+        if ($latest <= 0 || self::outdated($latest, $post->ID)) {
+            self::unbatched($post);
+        }
+    }
+
+    /**
+     * Whether the live meta or terms differ from a revision. Post fields
+     * are left out: core writes them with wp_update_post() right before
+     * a classic or restore save, and revisions them itself otherwise.
+     */
+    public static function outdated(int $revisionId, int $postId): bool
+    {
+        $type = (string) get_post_type($postId);
+        $revision = self::revisionSnapshot($revisionId, $postId) + ['post' => []];
+        $live = ['meta' => self::currentMeta($postId, $type), 'terms' => self::currentTerms($postId, $type), 'post' => []];
+
+        return Restore::diffKeys($revision, $live) !== [];
+    }
+
+    /** A revision of the stored state with no batch term (baseline, catch-up). */
+    private static function unbatched(WP_Post $post): void
+    {
         self::$baseline = true;
 
         try {

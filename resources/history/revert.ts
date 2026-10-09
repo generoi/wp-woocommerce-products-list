@@ -5,10 +5,19 @@
  * revert can itself be reverted). Objects whose fields were changed again
  * since the batch come back as `conflict` and are left alone; the caller
  * may post them again with `force`.
+ *
+ * While it runs the revert is a job of the list's save activity (the bar
+ * says "Reverting…", its objects are locked, leaving the page asks first),
+ * and it is refused while any of its objects is still being saved in this
+ * tab. Every chunk carries the revert batch id as its batch header and the
+ * planned header (the objects in all), and the batch is closed at the end,
+ * so the server can tell a revert cut short from one that finished
+ * (docs/contracts.md §3.6).
  */
-import { __, sprintf } from '@wordpress/i18n';
+import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertCheck, RevertPlan } from '../api/client';
-import { checkRevert, getRevertPlan, newBatchId, revertBatch } from '../api/client';
+import { checkRevert, closeBatch, getRevertPlan, newBatchId, revertBatch } from '../api/client';
+import { beginSaveJob, finishSaveJob, pendingAmong, updateSaveJob } from '../store/save-activity';
 
 export interface RevertOutcome {
 	revertBatchId: string;
@@ -31,6 +40,30 @@ export interface RunRevertOptions {
 	/** The id to keep logging under (a forced retry joins the first pass). */
 	revertBatchId?: string;
 	onProgress?( done: number, total: number ): void;
+	/** Close the revert batch when the run ends (tests pass their own); `closeBatch` of the REST client by default. */
+	close?( revertBatchId: string ): Promise< void >;
+}
+
+/** The revert's objects are still being written by a save in this tab: reverting them now would split the save. */
+export class RevertBusyError extends Error {
+	readonly ids: number[];
+
+	constructor( ids: number[] ) {
+		super(
+			sprintf(
+				/* translators: %d: number of items still being saved */
+				_n(
+					'%d item of this batch is still being saved in this tab. Wait until the update is done, then undo it.',
+					'%d items of this batch are still being saved in this tab. Wait until the update is done, then undo it.',
+					ids.length,
+					'wp-woocommerce-products-list'
+				),
+				ids.length
+			)
+		);
+		this.name = 'RevertBusyError';
+		this.ids = ids;
+	}
 }
 
 function chunk< T >( list: T[], size: number ): T[][] {
@@ -110,25 +143,62 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 	const revertBatchId = options.revertBatchId ?? newBatchId();
 	const chunks = ( options.ids ? chunk( options.ids, plan.chunk || 100 ) : plan.chunks ).filter( ( ids ) => ids.length );
 	const total = chunks.reduce( ( sum, ids ) => sum + ids.length, 0 );
+	const objectIds = chunks.flat();
+	const busy = pendingAmong( objectIds );
+
+	// A save in this tab still writes some of these objects: refused, never interleaved with it (other tabs and users are
+	// caught by the server's expected values and locks).
+	if ( busy.length ) {
+		throw new RevertBusyError( busy );
+	}
+
 	const perChunk: ActionResult[][] = chunks.map( () => [] );
+	// Several requests: the server keeps the revert batch `running` until it is closed, `interrupted` when it never is.
+	const planned = chunks.length > 1 ? total : 0;
+	const close = options.close ?? closeBatch;
+	const job = total ? beginSaveJob( objectIds.map( ( id ) => ( { id, parent_id: 0 } ) ), 'revert' ) : undefined;
 	let done = 0;
 	let next = 0;
 
 	options.onProgress?.( 0, total );
 
+	if ( job !== undefined ) {
+		updateSaveJob( job, 0, total );
+	}
+
 	const worker = async () => {
 		while ( next < chunks.length ) {
 			const index = next++;
 			const ids = chunks[ index ] as number[];
-			const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ] } );
+			const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ], batchId: revertBatchId, ...( planned ? { planned } : {} ) } );
 
 			perChunk[ index ] = response.results ?? [];
 			done += ids.length;
 			options.onProgress?.( done, total );
+
+			if ( job !== undefined ) {
+				updateSaveJob( job, done, total );
+			}
 		}
 	};
 
-	await Promise.all( Array.from( { length: Math.min( REVERT_PARALLEL, chunks.length ) }, worker ) );
+	try {
+		// Settled, not raced: the batch is closed and the rows unlocked only once no chunk is in flight any more.
+		const settled = await Promise.allSettled( Array.from( { length: Math.min( REVERT_PARALLEL, chunks.length ) }, worker ) );
+		const failure = settled.find( ( entry ): entry is PromiseRejectedResult => entry.status === 'rejected' );
+
+		if ( failure ) {
+			throw failure.reason;
+		}
+	} finally {
+		if ( planned ) {
+			await close( revertBatchId );
+		}
+
+		if ( job !== undefined ) {
+			finishSaveJob( job );
+		}
+	}
 
 	return { revertBatchId, ...splitResults( perChunk.flat() ) };
 }

@@ -89,6 +89,7 @@ All of these are used as they are. Each extension below says what core does, why
   - from `beforeSave()`, only when the save changes something;
   - from `prePostUpdate()` (Revisions.php:438) on `pre_post_update`, because the classic editor updates the post row before WooCommerce's meta box saves.
 - A create takes no revision. The first change writes the created state as the baseline.
+- **Catch-up revision** (`beforeChange()` → `outdated()`): when the object already has revisions but its live meta or terms no longer match the latest one, `beforeSave()` first puts the stored state down the same way, with no batch term. That happens after a change that took no revision: an order's stock or a review (§9), a save while History was in `log` mode, a direct meta write. Without it, the batch's predecessor would be older than the state right before the save, and an undo would also put back the stock sold since (an oversell) or clear a log-mode edit, with no conflict reported. Post fields are left out of the check: core writes them with `wp_update_post()` right before a classic or restore save and revisions them itself otherwise. Cost: the latest revision's meta, one query per tracked save (the revision lookup is the baseline's own).
 - `wp wc-products-list history backfill` writes baselines ahead of time.
 
 ### 5. Terms (needed: core does not revision taxonomies)
@@ -122,7 +123,7 @@ All of these are used as they are. Each extension below says what core does, why
 - **Added:** `restored()` (Revisions.php:472) on `wp_restore_post_revision`, at priority 5. It runs before core's meta copy at 10, and sets the revision's values as WooCommerce props, then saves (`Restore::apply()`). Core's raw copy then writes the same values again, so it is left in place.
 - `restored()` also deletes the revision core took during its own `wp_update_post`. That revision has the restored post fields but the old meta.
 - **Lighter alternative:** keep that extra revision. It's harmless but confusing in the compare screen.
-- **Batch undo** (`Restore::undo()`): for each object, it restores the predecessor of the batch's first revision. Only the keys that differ from the batch's last revision are written, through the same CRUD path. A key changed since the batch is a conflict: the object is left alone unless `--force` is given. The writes form a new batch with `reverts`, so undoing the undo redoes.
+- **Batch undo** (`Restore::undo()`): for each object, it restores the predecessor of the batch's first revision. That predecessor is the state right before the batch's save, because a save whose object drifted from its latest revision takes a catch-up revision first (§4). Only the keys that differ from the batch's last revision are written, through the same CRUD path. A key changed since the batch is a conflict: the object is left alone unless `--force` is given. The writes form a new batch with `reverts`, so undoing the undo redoes.
 
 ### 8. Not built: compare-screen fields
 
@@ -132,7 +133,8 @@ The plan calls for `_wp_post_revision_field_{key}` callbacks, so the product com
 
 - **Core:** a revision is taken on every save that changes a revisioned key.
 - **Why that falls short:** `wc_update_product_stock()` (every order line) writes `_stock` with SQL and then calls `$product->save()`; reviews save the rating. Each would take a revision and a batch term per frontend request: about 45 extra queries per order line, and a campaign's revisions pushed out of retention by sales.
-- **Added:** `beforeSave()` skips the revision when the save changes nothing beyond `Revisions::DERIVED_ONLY` (stock quantity and status, date modified, total sales, rating counts) and is not in an explicit context (`explicitContext()`: the app, a REST write other than the Store API, a forced batch, WP-CLI, an import, the admin's screens). No revision means no batch term either.
+- **Added:** `beforeSave()` skips the revision when the save changes nothing beyond `Revisions::DERIVED_ONLY` (stock quantity and status, date modified, total sales, rating counts) and is not in an explicit context. No revision means no batch term either.
+- **Explicit contexts** (`explicitContext()`): the app (`ListMode::active()`), a forced batch (undo), WP-CLI, a CSV import, and WooCommerce's own product editing screens (`woocommerce_process_product_meta`, `wp_ajax_woocommerce_save_variations`, and the product list's Quick Edit and Bulk Edit: `save_post` with `woocommerce_quick_edit_nonce`). Everything else is not explicit, whatever the route: the Store API checkout, an order created or paid through wc/v3 (POS, ERP, marketplaces), a payment webhook on a REST route, an admin order status change or a refund's restock, cron. An earlier version treated every REST write and every admin request as explicit, so each order line from those paths took a revision and pushed campaign revisions out of the 20-per-variation retention. A save there that changes more than `DERIVED_ONLY` (a wc/v3 price write) still takes a revision.
 
 ### 10. REST saves: the revision is taken after the insert listeners (needed for brands)
 

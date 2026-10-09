@@ -7,6 +7,7 @@ use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Log\Revert;
 use WC_Product;
 use WP_Error;
+use WP_REST_Request;
 
 /**
  * Server-side protection of list-mode writes against concurrent edits
@@ -249,11 +250,81 @@ final class Concurrency
     }
 
     /**
+     * Request keys of the WooCommerce REST API whose prop has another name
+     * (or several). Other keys are their prop's name. `dimensions` is
+     * handled by its sub-keys, `inventory_delta` by `refresh()`.
+     */
+    private const REQUEST_PROPS = [
+        'categories' => ['category_ids'],
+        'tags' => ['tag_ids'],
+        'shipping_class' => ['shipping_class_id'],
+        'images' => ['image_id', 'gallery_image_ids'],
+        'image' => ['image_id'],
+        'date_on_sale_from_gmt' => ['date_on_sale_from'],
+        'date_on_sale_to_gmt' => ['date_on_sale_to'],
+        'grouped_products' => ['children'],
+    ];
+
+    /**
+     * The props a request body names: what WooCommerce's
+     * prepare_object_for_database() set from it, changed or not.
+     *
+     * @param  array<string, mixed>  $body
+     * @param  array<string, mixed>  $data  the prepared object's get_data()
+     * @return array<int, string>
+     */
+    public static function requestedProps(array $body, array $data): array
+    {
+        $props = [];
+
+        foreach ($body as $key => $value) {
+            $key = (string) $key;
+
+            if ($key === 'dimensions') {
+                $props = array_merge($props, array_intersect(['length', 'width', 'height'], array_keys(is_array($value) ? $value : [])));
+            } elseif (isset(self::REQUEST_PROPS[$key])) {
+                $props = array_merge($props, self::REQUEST_PROPS[$key]);
+            } elseif ($key !== 'meta_data' && $key !== 'id' && array_key_exists($key, $data) && self::took($value, $data[$key])) {
+                $props[] = $key;
+            }
+        }
+
+        return array_values(array_unique($props));
+    }
+
+    /**
+     * Whether WooCommerce took a scalar request value for its prop: a
+     * value it ignored (a stock quantity on an object that does not
+     * manage stock) is left alone, so the stale copy's value is not put
+     * back over the stored one. Lists and objects count as taken.
+     */
+    private static function took(mixed $requested, mixed $prepared): bool
+    {
+        if (! is_scalar($requested) && $requested !== null) {
+            return true;
+        }
+
+        if (is_bool($prepared)) {
+            // WooCommerce's wc_string_to_bool(), for a request's true, 1, "yes", "true".
+            return ($requested === true || in_array(strtolower((string) $requested), ['1', 'yes', 'true'], true)) === $prepared;
+        }
+
+        return ! is_scalar($prepared) && $prepared !== null ? true : self::same($requested === null ? null : (string) $requested, $prepared === null ? null : (string) $prepared);
+    }
+
+    /**
      * The product WooCommerce is about to save, loaded from the stored
      * state: the object as given when its caches are current, otherwise
-     * a fresh load with the request's changes (props and meta) applied.
+     * a fresh load with the request's values applied.
+     *
+     * Every prop and meta key the request names is put on the fresh
+     * object, not only the ones WooCommerce recorded as changes: those
+     * were measured against the stale copy, so a requested value equal
+     * to it (but not to the stored one) would otherwise be dropped and
+     * the other writer's value kept without a word. A relative stock
+     * write (`inventory_delta`) is added to the stored quantity again.
      */
-    public static function refresh(WC_Product $product): WC_Product
+    public static function refresh(WC_Product $product, ?WP_REST_Request $request = null): WC_Product
     {
         $id = $product->get_id();
 
@@ -269,19 +340,38 @@ final class Concurrency
             return $product;
         }
 
-        $fresh->set_props($product->get_changes());
+        $body = $request instanceof WP_REST_Request ? array_merge($request->get_body_params(), $request->get_json_params() ?: []) : [];
+        $data = $product->get_data();
+        $props = $product->get_changes() + array_intersect_key($data, array_flip(self::requestedProps($body, $data)));
+        $storedStock = $fresh->get_stock_quantity('edit');
+        $fresh->set_props($props);
+
+        if (isset($body['inventory_delta']) && ! isset($body['stock_quantity']) && $fresh->get_manage_stock()) {
+            $fresh->set_stock_quantity(wc_stock_amount(wc_stock_amount($storedStock) + wc_stock_amount($body['inventory_delta'])));
+        }
+
+        $requestedMeta = [];
+
+        foreach (is_array($body['meta_data'] ?? null) ? $body['meta_data'] : [] as $meta) {
+            if (is_array($meta) && isset($meta['key']) && is_scalar($meta['key'])) {
+                $requestedMeta[(string) $meta['key']] = true;
+            }
+        }
 
         foreach ($product->get_meta_data() as $meta) {
             $data = $meta->get_data();
+            $key = (string) $data['key'];
 
-            if (! empty($data['id']) && $meta->get_changes() === []) {
+            if (! empty($data['id']) && $meta->get_changes() === [] && ! isset($requestedMeta[$key])) {
                 continue;
             }
 
+            unset($requestedMeta[$key]);
+
             if ($data['value'] === null) {
-                $fresh->delete_meta_data((string) $data['key']);
+                $fresh->delete_meta_data($key);
             } else {
-                $fresh->update_meta_data((string) $data['key'], $data['value']);
+                $fresh->update_meta_data($key, $data['value']);
             }
         }
 

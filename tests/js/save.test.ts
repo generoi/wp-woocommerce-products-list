@@ -256,6 +256,22 @@ describe( 'runSave', () => {
 		expect( single.closeBatch ).not.toHaveBeenCalled();
 	} );
 
+	it( 'leaves a shared batch open for the caller: planned with the writes that follow, on one row too, and never closed here', async () => {
+		const d = deps( { closeBatch: vi.fn( async () => {} ) } );
+
+		await runSave( d, [ simple( 1 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', batchId: 'shared-1', keepBatchOpen: true, plannedExtra: 4 } );
+
+		expect( ( d.batchProducts as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 1 ] ).toEqual( { batchId: 'shared-1', source: 'bulk', planned: 5 } );
+		expect( d.closeBatch ).not.toHaveBeenCalled();
+
+		const many = deps( { closeBatch: vi.fn( async () => {} ) } );
+
+		await runSave( many, [ simple( 1 ), simple( 2 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk', batchId: 'shared-2', keepBatchOpen: true } );
+
+		expect( ( many.batchProducts as ReturnType< typeof vi.fn > ).mock.calls[ 0 ]?.[ 1 ] ).toMatchObject( { batchId: 'shared-2', planned: 2 } );
+		expect( many.closeBatch ).not.toHaveBeenCalled();
+	} );
+
 	it( 'closes the batch when a request throws too', async () => {
 		const d = deps( { closeBatch: vi.fn( async () => {} ), batchProducts: vi.fn( async () => { throw Object.assign( new Error( 'Nope' ), { code: 'rest_invalid_param', status: 400 } ); } ) } );
 		const result = await runSave( d, [ simple( 1 ), simple( 2 ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );

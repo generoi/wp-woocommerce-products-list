@@ -6,15 +6,27 @@
  * `wc_products_list_conflict` when one differs, so an edit made in another
  * tab, by another user or outside the app meanwhile is never overwritten.
  *
- * Only fields whose loaded value has the stored form are sent: core scalar
- * keys, term lists (by id) and single-valued meta. Not sent: the relative
- * stock key (`inventory_delta` is applied to the stock as stored, so an
- * order meanwhile is not a conflict), objects whose list form differs from
- * the stored one (images, attributes, dimensions) and extension fields
- * (their row shape is the extension's). Those still get the server's lock
- * and fresh-state checks.
+ * Only fields whose loaded value has the stored form are sent:
+ * - core scalar keys (`SCALAR_KEYS`), flags and texts included;
+ * - term lists by id (`categories`, `tags`, `brands`);
+ * - `dimensions` as `{length, width, height}` strings (the order and form
+ *   `Recorder::read()` serialises);
+ * - single-valued `meta_data.{key}`;
+ * - translations and market prices `i18n.{lang}.{field}` (gds-woo-i18n: the
+ *   row carries the stored meta `_i18n_{field}_{lang}` as
+ *   `i18n.{lang}.{field}.value`, which the server's default reader reads).
+ *
+ * Not sent, as their list form is not the stored one: the relative stock key
+ * (`inventory_delta` is applied to the stock as stored, so an order
+ * meanwhile is not a conflict), a variation's `name` (wc/v3 returns the
+ * attribute summary, the stored title has the parent's name in front),
+ * `description` / `short_description` (wc/v3 view context runs wpautop on
+ * them), `images` (list rows drop the gallery), `cost_of_goods_sold` and
+ * `attributes` (other shapes) and other extension fields. Those still get
+ * the server's lock and fresh-state checks.
  */
 import type { ProductListItem } from '../types';
+import { isPlainObject, isVariation } from './field-value';
 
 /** The per-item request key. */
 export const EXPECT_KEY = '_wcpl_expect';
@@ -40,7 +52,18 @@ const SCALAR_KEYS: ReadonlySet< string > = new Set( [
 	'weight',
 	'menu_order',
 	'purchase_note',
+	'manage_stock',
+	'virtual',
+	'downloadable',
+	'sold_individually',
+	'reviews_allowed',
+	'external_url',
+	'button_text',
+	'slug',
 ] );
+
+/** The request key of gds-woo-i18n's translations and market prices (`i18n: {se: {name}}`). */
+const I18N_KEY = 'i18n';
 
 const TERM_KEYS: ReadonlySet< string > = new Set( [ 'categories', 'tags', 'brands' ] );
 
@@ -87,6 +110,50 @@ function metaValue( row: Record< string, unknown >, key: string ): Scalar | unde
 	return isScalar( value ) ? value : undefined;
 }
 
+function dimensionsValue( value: unknown ): { length: string; width: string; height: string } | undefined {
+	if ( ! isPlainObject( value ) ) {
+		return undefined;
+	}
+
+	const axis = ( key: string ): string | undefined => {
+		const entry = value[ key ];
+
+		return entry === undefined || entry === null ? '' : typeof entry === 'string' || typeof entry === 'number' ? String( entry ) : undefined;
+	};
+	const length = axis( 'length' );
+	const width = axis( 'width' );
+	const height = axis( 'height' );
+
+	return length === undefined || width === undefined || height === undefined ? undefined : { length, width, height };
+}
+
+/** `i18n.{lang}.{field}` => the stored value the row loaded, for each leaf of the payload's `i18n` object. */
+function i18nValues( row: Record< string, unknown >, written: unknown, expect: Record< string, unknown > ): void {
+	const loaded = row[ I18N_KEY ];
+
+	if ( ! isPlainObject( written ) || ! isPlainObject( loaded ) ) {
+		return;
+	}
+
+	for ( const [ lang, fields ] of Object.entries( written ) ) {
+		const loadedLang = loaded[ lang ];
+
+		if ( ! isPlainObject( fields ) || ! isPlainObject( loadedLang ) ) {
+			continue;
+		}
+
+		for ( const field of Object.keys( fields ) ) {
+			const entry = loadedLang[ field ];
+			const value = isPlainObject( entry ) ? entry.value : undefined;
+
+			// Only a loaded stored value: a pair the row did not carry (another tab's fields) says nothing.
+			if ( typeof value === 'string' || typeof value === 'number' ) {
+				expect[ `${ I18N_KEY }.${ lang }.${ field }` ] = String( value );
+			}
+		}
+	}
+}
+
 /** The expected values of one row's payload, path => loaded value; null when there is none to send. */
 export function expectedValues( item: ProductListItem, payload: Record< string, unknown > ): Record< string, unknown > | null {
 	const row = item as Record< string, unknown >;
@@ -94,6 +161,11 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 
 	for ( const [ key, value ] of Object.entries( payload ) ) {
 		if ( SCALAR_KEYS.has( key ) ) {
+			// A variation's wc/v3 name is its attribute summary, not the stored title: never a fair comparison.
+			if ( key === 'name' && isVariation( item ) ) {
+				continue;
+			}
+
 			if ( key in row && isScalar( row[ key ] ) ) {
 				expect[ key ] = row[ key ];
 			}
@@ -107,6 +179,22 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 			if ( ids ) {
 				expect[ key ] = ids;
 			}
+
+			continue;
+		}
+
+		if ( key === 'dimensions' ) {
+			const loaded = key in row ? dimensionsValue( row[ key ] ) : undefined;
+
+			if ( loaded ) {
+				expect[ key ] = loaded;
+			}
+
+			continue;
+		}
+
+		if ( key === I18N_KEY ) {
+			i18nValues( row, value, expect );
 
 			continue;
 		}

@@ -465,7 +465,7 @@ final class Saves
             return Concurrency::lockedError($id);
         }
 
-        $product = Concurrency::refresh($product);
+        $product = Concurrency::refresh($product, $request);
 
         if (Concurrency::trashed($product) && $request->get_param('status') === null) {
             return Concurrency::trashedError($id);

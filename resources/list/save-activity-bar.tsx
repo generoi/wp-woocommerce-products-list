@@ -16,9 +16,9 @@ import { timeLeft } from '../edit/progress';
 import { useSaveActivity } from '../store/save-activity';
 
 /** What the live region says: changes only at the start and at each quarter of the rows written. */
-export function saveAnnouncement( done: number, total: number ): string {
+export function saveAnnouncement( done: number, total: number, reverting = false ): string {
 	if ( ! total ) {
-		return __( 'Preparing the update…', 'wp-woocommerce-products-list' );
+		return reverting ? __( 'Preparing the revert…', 'wp-woocommerce-products-list' ) : __( 'Preparing the update…', 'wp-woocommerce-products-list' );
 	}
 
 	const quarter = Math.min( 4, Math.floor( ( done / total ) * 4 ) );
@@ -26,18 +26,18 @@ export function saveAnnouncement( done: number, total: number ): string {
 	if ( quarter === 0 ) {
 		return sprintf(
 			/* translators: %s: rows in total */
-			__( 'Updating %s rows.', 'wp-woocommerce-products-list' ),
+			reverting ? __( 'Reverting %s rows.', 'wp-woocommerce-products-list' ) : __( 'Updating %s rows.', 'wp-woocommerce-products-list' ),
 			total.toLocaleString()
 		);
 	}
 
 	if ( quarter === 4 ) {
-		return __( 'All rows written; finishing the update…', 'wp-woocommerce-products-list' );
+		return reverting ? __( 'All rows put back; finishing the revert…', 'wp-woocommerce-products-list' ) : __( 'All rows written; finishing the update…', 'wp-woocommerce-products-list' );
 	}
 
 	return sprintf(
 		/* translators: %d: percentage of the rows written (25, 50 or 75) */
-		__( 'Update %d %% done.', 'wp-woocommerce-products-list' ),
+		reverting ? __( 'Revert %d %% done.', 'wp-woocommerce-products-list' ) : __( 'Update %d %% done.', 'wp-woocommerce-products-list' ),
 		quarter * 25
 	);
 }
@@ -67,7 +67,7 @@ export function SaveActivityBar() {
 	return (
 		<div className="wc-products-list__save-activity">
 			<span className="screen-reader-text" role="status" aria-live="polite" aria-atomic="true">
-				{ saveAnnouncement( done, total ) }
+				{ saveAnnouncement( done, total, activity.reverting ) }
 			</span>
 			<span className="wc-products-list__save-activity-label">
 				<span className="wc-pl-spinner" aria-hidden="true" />
@@ -75,11 +75,11 @@ export function SaveActivityBar() {
 					{ total
 						? sprintf(
 								/* translators: 1: rows written, 2: rows in total */
-								__( 'Updating %1$s of %2$s rows…', 'wp-woocommerce-products-list' ),
+								activity.reverting ? __( 'Reverting %1$s of %2$s rows…', 'wp-woocommerce-products-list' ) : __( 'Updating %1$s of %2$s rows…', 'wp-woocommerce-products-list' ),
 								done.toLocaleString(),
 								total.toLocaleString()
 						  )
-						: __( 'Preparing the update…', 'wp-woocommerce-products-list' ) }
+						: saveAnnouncement( 0, 0, activity.reverting ) }
 				</strong>
 				{ total ? ` ${ value } %` : '' }
 				{ left ? ` · ${ left }` : '' }

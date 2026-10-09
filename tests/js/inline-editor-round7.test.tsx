@@ -26,6 +26,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	listProducts: vi.fn(),
 	newBatchId: vi.fn( () => 'batch-shared' ),
 	runAction: vi.fn(),
+	closeBatch: vi.fn( async () => undefined ),
 } ) );
 vi.mock( '../../resources/edit/save', () => ( { saveEdits: ( ...args: unknown[] ) => saveEdits( ...args ) } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn() } ) );
@@ -35,6 +36,7 @@ const client = await import( '../../resources/api/client' );
 const getVariations = client.getVariations as unknown as ReturnType< typeof vi.fn >;
 const listProducts = client.listProducts as unknown as ReturnType< typeof vi.fn >;
 const runAction = client.runAction as unknown as ReturnType< typeof vi.fn >;
+const closeBatch = client.closeBatch as unknown as ReturnType< typeof vi.fn >;
 
 const seName = {
 	...coreFields().find( ( field ) => field.id === 'name' )!,
@@ -241,6 +243,8 @@ describe( 'relative price ops and rows changed meanwhile', () => {
 		expect( ( await screen.findAllByText( /1 row changed since this editor loaded it/ ) ).length ).toBeGreaterThan( 0 );
 		expect( notify.success ).toHaveBeenCalledWith( expect.stringContaining( 'left for you to check' ), expect.anything() );
 		expect( host.close ).not.toHaveBeenCalled();
+		// The held-back row is in the batch's record: History lists it as left out of the campaign.
+		expect( client.logSkipped ).toHaveBeenCalledWith( 'b8', 'bulk', [ expect.objectContaining( { id: 1, reason: 'conflict', message: 'Saved by someone else meanwhile; not updated.' } ) ] );
 
 		// The next Update works on the reloaded value (14, not 14.70), on row 1 only.
 		fireEvent.click( await screen.findByRole( 'button', { name: 'Update the 1 changed item too' } ) );
@@ -250,6 +254,49 @@ describe( 'relative price ops and rows changed meanwhile', () => {
 
 		expect( sent.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
 		expect( sent[ 0 ]?.regular_price ).toBe( '14' );
+	} );
+
+	it( 'with the panel closed mid-save, records the held-back row and keeps a notice that can select it', async () => {
+		const pricedFields = coreFields().filter( ( field ) => [ 'name', 'regular_price', 'sale_price' ].includes( field.id ) );
+		let stamp = '2026-10-09T01:00:00';
+		const fresh = ( id: number ) => simple( id, { name: `Row ${ id }`, regular_price: '20', sale_price: '', date_modified_gmt: id === 1 ? stamp : '2026-10-01T00:00:00' } );
+		let finishSave: () => void = () => {};
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+
+			return { items: ids.map( fresh ), total: ids.length, totalPages: 1 };
+		} );
+		saveEdits.mockImplementation(
+			( rows: ProductListItem[] ) =>
+				new Promise( ( resolve ) => {
+					finishSave = () => resolve( { updated: rows.map( ( row ) => fresh( row.id ) ), errors: [], batchId: 'b9', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+				} )
+		);
+
+		const view = render( <InlineEditor host={ hostFor( [ simple( 1, { name: 'Row 1' } ), simple( 2, { name: 'Row 2' } ) ], pricedFields ) } /> );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		await waitFor( () => expect( listProducts ).toHaveBeenCalled() );
+		fireEvent.change( screen.getByLabelText( 'regular_price: operation' ), { target: { value: 'decrease' } } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '1' } } );
+		stamp = '2026-10-09T01:44:16';
+		fireEvent.click( await screen.findByRole( 'button', { name: /^Update 2/ } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+
+		// The panel is closed while the save runs in the background.
+		view.unmount();
+		await act( async () => {
+			finishSave();
+		} );
+
+		await waitFor( () => expect( notify.info ).toHaveBeenCalledWith( expect.stringContaining( 'left for you to check' ), expect.objectContaining( { explicitDismiss: true } ) ) );
+		expect( notify.success ).not.toHaveBeenCalled();
+
+		const options = notify.info.mock.calls.find( ( call ) => String( call[ 0 ] ).includes( 'left for you to check' ) )?.[ 1 ] as { actions: Array< { label: string } > };
+
+		expect( options.actions.map( ( action ) => action.label ) ).toContain( 'Select the 1 held back' );
+		expect( client.logSkipped ).toHaveBeenCalledWith( 'b9', 'bulk', [ expect.objectContaining( { id: 1, reason: 'conflict' } ) ] );
 	} );
 
 	it( 'writes nothing when every row was saved by someone else meanwhile', async () => {
@@ -364,7 +411,14 @@ describe( 'language tools with Update', () => {
 			expect( runAction.mock.calls[ 0 ]?.[ 0 ] ).toBe( 'i18n_transform' );
 			expect( runAction.mock.calls[ 0 ]?.[ 2 ] ).toMatchObject( { lang: 'se', operation: 'prefix', text: 'NEW ' } );
 			expect( runAction.mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { batchId: 'batch-shared' } );
+			// The save leaves the shared batch open (planned with the tool's rows); the editor closes it once the tool ran, before the snackbar.
+			expect( saveEdits.mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { keepBatchOpen: true, plannedExtra: 2 } );
+			expect( runAction.mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { planned: 4 } );
 			await waitFor( () => expect( notify.success ).toHaveBeenCalledTimes( 1 ) );
+			expect( closeBatch ).toHaveBeenCalledTimes( 1 );
+			expect( closeBatch ).toHaveBeenCalledWith( 'batch-shared' );
+			expect( closeBatch.mock.invocationCallOrder[ 0 ]! ).toBeGreaterThan( runAction.mock.invocationCallOrder[ 0 ]! );
+			expect( closeBatch.mock.invocationCallOrder[ 0 ]! ).toBeLessThan( notify.success.mock.invocationCallOrder[ 0 ]! );
 			expect( String( notify.success.mock.calls[ 0 ]?.[ 0 ] ) ).toContain( '1 language change applied.' );
 			expect( host.close ).toHaveBeenCalled();
 		} finally {
@@ -397,7 +451,10 @@ describe( 'language tools with Update', () => {
 			fireEvent.click( await screen.findByRole( 'button', { name: 'Apply 1 language change' } ) );
 			await waitFor( () => expect( runAction ).toHaveBeenCalledTimes( 1 ) );
 			expect( saveEdits ).not.toHaveBeenCalled();
+			// A tool-only Update is a batch of its own: planned on its requests, closed when it is done.
+			expect( runAction.mock.calls[ 0 ]?.[ 3 ] ).toMatchObject( { batchId: 'batch-shared', planned: 2 } );
 			await waitFor( () => expect( host.close ).toHaveBeenCalled() );
+			expect( closeBatch ).toHaveBeenCalledWith( 'batch-shared' );
 		} finally {
 			settings.actions = previous;
 		}

@@ -349,10 +349,121 @@ class RevisionsSpikeTest extends RestTestCase
         $this->assertCount($before, $this->revisions($v38));
         $this->assertSame($terms, (int) wp_count_terms(['taxonomy' => Batches::TAXONOMY, 'hide_empty' => false]));
 
-        // The app editing the stock is a change like any other.
+        // The app editing the stock is a change like any other. The sold
+        // units first get a catch-up revision of their own (no batch), so
+        // the save's predecessor is the state right before it.
         $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$parent->get_id().'/variations/'.$v38, ['stock_quantity' => 20]));
         $this->settle();
-        $this->assertCount($before + 1, $this->revisions($v38));
+        $revisions = $this->revisions($v38);
+        $this->assertCount($before + 2, $revisions);
+        $this->assertNull($this->batchOf($revisions[1]), 'the catch-up revision belongs to no batch');
+        $this->assertSame('8', Restore::value(Restore::state($revisions[1], $v38), 'meta:_stock'));
+        $this->assertSame($this->batchId(), $this->batchOf($revisions[0]));
+    }
+
+    public function test_undo_of_a_batch_keeps_the_stock_sold_since_the_latest_revision(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $variation = wc_get_product($v38);
+        $variation->set_manage_stock(true);
+        $variation->set_stock_quantity(58);
+        $variation->save();
+        $this->ready();
+
+        // Two storefront sales: no revision.
+        wc_update_product_stock(wc_get_product($v38), 1, 'decrease');
+        wc_update_product_stock(wc_get_product($v38), 1, 'decrease');
+        $this->settle();
+
+        // Then the app changes only the price.
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$parent->get_id().'/variations/'.$v38, ['regular_price' => '6.5']));
+        $this->settle();
+        $batch = $this->batchId();
+
+        $undo = Restore::undoAll($batch);
+        $this->assertSame(1, $undo['restored'], wp_json_encode($undo));
+        $this->assertSame(0, $undo['conflicts']);
+        $this->settle();
+
+        $this->assertSame('189', get_post_meta($v38, '_regular_price', true));
+        $this->assertSame(56, wc_get_product($v38)->get_stock_quantity(), 'the sold units are not put back');
+        $this->assertDerived($v38);
+    }
+
+    public function test_undo_leaves_alone_a_change_made_while_history_was_in_log_mode(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'LM1', 'weight' => '0.5'])->get_id();
+        $product = wc_get_product($id);
+        $product->set_sale_price('150');
+        $product->save();
+        $this->ready();
+
+        History::switchTo('log');
+        $product = wc_get_product($id);
+        $product->set_weight('0.77');
+        $product->save();
+        wp_cache_flush_runtime();
+        History::switchTo('both');
+        Revisions::forget();
+        Batches::reset();
+
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '170']));
+        $this->settle();
+
+        $undo = Restore::undoAll($this->batchId());
+        $this->assertSame(1, $undo['restored'], wp_json_encode($undo));
+        $this->settle();
+
+        $this->assertSame('189', get_post_meta($id, '_regular_price', true));
+        $this->assertSame('0.77', get_post_meta($id, '_weight', true), 'the log-mode edit stays');
+    }
+
+    public function test_stock_changes_of_orders_outside_the_app_take_no_revision(): void
+    {
+        $product = $this->simpleProduct(['sku' => 'OR1', 'manage_stock' => true, 'stock_quantity' => 10]);
+        $id = $product->get_id();
+        $product = wc_get_product($id);
+        $product->set_sale_price('150');
+        $product->save();
+        $this->ready();
+        $before = count($this->revisions($id));
+
+        // An order created and paid through wc/v3 (a POS, an ERP): a REST
+        // write without the app's header.
+        $response = $this->request('POST', '/wc/v3/orders', [
+            'set_paid' => true,
+            'status' => 'processing',
+            'line_items' => [['product_id' => $id, 'quantity' => 2]],
+        ], [ListMode::HEADER => '', ListMode::BATCH_HEADER => '']);
+        $this->assertStatus(201, $response);
+        $this->settle();
+        $this->assertSame(8, wc_get_product($id)->get_stock_quantity());
+
+        // A restock from an admin order screen.
+        set_current_screen('edit-shop_order');
+        wc_update_product_stock(wc_get_product($id), 1, 'increase');
+        $this->settle();
+
+        $this->assertSame(9, wc_get_product($id)->get_stock_quantity());
+        $this->assertCount($before, $this->revisions($id), 'no revision per order line');
+
+        // A stock edit on WooCommerce's product form is explicit: a revision
+        // (after the catch-up of the order's changes).
+        $edit = static function (int $postId): void {
+            $product = wc_get_product($postId);
+            $product->set_stock_quantity(3);
+            $product->save();
+        };
+        add_action('woocommerce_process_product_meta', $edit);
+        do_action('woocommerce_process_product_meta', $id);
+        remove_action('woocommerce_process_product_meta', $edit);
+        $this->settle();
+
+        $revisions = $this->revisions($id);
+        $this->assertCount($before + 2, $revisions);
+        $this->assertSame('3', Restore::value(Restore::state($revisions[0], $id), 'meta:_stock'));
+        $this->assertNotNull($this->batchOf($revisions[0]));
     }
 
     public function test_the_revision_of_a_rest_save_holds_the_brands_written_after_the_save(): void

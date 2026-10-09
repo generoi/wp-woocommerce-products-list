@@ -8,7 +8,11 @@
 import { useSyncExternalStore } from '@wordpress/element';
 import type { ProductListItem } from '../types';
 
+/** What a job does: a save of edits, or a revert (Undo, History) putting a batch's old values back. */
+export type SaveJobKind = 'save' | 'revert';
+
 interface Job {
+	kind: SaveJobKind;
 	done: number;
 	total: number;
 	startedAt: number;
@@ -21,6 +25,8 @@ export interface SaveActivity {
 	total: number;
 	startedAt: number;
 	jobs: number;
+	/** Every job in flight is a revert (the bar says "Reverting…"). */
+	reverting: boolean;
 }
 
 const jobs = new Map< number, Job >();
@@ -60,13 +66,15 @@ function emit(): void {
 	let done = 0;
 	let total = 0;
 	let startedAt = Number.POSITIVE_INFINITY;
+	let reverting = true;
 
 	jobs.forEach( ( job ) => {
 		done += job.done;
 		total += job.total;
 		startedAt = Math.min( startedAt, job.startedAt );
+		reverting &&= job.kind === 'revert';
 	} );
-	snapshot = jobs.size ? { done, total, startedAt, jobs: jobs.size } : null;
+	snapshot = jobs.size ? { done, total, startedAt, jobs: jobs.size, reverting } : null;
 	guardLeaving( jobs.size > 0 );
 	listeners.forEach( ( listener ) => listener() );
 }
@@ -78,10 +86,10 @@ function subscribe( listener: () => void ): () => void {
 }
 
 /** Register a save; returns its id for the updates. */
-export function startSaveJob( pendingIds: Iterable< number > ): number {
+export function startSaveJob( pendingIds: Iterable< number >, kind: SaveJobKind = 'save' ): number {
 	const id = nextId++;
 
-	jobs.set( id, { done: 0, total: 0, startedAt: Date.now(), pending: new Set( pendingIds ) } );
+	jobs.set( id, { kind, done: 0, total: 0, startedAt: Date.now(), pending: new Set( pendingIds ) } );
 	emit();
 
 	return id;
@@ -111,8 +119,8 @@ export function pendingRowIds( items: ReadonlyArray< Pick< ProductListItem, 'id'
  * so the rows are locked and leaving is guarded from the moment Update is
  * pressed). The caller finishes it with `finishSaveJob` on every path.
  */
-export function beginSaveJob( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > > ): number {
-	return startSaveJob( pendingRowIds( items ) );
+export function beginSaveJob( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > >, kind: SaveJobKind = 'save' ): number {
+	return startSaveJob( pendingRowIds( items ), kind );
 }
 
 export function updateSaveJob( id: number, done: number, total: number ): void {
@@ -157,6 +165,11 @@ export function finishSaveJob( id: number ): void {
 	if ( jobs.delete( id ) ) {
 		emit();
 	}
+}
+
+/** Of these rows, the ones a job in flight in this tab still holds. */
+export function pendingAmong( rowIds: Iterable< number > ): number[] {
+	return Array.from( rowIds ).filter( ( rowId ) => isRowPending( rowId ) );
 }
 
 /** Whether a row (or its parent) is still waiting to be written by a save in flight. */
