@@ -343,11 +343,18 @@
 	}
 }
 
-.wc-pl-history__title {
+// Doubled class beats core's `.wrap .wp-heading-inline` padding; lined up with the list page title.
+.wc-pl-history__title.wc-pl-history__title {
 	font-size: 23px;
 	font-weight: 400;
-	margin: 0 0 12px;
+	margin: 0;
+	padding: 16px 24px 4px;
 	line-height: 1.3;
+}
+
+// The Batches / All changes switch sits under the title with the same inset.
+.wc-pl-history__mode.wc-pl-history__mode {
+	margin: 8px 24px 4px;
 }
 
 .wc-pl-history {

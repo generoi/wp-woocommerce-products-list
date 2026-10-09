@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 - 2026-10-09
+
+- History: the title and the Batches / All changes switch get the same inset as the list page instead of touching the card edge.
+
 ## 0.1.6 - 2026-10-09
 
 - The toolbar group with the layout/settings buttons and the list header always takes the full width under the search box, so selecting a row no longer wraps it and shifts the table.
