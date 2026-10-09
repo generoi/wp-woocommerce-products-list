@@ -7,6 +7,7 @@ import { Button, Notice } from '@wordpress/components';
 import { Component, createElement } from '@wordpress/element';
 import type { ComponentType, ReactNode } from 'react';
 import { __ } from '@wordpress/i18n';
+import { reportClientError } from '../api/report-error';
 
 /** A webpack chunk that failed to load (network error, timeout, or a plugin update since page load). */
 export function isChunkLoadError( error: unknown ): boolean {
@@ -39,8 +40,8 @@ export class ErrorBoundary extends Component< BoundaryProps, BoundaryState > {
 	}
 
 	override componentDidCatch( error: unknown ): void {
-		 
 		console.error( `[wc-products-list] ${ this.props.context }`, error );
+		reportClientError( 'render', error, { context: this.props.context } );
 	}
 
 	retry = (): void => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3 - 2026-10-09
+
+- Browser errors from the app are reported to `POST /wc-products-list/v1/client-errors` and written to WooCommerce → Status → Logs under the source `wc-products-list-client`: render crashes (error boundary), uncaught errors and unhandled rejections from the bundle, and failed REST calls (5xx and network errors). Deduplicated, at most 25 per page load and 60 per user per 10 minutes.
+- The page title lines up with the status tabs instead of touching the card edge.
+
 ## 0.1.2 - 2026-10-09
 
 Demo polish for the split view, editor input and undo.

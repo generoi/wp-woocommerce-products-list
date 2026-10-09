@@ -3,6 +3,7 @@ import domReady from '@wordpress/dom-ready';
 import { createRoot } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
 import { batchProducts, batchVariationsAcross, newBatchId, toRow } from './api/client';
+import { installGlobalErrorReporting } from './api/report-error';
 import { App } from './app';
 import { createExtensionApi } from './extensions/api';
 import { ACTIONS } from './extensions/hooks';
@@ -102,6 +103,8 @@ createExtensionApi( {
 	notices: createNoticesApi( dispatch ),
 	getItems: getCurrentRows,
 } );
+
+installGlobalErrorReporting();
 
 domReady( () => {
 	const root = document.getElementById( 'wc-products-list-root' );

@@ -48,12 +48,14 @@ $link: #2271b1;
 }
 
 // Status tabs: an ARIA tablist styled like the WordPress list-table tabs.
-.wc-products-list__title {
+// Doubled class beats core's `.wrap .wp-heading-inline` padding.
+.wc-products-list__title.wc-products-list__title {
 	display: block;
 	font-size: 23px;
 	font-weight: 400;
-	margin: 0 0 12px;
-	padding: 0;
+	margin: 0;
+	// Line the title up with the status tabs' text (tab strip 12px + tab 12px).
+	padding: 16px 24px 4px;
 	line-height: 1.3;
 }
 

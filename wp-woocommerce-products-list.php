@@ -22,7 +22,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('WC_PRODUCTS_LIST_VERSION', '0.1.2');
+define('WC_PRODUCTS_LIST_VERSION', '0.1.3');
 define('WC_PRODUCTS_LIST_FILE', __FILE__);
 define('WC_PRODUCTS_LIST_PATH', __DIR__);
 

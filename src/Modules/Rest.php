@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Modules;
 
 use GeneroWP\ProductsList\Module;
+use GeneroWP\ProductsList\Rest\ClientErrorsController;
 use GeneroWP\ProductsList\Rest\CountsController;
 use GeneroWP\ProductsList\Rest\ListQuery;
 use GeneroWP\ProductsList\Rest\Rows;
@@ -36,6 +37,7 @@ class Rest implements Module
     public function registerRoutes(): void
     {
         (new CountsController)->register_routes();
+        (new ClientErrorsController)->register_routes();
         (new TermsController)->register_routes();
         (new VariationsReadController)->register();
     }

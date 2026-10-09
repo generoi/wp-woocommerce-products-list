@@ -21,6 +21,7 @@ import type {
 } from '../types';
 import { ApiError, isAbortError, toApiError } from './errors';
 import { recordBootRequest, takePrefetched } from './prefetch';
+import { reportClientError, shouldReportApiError } from './report-error';
 
 export { ApiError } from './errors';
 
@@ -236,7 +237,13 @@ export async function request( options: Options ): Promise< unknown > {
 	try {
 		return await apiFetch( options as APIFetchOptions );
 	} catch ( error ) {
-		throw await toApiError( error );
+		const apiError = await toApiError( error );
+
+		if ( shouldReportApiError( apiError.status, apiError.code, options.path ) ) {
+			reportClientError( 'api', apiError, { path: options.path?.split( '?' )[ 0 ], method: options.method ?? 'GET', status: apiError.status, code: apiError.code } );
+		}
+
+		throw apiError;
 	}
 }
 
