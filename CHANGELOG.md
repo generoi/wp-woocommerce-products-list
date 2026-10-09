@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-10-09
 
+First release. Products → Catalog: a DataViews product list for WooCommerce 11 with variations inline under their parents, in-place quick edit and bulk edit (scheduled sales on simple products and on all variations of variable products, numeric and percent operations with rounding, mixed-value state, server-side relative stock), optimistic saves with per-item errors and Undo, a change log with a batch History screen and revert, and a declarative PHP plus JavaScript extension API (used by gds-woo-i18n for per-language columns and tools).
+
+- Bulk market prices reach the variations of selected variable products when "apply to all variations" is ticked; term lists without a valid id are refused per item instead of clearing the product's terms.
+- History offers a dry run before a revert; selecting variations of many parents loads them in parallel; translation tools run in chunks.
 - History lands on Batches: one row per gesture ("Sale from, Sale to, Sale price on 4 variations of 1 product"), failures, and "Reverted by <user> at <time>" / "Revert of <id>"; "Show changes" opens its per-field rows. Field labels come from the registry, values are formatted (prices in the language's own currency, sale dates in site time), Item ID is a bare id, the batch filter takes an id prefix, a filtered empty list offers Reset, a second revert of a batch warns and reads "Revert again", and failed changes are counted apart in the revert confirm.
 - A refetch (a column added, an action on another row, an undo) keeps loaded variations on screen until the new rows arrive, so it never discards an open variation quick edit; Collapse all, the collapse row action and the chevron all ask before removing the edited variation; a running save keeps its editor mounted.
 - Bulk saves send product chunks side by side (100 rows: 34 + 34 + 32, three at a time); the bulk success snackbar links to its batch in History, and snackbars show every action (core renders only the first).
