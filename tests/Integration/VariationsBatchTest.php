@@ -107,6 +107,29 @@ class VariationsBatchTest extends RestTestCase
         $this->assertSame('', wc_get_product($a38)->get_sale_price());
     }
 
+    public function test_a_variation_deleted_meanwhile_is_logged_with_its_parent_and_field(): void
+    {
+        $a = $this->variableProduct(['38', '39']);
+        [$a38, $a39] = $a->get_children();
+        wp_delete_post($a39, true);
+
+        $response = $this->request('POST', '/wc-products-list/v1/variations/batch', [
+            'update' => [
+                ['id' => $a38, 'sale_price' => '5', 'parent_id' => $a->get_id()],
+                ['id' => $a39, 'sale_price' => '5', 'parent_id' => $a->get_id()],
+            ],
+        ], [Logger::SOURCE_HEADER => 'bulk']);
+        $this->assertStatus(200, $response);
+        $this->assertSame('woocommerce_rest_product_variation_invalid_id', $this->data($response)['update'][1]['error']['code']);
+
+        $errors = array_values(array_filter($this->rows(), static fn (array $row): bool => $row['status'] === 'error'));
+        $this->assertCount(1, $errors);
+        $this->assertSame($a39, (int) $errors[0]['object_id']);
+        $this->assertSame($a->get_id(), (int) $errors[0]['parent_id']);
+        $this->assertSame('sale_price', $errors[0]['field']);
+        $this->assertSame('5', $errors[0]['new_value']);
+    }
+
     public function test_limits_and_permissions(): void
     {
         $parent = $this->variableProduct(['38']);

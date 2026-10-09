@@ -48,9 +48,36 @@ export function copiesBetweenLanguages( def: Pick< DeclarativeAction, 'args' > )
  * An action that works in the tab's own currency (adjust market prices,
  * clear) keeps every option.
  */
-export function argOptions( arg: DeclarativeActionArg, args: Record< string, unknown >, lang: string, settings: Pick< Settings, 'languages' | 'currency' >, copies = true ): DeclarativeActionArg[ 'options' ] {
-	if ( arg.type !== 'array' || ! copies ) {
+/**
+ * Whether an option (a field) exists on at least one of the items: options
+ * without `applies` exist everywhere; name and SEO fields have
+ * `applies.variation: false`, so a selection of variations does not offer them.
+ */
+export function optionAppliesTo( option: DeclarativeActionArg[ 'options' ][ number ], items: readonly ProductListItem[] | undefined ): boolean {
+	const applies = option.applies;
+
+	if ( ! applies || ! items || items.length === 0 ) {
+		return true;
+	}
+
+	return items.some( ( item ) => {
+		if ( isVariation( item ) ) {
+			return applies.variation === true;
+		}
+
+		return applies.product === true || ( Array.isArray( applies.product ) && applies.product.includes( String( item.type ?? '' ) ) );
+	} );
+}
+
+export function argOptions( arg: DeclarativeActionArg, args: Record< string, unknown >, lang: string, settings: Pick< Settings, 'languages' | 'currency' >, copies = true, items?: readonly ProductListItem[] ): DeclarativeActionArg[ 'options' ] {
+	if ( arg.type !== 'array' ) {
 		return arg.options;
+	}
+
+	const applicable = items ? arg.options.filter( ( option ) => optionAppliesTo( option, items ) ) : arg.options;
+
+	if ( ! copies ) {
+		return applicable;
 	}
 
 	const currencies = settings.languages?.currencies ?? {};
@@ -58,7 +85,7 @@ export function argOptions( arg: DeclarativeActionArg, args: Record< string, unk
 	const from = currencies[ source ] ?? settings.currency.code;
 	const to = currencies[ lang ] ?? settings.currency.code;
 
-	return from === to ? arg.options : arg.options.filter( ( option ) => ! PRICE_OPTION.test( option.value ) );
+	return from === to ? applicable : applicable.filter( ( option ) => ! PRICE_OPTION.test( option.value ) );
 }
 
 function defaultsOf( def: DeclarativeAction, lang: string ): Record< string, unknown > {
@@ -389,7 +416,7 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 			sent[ arg.id ] = data[ arg.id ];
 
 			if ( arg.type === 'array' && Array.isArray( sent[ arg.id ] ) ) {
-				const allowed = new Set( argOptions( arg, data, lang, settings, copies ).map( ( option ) => option.value ) );
+				const allowed = new Set( argOptions( arg, data, lang, settings, copies, items ).map( ( option ) => option.value ) );
 
 				sent[ arg.id ] = ( sent[ arg.id ] as string[] ).filter( ( value ) => allowed.has( value ) );
 			}
@@ -417,7 +444,9 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 			.finally( () => setRunning( false ) );
 	};
 
-	const blocked = disabled || running || ids.length === 0;
+	// A fields list where none of the fields exists on the selection (e.g. names on variations only).
+	const nothingApplies = args.some( ( arg ) => arg.type === 'array' && arg.options.length > 0 && argOptions( arg, data, lang, settings, copies, items ).length === 0 );
+	const blocked = disabled || running || ids.length === 0 || nothingApplies;
 
 	const start = () => {
 		if ( blocked ) {
@@ -495,7 +524,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 					}
 
 					if ( arg.type === 'array' ) {
-						const options = argOptions( arg, data, lang, settings, copies );
+						const options = argOptions( arg, data, lang, settings, copies, items );
+						const inapplicable = arg.options.length - argOptions( arg, data, lang, settings, false, items ).length;
 						const chosen = Array.isArray( data[ arg.id ] ) ? ( data[ arg.id ] as string[] ) : [];
 
 						return (
@@ -510,7 +540,18 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 										onChange={ ( checked ) => set( arg.id, checked ? [ ...chosen, option.value ] : chosen.filter( ( value ) => value !== option.value ) ) }
 									/>
 								) ) }
-								{ options.length < arg.options.length ? (
+								{ options.length === 0 && inapplicable > 0 ? (
+									<p className="wc-pl-language-tools__description">{ __( 'None of these fields exists on the selected items (variations have no name or SEO fields of their own).', 'wp-woocommerce-products-list' ) }</p>
+								) : inapplicable > 0 ? (
+									<p className="wc-pl-language-tools__description">
+										{ sprintf(
+											/* translators: %d: number of fields hidden */
+											_n( '%d field is hidden: the selected items do not have it.', '%d fields are hidden: the selected items do not have them.', inapplicable, 'wp-woocommerce-products-list' ),
+											inapplicable
+										) }
+									</p>
+								) : null }
+								{ options.length < arg.options.length - inapplicable ? (
 									<p className="wc-pl-language-tools__description">{ __( 'Prices are not copied between languages that sell in different currencies.', 'wp-woocommerce-products-list' ) }</p>
 								) : null }
 							</fieldset>

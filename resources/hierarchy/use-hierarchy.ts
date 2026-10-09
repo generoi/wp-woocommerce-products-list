@@ -171,7 +171,7 @@ export interface Hierarchy {
 	 * With `where`, only the variations it accepts are added (e.g. the
 	 * out-of-stock ones).
 	 */
-	selectVariations( parentId: number, current?: string[], where?: ( item: VariationRow ) => boolean ): Promise< string[] >;
+	selectVariations( parentId: number | number[], current?: string[], where?: ( item: VariationRow ) => boolean ): Promise< string[] >;
 	/** Whether a variation-level filter narrows the expanded parents. (Optional: facades over the hierarchy may leave it out.) */
 	variationFilterActive?: boolean;
 	/** List every variation of one parent despite the variation-level filter ("Show all"). */
@@ -1014,6 +1014,8 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 			}
 
 			setExpandedState( ( state ) => ( sameIds( state, unique ) ? state : unique ) );
+			// Seen at once by the next call in the same tick (several expands before a render must add up, not overwrite each other).
+			latestRef.current = { ...latestRef.current, expandedItemIds: unique };
 			writeExpanded( storage, unique );
 		},
 		[ storage ]
@@ -1178,17 +1180,37 @@ export function useHierarchy( parents: ProductRow[], fields: ProductField[], opt
 	}, [] );
 
 	const selectVariations = useCallback(
-		async ( parentId: number, current: string[] = [], where?: ( item: VariationRow ) => boolean ): Promise< string[] > => {
-			await expand( parentId );
+		async ( parentId: number | number[], current: string[] = [], where?: ( item: VariationRow ) => boolean ): Promise< string[] > => {
+			const parentIds = Array.isArray( parentId ) ? parentId : [ parentId ];
+			const expanded = latestRef.current.expandedItemIds;
+			const adding = parentIds.filter( ( id ) => ! expanded.includes( id ) );
 
-			const state = children.get( parentId );
-			const matching = ( state?.items ?? [] ).filter( ( item ) => ! where || where( item ) );
-			const ids = matching.map( ( item ) => getItemId( item ) );
+			// One expand for all of them, the loads side by side (not one parent after the other).
+			if ( adding.length ) {
+				setExpanded( [ ...expanded, ...adding ] );
+			}
+
+			await Promise.all( parentIds.map( ( id ) => load( id ) ) );
+
 			const have = new Set( current );
+			const next = [ ...current ];
 
-			return [ ...current, ...ids.filter( ( id ) => ! have.has( id ) ) ];
+			for ( const id of parentIds ) {
+				const state = children.get( id );
+
+				for ( const item of state?.items ?? [] ) {
+					const itemId = getItemId( item );
+
+					if ( ( ! where || where( item ) ) && ! have.has( itemId ) ) {
+						have.add( itemId );
+						next.push( itemId );
+					}
+				}
+			}
+
+			return next;
 		},
-		[ expand ]
+		[ load, setExpanded ]
 	);
 
 	const showAllVariations = useCallback( ( parentId: number ) => {

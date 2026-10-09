@@ -47,6 +47,14 @@ describe( 'withWholeSelection', () => {
 		expect( cb.label( onPageRows ) ).toBe( 'Do 4' );
 		expect( cb.label( [ onPageRows[ 0 ]! ] ) ).toBe( 'Do 1' );
 
+		// A count-labelled action on one row stays on that row, label and callback alike (a row's label never goes stale).
+		const sole = { onPage: [ '1' ], offPage };
+		const soleWrapped = withWholeSelection( actions, () => sole )[ 0 ] as typeof cb;
+		callback.mockClear();
+		expect( soleWrapped.label( [ onPageRows[ 0 ]! ] ) ).toBe( 'Do 1' );
+		soleWrapped.callback( [ onPageRows[ 0 ]! ], {} );
+		expect( callback.mock.calls[ 0 ]?.[ 0 ] ).toHaveLength( 1 );
+
 		const modal = wrapped[ 1 ] as ProductAction & { RenderModal: typeof RenderModal; modalHeader: ( items: ProductListItem[] ) => string };
 		expect( modal.modalHeader( onPageRows ) ).toBe( 'Edit 4 items' );
 		render( <modal.RenderModal items={ onPageRows } closeModal={ () => {} } /> );

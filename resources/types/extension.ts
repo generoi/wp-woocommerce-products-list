@@ -28,6 +28,8 @@ export type DeclarativeFieldType =
 export interface DeclarativeOption {
 	value: string;
 	label: string;
+	/** Which objects the option exists on (action arg options only). */
+	applies?: { product: boolean | string[]; variation: boolean };
 }
 
 /** `Registry::normaliseField()` output. */

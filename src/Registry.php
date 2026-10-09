@@ -478,7 +478,7 @@ final class Registry
      * Options come either as `value => label` or as a list of
      * `['value' => ..., 'label' => ...]`.
      *
-     * @return array<int, array{value: string, label: string}>
+     * @return array<int, array{value: string, label: string, applies?: array<string, mixed>}>
      */
     private static function options(mixed $options): array
     {
@@ -490,7 +490,15 @@ final class Registry
                     continue;
                 }
 
-                $list[] = ['value' => (string) $option['value'], 'label' => (string) ($option['label'] ?? $option['value'])];
+                $item = ['value' => (string) $option['value'], 'label' => (string) ($option['label'] ?? $option['value'])];
+
+                // Which objects the option exists on, e.g. a language field
+                // that variations do not have: the JS hides it for them.
+                if (isset($option['applies']) && is_array($option['applies'])) {
+                    $item['applies'] = $option['applies'];
+                }
+
+                $list[] = $item;
             } elseif (is_scalar($option)) {
                 $list[] = ['value' => (string) $value, 'label' => (string) $option];
             }

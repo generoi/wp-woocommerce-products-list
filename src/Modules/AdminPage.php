@@ -20,10 +20,72 @@ class AdminPage implements Module
     /** Fired after the app script is enqueued so extensions can add theirs. */
     public const ACTION_ENQUEUE = 'wc_products_list/enqueue';
 
+    /** Chunks webpack loads on demand: their strings ride along with the app's translations. */
+    public const LAZY_CHUNKS = ['build/edit.js', 'build/history.js'];
+
+    private bool $mergingTranslations = false;
+
     public function register(): void
     {
         add_action('admin_menu', [$this, 'addMenu']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue']);
+        add_filter('pre_load_script_translations', [$this, 'withChunkTranslations'], 10, 4);
+    }
+
+    /**
+     * The lazy chunks (quick/bulk edit, History) are not script handles, so
+     * WordPress never loads their JSON translation files (named after the
+     * md5 of each chunk's path). Merge them into the app handle's
+     * translations: the chunks share its `wp.i18n` text domain.
+     *
+     * @param  string|false|null  $translations
+     * @param  string|false  $file
+     * @return string|false|null
+     */
+    public function withChunkTranslations($translations, $file, string $handle, string $domain)
+    {
+        if ($translations !== null || $this->mergingTranslations || $handle !== Plugin::HANDLE || $domain !== Plugin::TEXT_DOMAIN || ! is_string($file) || $file === '') {
+            return $translations;
+        }
+
+        $this->mergingTranslations = true;
+        $index = load_script_translations($file, $handle, $domain);
+        $this->mergingTranslations = false;
+
+        $merged = is_string($index) ? json_decode($index, true) : null;
+        $locale = determine_locale();
+        $found = false;
+
+        foreach (self::LAZY_CHUNKS as $chunk) {
+            $chunkFile = dirname($file).'/'.$domain.'-'.$locale.'-'.md5($chunk).'.json';
+
+            if (! is_readable($chunkFile)) {
+                continue;
+            }
+
+            $data = json_decode((string) file_get_contents($chunkFile), true);
+            $messages = is_array($data) ? ($data['locale_data']['messages'] ?? $data['locale_data'][$domain] ?? null) : null;
+
+            if (! is_array($messages)) {
+                continue;
+            }
+
+            if (! is_array($merged)) {
+                $merged = $data;
+                $merged['locale_data'] = ['messages' => $messages];
+            } else {
+                $key = isset($merged['locale_data']['messages']) ? 'messages' : $domain;
+                $merged['locale_data'][$key] = array_merge($messages, (array) ($merged['locale_data'][$key] ?? []));
+            }
+
+            $found = true;
+        }
+
+        if (! $found) {
+            return $index;
+        }
+
+        return (string) wp_json_encode($merged);
     }
 
     public function addMenu(): void

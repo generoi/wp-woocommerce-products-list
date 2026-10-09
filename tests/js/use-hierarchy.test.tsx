@@ -447,6 +447,26 @@ describe( 'useHierarchy', () => {
 		expect( result.current.isExpanded( 1 ) ).toBe( true );
 	} );
 
+	it( 'selectVariations takes several parents at once: one expand, loads side by side, all kept', async () => {
+		const { fetch, calls } = fakeFetch( { 1: 2, 2: 1, 3: 2 } );
+		const { result } = renderHook( () => useHierarchy( [ parent( 1 ), parent( 2 ), parent( 3 ) ], fields, { fetchVariations: fetch, storage: null } ) );
+
+		// Parent 1 already loaded: its resolved load must not let the next expand overwrite the first.
+		await act( async () => {
+			await result.current.expand( 1 );
+		} );
+		act( () => result.current.collapse( 1 ) );
+
+		let selection: string[] = [];
+		await act( async () => {
+			selection = await result.current.selectVariations( [ 1, 2, 3 ], [ '1', '2', '3' ] );
+		} );
+
+		expect( selection ).toEqual( [ '1', '2', '3', '1001', '1002', '2001', '3001', '3002' ] );
+		expect( [ 1, 2, 3 ].map( ( id ) => result.current.isExpanded( id ) ) ).toEqual( [ true, true, true ] );
+		expect( calls.length ).toBeGreaterThanOrEqual( 3 );
+	} );
+
 	it( 'patches, removes and invalidates variation rows from outside', async () => {
 		const { fetch, calls } = fakeFetch( { 1: 2 } );
 		const { result } = renderHook( () => useHierarchy( [ parent( 1 ) ], fields, { fetchVariations: fetch, storage: null } ) );

@@ -28,8 +28,8 @@ import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { actionLabel, createLogFields, formatLogValue, logQueryFromView } from './log-fields';
 import { describeBatchScope, isRevertableRow, scopeFromPlan } from './batch-scope';
-import { describeConflict, relativeConflicts, runRevert } from './revert';
-import type { RevertOutcome } from './revert';
+import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from './revert';
+import type { RevertCheckSummary, RevertOutcome } from './revert';
 import { batchQueryFromView, createBatchFields } from './batch-fields';
 import { invalidateLog, useLog, useLogBatches } from './use-log';
 import type { LogBatch, LogRow } from './use-log';
@@ -174,6 +174,8 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
 	// Set when a pass left conflicts behind: the summary and "Revert anyway".
 	const [ outcome, setOutcome ] = useState< RevertOutcome | null >( null );
+	// The dry run: items changed again since the batch, known before Revert is pressed.
+	const [ check, setCheck ] = useState< RevertCheckSummary | null | 'loading' >( null );
 	const batchId = row?.batch_id;
 	// Already put back once: a second revert re-applies the batch's values over the first revert.
 	const revertedByAny = ( plan && plan !== 'loading' ? plan.reverted_by : null ) ?? row?.reverted_by ?? null;
@@ -210,6 +212,31 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 			cancelled = true;
 		};
 	}, [ batchId ] );
+
+	useEffect( () => {
+		if ( ! batchId || ! plan || plan === 'loading' || ! plan.revertable || ! plan.objects ) {
+			setCheck( null );
+
+			return;
+		}
+
+		const controller = new AbortController();
+
+		setCheck( 'loading' );
+		checkRevertPlan( batchId, plan, undefined, controller.signal )
+			.then( ( summary ) => {
+				if ( ! controller.signal.aborted ) {
+					setCheck( summary );
+				}
+			} )
+			.catch( () => {
+				if ( ! controller.signal.aborted ) {
+					setCheck( null );
+				}
+			} );
+
+		return () => controller.abort();
+	}, [ batchId, plan ] );
 
 	const finish = ( result: RevertOutcome ) => {
 		invalidateProducts( { counts: true } );
@@ -339,6 +366,45 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 					__( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
 			</p>
+			{ ! outcome && check === 'loading' ? (
+				<p className="wc-pl-confirm__scope" aria-live="polite">
+					<Spinner /> { __( 'Checking for changes made since this batch…', 'wp-woocommerce-products-list' ) }
+				</p>
+			) : null }
+			{ ! outcome && check && check !== 'loading' && check.changed > 0 ? (
+				<div className="wc-pl-confirm__warning" role="status">
+					<p>
+						{ check.changed - check.alreadyReverted > 0
+							? sprintf(
+									/* translators: %d: number of items */
+									_n(
+										'%d item changed since this batch (by an order or another edit) and will be left as it is.',
+										'%d items changed since this batch (by an order or another edit) and will be left as they are.',
+										check.changed - check.alreadyReverted,
+										'wp-woocommerce-products-list'
+									),
+									check.changed - check.alreadyReverted
+							  )
+							: null }{ ' ' }
+						{ check.alreadyReverted > 0
+							? sprintf(
+									/* translators: %d: number of items */
+									_n( '%d already put back by an earlier revert.', '%d already put back by an earlier revert.', check.alreadyReverted, 'wp-woocommerce-products-list' ),
+									check.alreadyReverted
+							  )
+							: null }
+					</p>
+					{ check.example ? (
+						<p>
+							{ sprintf(
+								/* translators: %s: one item changed since the batch, e.g. "Pelsi 38: Stock quantity 10 → 9 kept" */
+								__( 'Changed since: %s', 'wp-woocommerce-products-list' ),
+								describeConflict( check.example, ( key ) => logFieldLabel( key, fieldOptions ) )
+							) }
+						</p>
+					) : null }
+				</div>
+			) : null }
 			<SaveProgress done={ progress.done } total={ progress.total } saving={ busy } label={ revertLabel } />
 			{ ! outcome && batchId && plan && plan !== 'loading' && plan.revertable ? <RevertPreview batchId={ batchId } options={ fieldOptions } /> : null }
 			{ outcome ? (

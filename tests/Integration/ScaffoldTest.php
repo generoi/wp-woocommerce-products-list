@@ -106,4 +106,31 @@ class ScaffoldTest extends RestTestCase
 
         $GLOBALS['wp_scripts'] = null;
     }
+
+    public function test_lazy_chunk_translations_are_merged_into_the_app_translations(): void
+    {
+        $dir = get_temp_dir().'wc-pl-l10n-'.wp_generate_password(6, false);
+        wp_mkdir_p($dir);
+        $locale = determine_locale();
+        $domain = Plugin::TEXT_DOMAIN;
+        $json = static fn (array $messages): string => (string) wp_json_encode(['domain' => 'messages', 'locale_data' => ['messages' => ['' => ['domain' => 'messages']] + $messages]]);
+        $index = $dir.'/'.$domain.'-'.$locale.'-'.md5('build/index.js').'.json';
+        file_put_contents($index, $json(['Catalog' => ['Katalog']]));
+        file_put_contents($dir.'/'.$domain.'-'.$locale.'-'.md5('build/edit.js').'.json', $json(['Update' => ['Uppdatera']]));
+        file_put_contents($dir.'/'.$domain.'-'.$locale.'-'.md5('build/history.js').'.json', $json(['Revert batch' => ['Återställ']]));
+
+        $loaded = json_decode((string) load_script_translations($index, Plugin::HANDLE, $domain), true);
+        $messages = $loaded['locale_data']['messages'];
+
+        $this->assertSame(['Katalog'], $messages['Catalog']);
+        $this->assertSame(['Uppdatera'], $messages['Update']);
+        $this->assertSame(['Återställ'], $messages['Revert batch']);
+
+        // Other handles are left alone.
+        $this->assertSame(['Katalog'], json_decode((string) load_script_translations($index, 'other', $domain), true)['locale_data']['messages']['Catalog']);
+        $this->assertArrayNotHasKey('Update', json_decode((string) load_script_translations($index, 'other', $domain), true)['locale_data']['messages']);
+
+        array_map('unlink', glob($dir.'/*.json') ?: []);
+        rmdir($dir);
+    }
 }

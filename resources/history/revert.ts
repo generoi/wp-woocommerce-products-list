@@ -8,7 +8,7 @@
  */
 import { __, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertPlan } from '../api/client';
-import { getRevertPlan, newBatchId, revertBatch } from '../api/client';
+import { checkRevert, getRevertPlan, newBatchId, revertBatch } from '../api/client';
 
 export interface RevertOutcome {
 	revertBatchId: string;
@@ -60,6 +60,34 @@ export function splitResults( results: ActionResult[] ): Pick< RevertOutcome, 'o
 	}
 
 	return outcome;
+}
+
+export interface RevertCheckSummary {
+	/** Objects changed again since the batch (a revert leaves them as they are). */
+	changed: number;
+	/** Of those, the ones an earlier revert of the batch already put back. */
+	alreadyReverted: number;
+	/** One changed object, for an example sentence. */
+	example: ActionResult | null;
+}
+
+/**
+ * The dry run before a revert: which objects changed again since the batch.
+ * Without ids the server checks only its first chunk, so a batch of several
+ * chunks is checked chunk by chunk (in parallel: nothing is written).
+ */
+export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 'chunks' >, check: typeof checkRevert = checkRevert, signal?: AbortSignal ): Promise< RevertCheckSummary > {
+	const parts = plan.chunks.length > 1 ? plan.chunks.filter( ( ids ) => ids.length ) : [ undefined ];
+	const responses = await Promise.all( parts.map( ( ids ) => check( batchId, { ids, signal } ) ) );
+	const summary: RevertCheckSummary = { changed: 0, alreadyReverted: 0, example: null };
+
+	for ( const response of responses ) {
+		summary.changed += response.changed ?? 0;
+		summary.alreadyReverted += response.already_reverted ?? 0;
+		summary.example ??= response.items.find( ( item ) => ! item.already_reverted?.length ) ?? response.items[ 0 ] ?? null;
+	}
+
+	return summary;
 }
 
 /** Post the revert chunk by chunk; `plan.chunks` or the given ids cut to the plan's chunk size. */

@@ -391,11 +391,15 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 	// DataViews' bulk actions see the page's selected rows; widen them to the
 	// whole selection, read at call time (the actions list is built once).
+	// "On page" is what DataViews can pass: the selected rows it shows. A
+	// selected variation under a collapsed parent is not among them, so it
+	// rides along with the other pages' rows (label and editor agree).
 	const whole = useMemo< WholeSelection >( () => {
-		const onPage = selection.slice( 0, selection.length - selected.offPageCount );
+		const shown = new Set( hierarchy.rows.map( getItemId ) );
+		const onPage = selection.filter( ( id ) => shown.has( id ) );
 
-		return { onPage, offPage: selected.rows.slice( onPage.length ) };
-	}, [ selection, selected.offPageCount, selected.rows ] );
+		return { onPage, offPage: selected.rows.filter( ( row ) => ! shown.has( getItemId( row ) ) ) };
+	}, [ selection, selected.rows, hierarchy.rows ] );
 	const wholeRef = useRef( whole );
 	useLayoutEffect( () => {
 		wholeRef.current = whole;

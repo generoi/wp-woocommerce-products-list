@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
+import { checkRevertPlan, describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
 import { describeBatchScope, isRevertableRow, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
 import type { LogRow } from '../../resources/api/client';
 
@@ -8,6 +8,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: () => 'revert-1',
 	revertBatch: vi.fn(),
 	getRevertPlan: vi.fn(),
+	checkRevert: vi.fn(),
 } ) );
 
 function response( results: ActionResponse[ 'results' ] ): ActionResponse {
@@ -140,5 +141,35 @@ describe( 'conflict reports', () => {
 
 		await runRevert( 'batch-a', { chunk: 100, chunks: [] }, { ids: [ 24514 ], relative: true, revertBatchId: 'r1' }, post );
 		expect( post.mock.calls[ 0 ]?.[ 1 ] ).toEqual( { ids: [ 24514 ], revertBatchId: 'r1', force: undefined, relative: true, fields: [ 'id' ] } );
+	} );
+} );
+
+describe( 'checkRevertPlan', () => {
+	const check = ( ids?: number[] ) => ( {
+		batch_id: 'b',
+		checked: ids?.length ?? 2,
+		objects: 3,
+		complete: false,
+		changed: ids?.includes( 3 ) ? 1 : 2,
+		already_reverted: ids?.includes( 3 ) ? 0 : 1,
+		items: ids?.includes( 3 ) ? [ { id: 3, ok: false, fields: [ 'stock_quantity' ], already_reverted: [] } ] : [ { id: 1, ok: false, fields: [ 'stock_quantity' ], already_reverted: [ 'stock_quantity' ] }, { id: 2, ok: false, fields: [ 'regular_price' ], already_reverted: [] } ],
+	} );
+
+	it( 'checks every chunk of a batch of several chunks and sums the counts', async () => {
+		const fn = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => check( options?.ids ) );
+		const summary = await checkRevertPlan( 'b', { chunks: [ [ 1, 2 ], [ 3 ] ] }, fn );
+
+		expect( fn.mock.calls.map( ( call ) => call[ 1 ]?.ids ) ).toEqual( [ [ 1, 2 ], [ 3 ] ] );
+		expect( summary.changed ).toBe( 3 );
+		expect( summary.alreadyReverted ).toBe( 1 );
+		// The example is a real change, not one an earlier revert put back.
+		expect( summary.example?.id ).toBe( 2 );
+	} );
+
+	it( 'checks a one-chunk batch without ids', async () => {
+		const fn = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => check( options?.ids ) );
+
+		await checkRevertPlan( 'b', { chunks: [ [ 1, 2 ] ] }, fn );
+		expect( fn.mock.calls[ 0 ]?.[ 1 ]?.ids ).toBeUndefined();
 	} );
 } );

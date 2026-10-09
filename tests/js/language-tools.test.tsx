@@ -89,6 +89,23 @@ describe( 'language tools', () => {
 		expect( argOptions( fields, { source: 'fi' }, 'de', settings ).map( ( option ) => option.value ) ).toEqual( [ 'name', 'regular_price', 'sale_price' ] );
 	} );
 
+	it( 'offer only the fields the selected items have (no names for variations alone)', () => {
+		const fields = {
+			...copyAction().args[ 2 ]!,
+			options: [
+				{ value: 'name', label: 'Name', applies: { product: true, variation: false } },
+				{ value: 'description', label: 'Description', applies: { product: true, variation: true } },
+				{ value: 'regular_price', label: 'Price', applies: { product: [ 'simple' ], variation: true } },
+			],
+		};
+		const variation = { id: 2, type: 'variation', parent_id: 1 } as never;
+		const variable = { id: 1, type: 'variable', parent_id: 0 } as never;
+
+		expect( argOptions( fields, {}, 'de', settings, false, [ variation ] ).map( ( option ) => option.value ) ).toEqual( [ 'description', 'regular_price' ] );
+		expect( argOptions( fields, {}, 'de', settings, false, [ variable ] ).map( ( option ) => option.value ) ).toEqual( [ 'name', 'description' ] );
+		expect( argOptions( fields, {}, 'de', settings, false ).map( ( option ) => option.value ) ).toEqual( [ 'name', 'description', 'regular_price' ] );
+	} );
+
 	it( 'run on the editor\'s rows with the tab\'s language and reload the tab', async () => {
 		const run = vi.fn( async () => undefined );
 		const onDone = vi.fn();

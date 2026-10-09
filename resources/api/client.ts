@@ -74,6 +74,8 @@ export interface ActionResult {
 	expected?: Record< string, unknown >;
 	/** The conflicting fields can be reverted relatively (take the batch's change off the current value). */
 	relative?: boolean;
+	/** On a revert `conflict`: fields an earlier revert of the batch already put back (never adjusted relatively). */
+	already_reverted?: string[];
 }
 
 export interface ActionResponse {
@@ -496,8 +498,9 @@ export async function batchVariationsAcross( update: VariationUpdateAcross[], op
 		const response = await request< BatchResponse< RawVariation > >( {
 			path: batchPath( `${ OWN }/variations/batch`, options ),
 			method: 'POST',
-			// The server addresses each row by its own parent; the one sent along is ignored.
-			data: { update: part.map( ( { parent_id: _parent, ...body } ) => body ) },
+			// The server addresses each row by its own parent; the one sent along
+			// only names the parent in the log row of a variation deleted meanwhile.
+			data: { update: part },
 			...listMode( { ...options, batchId } ),
 		} );
 		result = mergeBatch( result, response );
@@ -672,6 +675,29 @@ export async function getRevertPlan( batchId: string, options?: RequestOptions )
 	const plan = await request< RevertPlan >( { path: `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }`, ...listMode( options ) } );
 
 	return { ...plan, chunks: Array.isArray( plan.chunks ) ? plan.chunks : [], skipped: Array.isArray( plan.skipped ) ? plan.skipped : [] };
+}
+
+/** `GET /log/batch/{id}/check`: a dry run of the revert's conflict check (nothing written). */
+export interface RevertCheck {
+	batch_id: string;
+	checked: number;
+	objects: number;
+	/** Whether every object of the batch was checked (false: only the first chunk, or the given ids). */
+	complete: boolean;
+	/** Objects changed again since the batch: a revert leaves them as they are. */
+	changed: number;
+	/** Of those, the ones an earlier revert of this batch already put back. */
+	already_reverted: number;
+	items: ActionResult[];
+}
+
+export async function checkRevert( batchId: string, options?: RequestOptions & { ids?: number[] } ): Promise< RevertCheck > {
+	const response = await request< RevertCheck >( {
+		path: addQueryArgs( `${ OWN }/log/batch/${ encodeURIComponent( batchId ) }/check`, options?.ids?.length ? { ids: options.ids } : {} ),
+		...listMode( options ),
+	} );
+
+	return { ...response, items: Array.isArray( response.items ) ? response.items : [] };
 }
 
 export interface RevertOptions extends RequestOptions {

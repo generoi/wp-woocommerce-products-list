@@ -25,14 +25,11 @@ function selectVariationsAction( context: ProductActionsContext, id: string, lab
 		callback: ( items ) => {
 			void ( async () => {
 				// Read at call time: the action list is built once per field set.
-				let current = context.selection ?? [];
+				const current = context.selection ?? [];
 
 				try {
-					for ( const parentId of idsOf( items ) ) {
-						current = await hierarchy.selectVariations( parentId, current, where );
-					}
-
-					onChangeSelection( current );
+					// All parents at once: one expand, the loads in parallel.
+					onChangeSelection( await hierarchy.selectVariations( idsOf( items ), current, where ) );
 				} catch ( error ) {
 					notify.error( error instanceof Error ? error.message : __( 'The variations could not be loaded.', 'wp-woocommerce-products-list' ) );
 				}

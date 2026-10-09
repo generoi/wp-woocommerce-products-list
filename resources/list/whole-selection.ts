@@ -50,16 +50,23 @@ export function withWholeSelection( actions: ProductAction[], getWhole: () => Wh
 			return action;
 		}
 
-		const label = extendLabel( action.label, extend ) as ProductAction[ 'label' ];
+		// An action whose label depends on the count (Quick edit / Bulk edit)
+		// stays on its one row when called with one: DataViews' memoised
+		// table rows do not re-render when the selection elsewhere changes,
+		// so a widened row label would go stale, and label and result must
+		// agree. The selection bar's Bulk edit covers the whole selection.
+		const countLabelled = typeof action.label === 'function';
+		const widen = ( items: ProductListItem[] ) => ( countLabelled && items.length === 1 ? items : extend( items ) );
+		const label = extendLabel( action.label, widen ) as ProductAction[ 'label' ];
 
 		if ( 'RenderModal' in action && action.RenderModal ) {
 			const Inner = action.RenderModal;
-			const RenderModal = ( props: RenderModalProps< ProductListItem > ) => createElement( Inner, { ...props, items: extend( props.items ) } );
+			const RenderModal = ( props: RenderModalProps< ProductListItem > ) => createElement( Inner, { ...props, items: widen( props.items ) } );
 
 			return {
 				...action,
 				label,
-				modalHeader: extendLabel( action.modalHeader, extend ) as typeof action.modalHeader,
+				modalHeader: extendLabel( action.modalHeader, widen ) as typeof action.modalHeader,
 				RenderModal,
 			};
 		}
@@ -70,7 +77,7 @@ export function withWholeSelection( actions: ProductAction[], getWhole: () => Wh
 			return {
 				...action,
 				label,
-				callback: ( items, context ) => callback( extend( items ), context ),
+				callback: ( items, context ) => callback( widen( items ), context ),
 			};
 		}
 

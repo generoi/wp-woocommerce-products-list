@@ -371,11 +371,15 @@ final class Recorder
                 self::$loggedErrors[$id.'|'.$error['code']] = true;
                 $body = $bodies[$id] ?? [];
                 $paths = self::paths($body);
+                // The plugin's cross-parent variations batch has no parent in
+                // the route: a variation deleted meanwhile is named by the
+                // parent the editor sent along (never used to address a write).
+                $rowParent = $parentId > 0 ? $parentId : (int) ($body['parent_id'] ?? 0);
 
                 $stored = $paths !== [] ? wc_get_product($id) : null;
                 $before = $stored instanceof WC_Product && $stored->get_id() > 0 ? self::snapshot($stored, $paths) : [];
 
-                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $parentId, false, $paths, self::context($request, array_keys($body)), $error, $before, self::attempted($body, $paths));
+                $rows[] = self::errorRow($isVariation ? 'variation' : 'product', $id, $rowParent, false, $paths, self::context($request, array_keys($body)), $error, $before, self::attempted($body, $paths));
             }
         }
 
