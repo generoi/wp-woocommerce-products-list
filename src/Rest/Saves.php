@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList\Rest;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Recorder;
+use GeneroWP\ProductsList\Plugin;
 use GeneroWP\ProductsList\Registry;
 use WC_Product;
 use WP_REST_Request;
@@ -52,6 +53,10 @@ final class Saves
         // and snapshots that never completed are failed saves.
         add_filter('rest_request_before_callbacks', [self::class, 'beforeRequest'], 3, 3);
         add_filter('rest_request_after_callbacks', [self::class, 'afterRequest'], 999, 3);
+
+        // After the route's permission_callback: `rest_request_before_callbacks`
+        // runs before it, so per-id work there would be done for anyone.
+        add_filter('rest_dispatch_request', [self::class, 'beforeDispatch'], 3, 4);
     }
 
     /**
@@ -67,12 +72,34 @@ final class Saves
             Recorder::forgetLoggedErrors();
         }
 
-        if (ListMode::active() && $request->get_method() !== 'GET') {
-            self::primeBatch($request);
-            self::deferTransients($request);
+        return $response;
+    }
+
+    /**
+     * `rest_dispatch_request`: WordPress applies it only once the route's
+     * permission_callback has passed, right before the callback runs, so
+     * the batch priming and the transient deferral never do work for a
+     * request that is going to be refused.
+     *
+     * @param  mixed  $result
+     * @param  mixed  $route
+     * @param  mixed  $handler
+     * @return mixed
+     */
+    public static function beforeDispatch($result, WP_REST_Request $request, $route = null, $handler = null)
+    {
+        if ($result !== null || $request->get_method() === 'GET' || ! ListMode::active()) {
+            return $result;
         }
 
-        return $response;
+        if (! current_user_can(Plugin::capability())) {
+            return $result;
+        }
+
+        self::primeBatch($request);
+        self::deferTransients($request);
+
+        return $result;
     }
 
     /** @var array<int, true> requests (spl_object_id) whose transient deletions are deferred */
@@ -155,9 +182,15 @@ final class Saves
         $body = array_merge($request->get_body_params(), $request->get_json_params() ?: []);
         $ids = [];
 
+        $limit = self::batchLimit($request);
+
         foreach (is_array($body['update'] ?? null) ? $body['update'] : [] as $item) {
             if (is_array($item) && isset($item['id']) && (int) $item['id'] > 0) {
                 $ids[] = (int) $item['id'];
+            }
+
+            if (count($ids) >= $limit) {
+                break;
             }
         }
 
@@ -167,6 +200,17 @@ final class Saves
 
         _prime_post_caches($ids, true, true);
         Rows::primeRawMetaOf($ids);
+    }
+
+    /**
+     * WooCommerce's batch limit for the route's resource: a larger batch
+     * is refused by the callback, so priming more than this is waste.
+     */
+    public static function batchLimit(WP_REST_Request $request): int
+    {
+        $base = str_contains($request->get_route(), 'variations') ? 'variations' : 'products';
+
+        return max(1, (int) apply_filters('woocommerce_rest_batch_items_limit', VariationsBatchController::LIMIT, $base));
     }
 
     /**

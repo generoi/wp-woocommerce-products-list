@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList\Tests\Integration;
 use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\ListMode;
 use GeneroWP\ProductsList\Log\Logger;
+use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Registry;
 use GeneroWP\ProductsList\Rest\Saves;
@@ -387,14 +388,42 @@ class RevertTest extends RestTestCase
         $this->assertFalse($results[$a->get_id()]['ok']);
         $this->assertSame('conflict', $results[$a->get_id()]['code']);
         $this->assertSame(['regular_price'], $results[$a->get_id()]['fields']);
-        $this->assertStringContainsString('regular_price', $results[$a->get_id()]['message']);
+        // Labelled for a person, with the values to show.
+        $this->assertStringContainsString('Regular price', $results[$a->get_id()]['message']);
+        $this->assertStringNotContainsString('regular_price', $results[$a->get_id()]['message']);
+        $this->assertSame(['Regular price'], $results[$a->get_id()]['labels']);
+        $this->assertSame(['regular_price' => '160'], $results[$a->get_id()]['current']);
+        $this->assertSame(['regular_price' => '150'], $results[$a->get_id()]['batch']);
+        $this->assertSame(['regular_price' => '189'], $results[$a->get_id()]['expected']);
+        $this->assertSame('Saga wide toe boot', $results[$a->get_id()]['name']);
+        $this->assertFalse($results[$a->get_id()]['relative']);
         $this->assertTrue($results[$b->get_id()]['ok']);
 
         // Nothing of A was touched, not even the sale price that did not conflict.
         $this->assertSame('160', wc_get_product($a->get_id())->get_regular_price());
         $this->assertSame('100', wc_get_product($a->get_id())->get_sale_price());
         $this->assertSame('189', wc_get_product($b->get_id())->get_regular_price());
-        $this->assertSame([$b->get_id()], array_map('intval', array_column($this->rows($data['batch_id']), 'object_id')));
+        $revertRows = $this->rows($data['batch_id']);
+        $written = array_values(array_filter($revertRows, static fn (array $row): bool => $row['status'] === 'ok'));
+        $this->assertSame([$b->get_id()], array_map('intval', array_column($written, 'object_id')));
+
+        // The item left alone is in the log too, with why.
+        $left = array_values(array_filter($revertRows, static fn (array $row): bool => $row['status'] === 'skipped'));
+        $this->assertCount(1, $left);
+        $this->assertSame([$a->get_id(), 'regular_price', '160', '189', 'revert', $this->batchId()], [(int) $left[0]['object_id'], $left[0]['field'], $left[0]['old_value'], $left[0]['new_value'], $left[0]['source'], $left[0]['reverts']]);
+        $this->assertSame('conflict', json_decode($left[0]['context'], true)['reason']);
+
+        // History counts it as left out, not as a change.
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertSame(1, $batches[$data['batch_id']]['skipped']);
+        $this->assertSame(1, $batches[$data['batch_id']]['objects']);
+        $this->assertSame(1, $batches[$data['batch_id']]['rows']);
+
+        // A revert of the revert does not try to write the skipped row.
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$data['batch_id']));
+        $this->assertSame([[$b->get_id()]], $plan['chunks']);
+        $this->assertSame([], $plan['skipped']);
+        $this->assertSame(1, $plan['left_out']);
 
         // Forced: the batch's old values win over the later change.
         $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['force' => true]));
@@ -402,6 +431,119 @@ class RevertTest extends RestTestCase
         $this->assertTrue($results[$a->get_id()]['ok']);
         $this->assertSame('189', wc_get_product($a->get_id())->get_regular_price());
         $this->assertSame('', wc_get_product($a->get_id())->get_sale_price());
+    }
+
+    public function test_a_relative_revert_takes_a_restock_off_and_keeps_a_sale_made_since(): void
+    {
+        $parent = $this->variableProduct(['37', '38']);
+        [$v37, $v38] = $parent->get_children();
+
+        foreach ([$v37, $v38] as $id) {
+            $variation = wc_get_product($id);
+            $variation->set_manage_stock(true);
+            $variation->set_stock_quantity(0);
+            $variation->save();
+        }
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$parent->get_id().'/variations/batch', [
+            'update' => [['id' => $v37, 'stock_quantity' => 10], ['id' => $v38, 'stock_quantity' => 10]],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        // One pair of 37 sells in between.
+        wc_update_product_stock(wc_get_product($v37), 1, 'decrease');
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $results = array_column($data['results'], null, 'id');
+        $this->assertSame('conflict', $results[$v37]['code']);
+        $this->assertTrue($results[$v37]['relative']);
+        $this->assertSame(['Stock quantity'], $results[$v37]['labels']);
+        $this->assertSame(['stock_quantity' => '9'], $results[$v37]['current']);
+        $this->assertSame(9, wc_get_product($v37)->get_stock_quantity());
+        $this->assertSame(0, wc_get_product($v38)->get_stock_quantity());
+
+        // Relative: the +10 is taken off what is there now, the sale stays.
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['ids' => [$v37], 'relative' => true]));
+        $this->assertSame([true], array_column($data['results'], 'ok'));
+        $this->assertSame(-1, wc_get_product($v37)->get_stock_quantity());
+    }
+
+    public function test_relative_values_need_numbers(): void
+    {
+        $this->assertSame('-1', Revert::relativeValue('0', '10', '9'));
+        $this->assertSame('4.5', Revert::relativeValue('1.5', '3', '6'));
+        $this->assertNull(Revert::relativeValue(null, '10', '9'));
+        $this->assertNull(Revert::relativeValue('0', '10', 'x'));
+    }
+
+    public function test_items_skipped_on_the_client_are_logged_with_the_reason(): void
+    {
+        $trashed = $this->simpleProduct(['sku' => 'TR']);
+        $kept = $this->simpleProduct(['sku' => 'KE']);
+        $parent = $this->variableProduct(['38']);
+        $variation = $parent->get_children()[0];
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $kept->get_id(), 'sale_price' => '150']],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/skipped', [
+            'batch_id' => $this->batchId(),
+            'source' => 'bulk',
+            'items' => [
+                ['id' => $trashed->get_id(), 'reason' => 'trashed', 'fields' => ['sale_price', 'date_on_sale_from']],
+                ['id' => $variation, 'reason' => 'no_stock_management'],
+            ],
+        ]);
+        $this->assertStatus(200, $response);
+        $this->assertSame([$trashed->get_id(), $variation], $this->data($response)['logged']);
+
+        $rows = array_values(array_filter($this->rows($this->batchId()), static fn (array $row): bool => $row['status'] === 'skipped'));
+        $this->assertCount(3, $rows);
+        $this->assertSame(['sale_price', 'date_on_sale_from', ''], array_column($rows, 'field'));
+        $this->assertSame(['product', 'product', 'variation'], array_column($rows, 'object_type'));
+        $this->assertSame($parent->get_id(), (int) $rows[2]['parent_id']);
+        $this->assertStringContainsString('Trash', $rows[0]['message']);
+        $this->assertSame('bulk', $rows[0]['source']);
+
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertSame(2, $batches[$this->batchId()]['skipped']);
+        $this->assertSame(1, $batches[$this->batchId()]['objects']);
+        $this->assertSame(['sale_price'], $batches[$this->batchId()]['fields']);
+
+        // The revert plan counts changes, not the rows that say what was left out.
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()));
+        $this->assertSame(1, $plan['rows']);
+        $this->assertSame(2, $plan['left_out']);
+
+        // The log's own row filters find them.
+        $log = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $trashed->get_id()]));
+        $this->assertSame(['skipped', 'skipped'], array_column($log['items'], 'status'));
+
+        // The revert writes only the saved item.
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertSame([[$kept->get_id(), true]], array_map(static fn (array $result): array => [$result['id'], $result['ok']], $data['results']));
+    }
+
+    public function test_skipped_items_are_validated_and_stay_in_the_users_own_batch(): void
+    {
+        $product = $this->simpleProduct();
+
+        $this->assertStatus(400, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => 'nope', 'items' => [['id' => $product->get_id(), 'reason' => 'trashed']]]));
+        $this->assertStatus(400, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => [['id' => $product->get_id(), 'reason' => 'because']]]));
+        $this->assertStatus(400, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => array_fill(0, 101, ['id' => $product->get_id(), 'reason' => 'trashed'])]));
+
+        // A post that is not a product is ignored.
+        $page = self::factory()->post->create(['post_type' => 'page']);
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => [['id' => $page, 'reason' => 'trashed']]]));
+        $this->assertSame([], $data['logged']);
+
+        // Another user's batch id is refused.
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['sale_price' => '120']));
+        $this->actAs('shop_manager');
+        $this->assertStatus(409, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => $this->batchId(), 'items' => [['id' => $product->get_id(), 'reason' => 'trashed']]]));
+
+        $this->actAs('subscriber');
+        $this->assertStatus(403, $this->request('POST', '/wc-products-list/v1/log/skipped', ['batch_id' => wp_generate_uuid4(), 'items' => [['id' => $product->get_id(), 'reason' => 'trashed']]]));
     }
 
     public function test_a_large_batch_is_reverted_in_chunks_under_one_batch_id(): void

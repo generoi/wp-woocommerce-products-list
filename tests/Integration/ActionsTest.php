@@ -142,18 +142,23 @@ class ActionsTest extends RestTestCase
         $parent = $this->variableProduct(['38']);
         $variation = $parent->get_children()[0];
 
-        $data = $this->act('delete', [$published->get_id(), $draft->get_id(), $variation]);
+        $data = $this->act('delete', [$published->get_id(), $draft->get_id()]);
 
-        $this->assertSame([false, false, false], array_column($data['results'], 'ok'));
+        $this->assertSame([false, false], array_column($data['results'], 'ok'));
         $this->assertSame(['wc_products_list_not_trashed'], array_unique(array_column($data['results'], 'code')));
         $this->assertSame('publish', get_post_status($published->get_id()));
         $this->assertSame('draft', get_post_status($draft->get_id()));
-        $this->assertSame('publish', get_post_status($variation));
 
         $rows = $this->rows();
-        $this->assertCount(3, $rows);
+        $this->assertCount(2, $rows);
         $this->assertSame(['error'], array_unique(array_column($rows, 'status')));
         $this->assertSame('wc_products_list_not_trashed', json_decode($rows[0]['context'], true)['code']);
+
+        // Variations have no Trash: retiring a colour deletes them directly.
+        $data = $this->act('delete', [$variation]);
+        $this->assertTrue($data['results'][0]['ok']);
+        $this->assertNull(get_post($variation));
+        $this->assertNotNull(get_post($parent->get_id()));
 
         add_filter(Bootstrap::FILTER_ALLOW_HARD_DELETE, '__return_true');
 

@@ -32,6 +32,13 @@ final class Logger
 
     public const INSERT_CHUNK = 200;
 
+    public const STATUS_OK = 'ok';
+
+    public const STATUS_ERROR = 'error';
+
+    /** An item that was in a batch's scope but was not written (trashed meanwhile, changed since, ...). */
+    public const STATUS_SKIPPED = 'skipped';
+
     /** @var array<int, Row> */
     private static array $buffer = [];
 
@@ -155,7 +162,7 @@ final class Logger
         $source = self::source();
 
         foreach ($rows as $row) {
-            $status = ($row['status'] ?? 'ok') === 'error' ? 'error' : 'ok';
+            $status = in_array($row['status'] ?? 'ok', [self::STATUS_ERROR, self::STATUS_SKIPPED], true) ? (string) $row['status'] : self::STATUS_OK;
             $context = $row['context'] ?? null;
 
             $full = [

@@ -12,10 +12,12 @@ use WP_REST_Request;
  * WooCommerce's data store does. There is no way back, and the log row
  * says so.
  *
- * As in the classic list, only what is in the Trash can be deleted
+ * As in the classic list, only products in the Trash can be deleted
  * permanently; the `wc_products_list/allow_hard_delete` filter lifts that
  * for the UI and here alike, so a scripted request cannot skip the trash
- * step the UI shows.
+ * step the UI shows. Variations have no Trash in WooCommerce (the product
+ * editor's "Remove" deletes them for good), so a variation is deleted
+ * whatever its status; the app asks for confirmation first.
  */
 final class Delete implements Action
 {
@@ -45,7 +47,7 @@ final class Delete implements Action
         $id = $product->get_id();
 
         /** This filter is documented in src/Bootstrap.php. */
-        if ($old !== 'trash' && ! apply_filters(Bootstrap::FILTER_ALLOW_HARD_DELETE, false)) {
+        if ($old !== 'trash' && ! $product->is_type('variation') && ! apply_filters(Bootstrap::FILTER_ALLOW_HARD_DELETE, false)) {
             return new WP_Error('wc_products_list_not_trashed', __('Only products in the Trash can be deleted permanently.', 'wp-woocommerce-products-list'));
         }
 

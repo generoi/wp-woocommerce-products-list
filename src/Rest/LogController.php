@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Rest;
 
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Revert;
 use GeneroWP\ProductsList\Log\Table;
 use GeneroWP\ProductsList\Plugin;
@@ -88,8 +89,144 @@ final class LogController
                     'default' => false,
                     'description' => 'Also put back fields that were changed again after the batch (otherwise reported as `conflict`).',
                 ],
+                'relative' => [
+                    'type' => 'boolean',
+                    'default' => false,
+                    'description' => 'Where a numeric field such as stock_quantity was changed again after the batch, take the batch\'s change off the current value instead of reporting a conflict.',
+                ],
             ],
         ]);
+
+        register_rest_route(Plugin::REST_NAMESPACE, '/log/skipped', [
+            'methods' => 'POST',
+            'callback' => [$this, 'skipped'],
+            'permission_callback' => $permission,
+            'args' => [
+                'batch_id' => [
+                    'type' => 'string',
+                    'required' => true,
+                    'description' => 'The batch (a UUID v4) the items were left out of.',
+                    'validate_callback' => static fn ($value): bool|WP_Error => ListMode::isBatchId($value)
+                        ? true
+                        : new WP_Error('rest_invalid_param', __('batch_id must be a UUID v4.', 'wp-woocommerce-products-list'), ['status' => 400]),
+                ],
+                'source' => ['type' => 'string', 'enum' => Table::SOURCES, 'default' => 'bulk'],
+                'items' => [
+                    'type' => 'array',
+                    'required' => true,
+                    'minItems' => 1,
+                    'maxItems' => self::SKIPPED_MAX,
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'id' => ['type' => 'integer', 'minimum' => 1, 'required' => true],
+                            'reason' => ['type' => 'string', 'enum' => self::SKIP_REASONS, 'required' => true],
+                            'fields' => ['type' => 'array', 'items' => ['type' => 'string'], 'maxItems' => 50],
+                            'message' => ['type' => 'string', 'maxLength' => 500],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
+    /** Items one POST /log/skipped records at most. */
+    public const SKIPPED_MAX = 100;
+
+    /**
+     * Why the app left an item of a batch unwritten. Each gets a log row
+     * with status `skipped` so History says why an item kept its value.
+     */
+    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'other'];
+
+    /**
+     * POST /log/skipped: record the items a save left out on the client
+     * (moved to the Trash meanwhile, no stock management, ...) as `skipped`
+     * rows of the batch, one per intended field (or one row without a
+     * field). Only the user's own batch: a batch id that already holds
+     * another user's rows is refused.
+     */
+    public function skipped(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        $batchId = (string) $request['batch_id'];
+
+        if ($this->isOthers($batchId)) {
+            return new WP_Error('wc_products_list_batch_shared', __('This batch belongs to another user.', 'wp-woocommerce-products-list'), ['status' => 409]);
+        }
+
+        $items = (array) $request['items'];
+        $ids = array_values(array_unique(array_map(static fn ($item): int => (int) ($item['id'] ?? 0), $items)));
+        _prime_post_caches($ids, false, false);
+
+        $rows = [];
+        $logged = [];
+
+        foreach ($items as $item) {
+            $id = (int) ($item['id'] ?? 0);
+            $post = $id > 0 ? get_post($id) : null;
+
+            // Only products and variations, and only ones the user may edit (a deleted one: as given).
+            if ($post !== null && (! in_array($post->post_type, ['product', 'product_variation'], true) || ! current_user_can('edit_post', $id))) {
+                continue;
+            }
+
+            $reason = (string) ($item['reason'] ?? 'other');
+            $message = isset($item['message']) && is_string($item['message']) && trim($item['message']) !== ''
+                ? sanitize_text_field($item['message'])
+                : self::skipMessage($reason);
+            $fields = array_values(array_unique(array_filter(array_map(
+                static fn ($field): string => substr(preg_replace('/[^A-Za-z0-9_.:-]/', '', (string) $field) ?? '', 0, 100),
+                is_array($item['fields'] ?? null) ? $item['fields'] : []
+            ))));
+            $isVariation = $post !== null && $post->post_type === 'product_variation';
+
+            foreach ($fields !== [] ? $fields : [''] as $field) {
+                $rows[] = [
+                    'batch_id' => $batchId,
+                    'source' => (string) $request['source'],
+                    'object_type' => $isVariation ? 'variation' : 'product',
+                    'object_id' => $id,
+                    'parent_id' => $isVariation ? (int) $post->post_parent : 0,
+                    'field' => $field,
+                    'status' => Logger::STATUS_SKIPPED,
+                    'message' => $message,
+                    'context' => ['reason' => $reason],
+                ];
+            }
+
+            $logged[] = $id;
+        }
+
+        Logger::log($rows);
+        Logger::flush();
+
+        return rest_ensure_response(['batch_id' => $batchId, 'logged' => $logged, 'rows' => count($rows)]);
+    }
+
+    public static function skipMessage(string $reason): string
+    {
+        return match ($reason) {
+            'trashed' => __('Skipped: moved to the Trash meanwhile.', 'wp-woocommerce-products-list'),
+            'deleted' => __('Skipped: deleted meanwhile.', 'wp-woocommerce-products-list'),
+            'conflict' => __('Skipped: changed by someone else since the editor opened.', 'wp-woocommerce-products-list'),
+            'no_stock_management' => __('Skipped: stock is not managed for this item.', 'wp-woocommerce-products-list'),
+            'has_sale' => __('Skipped: it already had a sale.', 'wp-woocommerce-products-list'),
+            'no_sale_price' => __('Skipped: it has no sale price to adjust.', 'wp-woocommerce-products-list'),
+            'below_zero' => __('Skipped: the change would have gone below zero.', 'wp-woocommerce-products-list'),
+            'not_applicable' => __('Skipped: the field does not apply to this item.', 'wp-woocommerce-products-list'),
+            default => __('Skipped.', 'wp-woocommerce-products-list'),
+        };
+    }
+
+    /** Whether rows of another user already carry the batch id. */
+    private function isOthers(string $batchId): bool
+    {
+        global $wpdb;
+
+        $table = Table::name();
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE batch_id = %s AND user_id <> %d", $batchId, get_current_user_id())) > 0;
     }
 
     /**
@@ -160,15 +297,16 @@ final class LogController
         $total = (int) $wpdb->get_var($this->prepare("SELECT COUNT(DISTINCT batch_id) FROM {$table} WHERE {$where}", $values));
         $rows = $wpdb->get_results($this->prepare(
             "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, MIN(source) AS source,
-                COUNT(*) AS row_count, COUNT(DISTINCT object_id) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
+                SUM(status <> 'skipped') AS row_count, COUNT(DISTINCT IF(status <> 'skipped', object_id, NULL)) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
                 SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
                 SUM(status = 'error') AS errors,
-                COUNT(DISTINCT IF(object_type = 'product', object_id, NULL)) AS product_count,
-                COUNT(DISTINCT IF(object_type = 'variation', object_id, NULL)) AS variation_count,
-                COUNT(DISTINCT IF(object_type = 'variation', parent_id, NULL)) AS parent_count,
-                GROUP_CONCAT(DISTINCT action ORDER BY action SEPARATOR ',') AS actions,
+                COUNT(DISTINCT IF(status = 'skipped', object_id, NULL)) AS skipped_count,
+                COUNT(DISTINCT IF(object_type = 'product' AND status <> 'skipped', object_id, NULL)) AS product_count,
+                COUNT(DISTINCT IF(object_type = 'variation' AND status <> 'skipped', object_id, NULL)) AS variation_count,
+                COUNT(DISTINCT IF(object_type = 'variation' AND status <> 'skipped', parent_id, NULL)) AS parent_count,
+                GROUP_CONCAT(DISTINCT IF(status <> 'skipped', action, NULL) ORDER BY action SEPARATOR ',') AS actions,
                 MAX(reverts) AS reverts,
-                GROUP_CONCAT(DISTINCT field ORDER BY field SEPARATOR ',') AS fields
+                GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields
              FROM {$table} WHERE {$where}
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC LIMIT %d OFFSET %d",
             array_merge($values, [$perPage, ($page - 1) * $perPage])
@@ -196,6 +334,8 @@ final class LogController
                 'variations' => (int) $row['variation_count'],
                 'parents' => (int) $row['parent_count'],
                 'errors' => (int) $row['errors'],
+                // Items in the batch's scope that were left unwritten (status `skipped` rows).
+                'skipped' => (int) $row['skipped_count'],
                 'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
                 'reverts' => (string) $row['reverts'] !== '' ? (string) $row['reverts'] : null,
                 'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,
@@ -231,7 +371,8 @@ final class LogController
 
         return rest_ensure_response([
             'batch_id' => $batchId,
-            'rows' => count($rows),
+            // Rows of changes (skipped rows say what was left out, they changed nothing).
+            'rows' => count(array_filter($rows, static fn (array $row): bool => $row['status'] !== Logger::STATUS_SKIPPED)),
             'objects' => count($ids),
             'users' => $users,
             'chunk' => $chunk,
@@ -239,6 +380,8 @@ final class LogController
             'skipped' => $plan['skipped'],
             // Rows of changes that failed when they were made: nothing to put back.
             'failed' => count(array_filter($rows, static fn (array $row): bool => $row['status'] === 'error')),
+            // Items the batch left unwritten (status `skipped`): nothing to put back.
+            'left_out' => count(array_unique(array_column(array_filter($rows, static fn (array $row): bool => $row['status'] === Logger::STATUS_SKIPPED), 'object_id'))),
             'revertable' => $ids !== [] && $users <= 1,
             'reverted_by' => $this->revertedBy([$batchId])[$batchId] ?? null,
         ]);
@@ -307,7 +450,8 @@ final class LogController
             is_string($fields) ? $fields : null,
             is_string($revertBatchId) ? $revertBatchId : null,
             (bool) $request->get_param('force'),
-            $batchId
+            $batchId,
+            (bool) $request->get_param('relative')
         ));
     }
 

@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Log;
 
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Registry;
 use GeneroWP\ProductsList\Rest\Rows;
 use WP_REST_Request;
 
@@ -101,7 +102,8 @@ final class Revert
             $action = (string) ($row['action'] ?? 'update');
             $field = (string) ($row['field'] ?? '');
 
-            if ($id === 0) {
+            // Rows of items a save or a revert left alone wrote nothing.
+            if ($id === 0 || ($row['status'] ?? 'ok') === Logger::STATUS_SKIPPED) {
                 continue;
             }
 
@@ -268,6 +270,18 @@ final class Revert
      */
     public static function conflicts(int $id, array $final): array
     {
+        return array_keys(self::conflictValues($id, $final));
+    }
+
+    /**
+     * The conflicting fields of an object with their current values
+     * (stored form): field => current value.
+     *
+     * @param  array<string, ?string>  $final  field => the batch's new value
+     * @return array<string, ?string>
+     */
+    public static function conflictValues(int $id, array $final): array
+    {
         $product = wc_get_product($id);
 
         if (! $product instanceof \WC_Product || $product->get_id() === 0) {
@@ -280,11 +294,134 @@ final class Revert
 
         foreach ($final as $field => $value) {
             if (($current[$field] ?? '') !== ($value ?? '')) {
-                $conflicts[] = (string) $field;
+                $conflicts[(string) $field] = $current[$field] ?? null;
             }
         }
 
         return $conflicts;
+    }
+
+    public const FILTER_RELATIVE_FIELDS = 'wc_products_list/revert_relative_fields';
+
+    /**
+     * Fields a revert can undo relatively: when one of them changed again
+     * after the batch (a sale lowered the stock), `relative` takes the
+     * batch's change off the current value instead of restoring the old
+     * one, so the later change is kept.
+     *
+     * @return array<int, string>
+     */
+    public static function relativeFields(): array
+    {
+        /**
+         * Filters the numeric fields a relative revert adjusts by the
+         * batch's difference rather than restoring.
+         *
+         * @param  mixed  $fields  a list of field paths
+         */
+        $fields = apply_filters(self::FILTER_RELATIVE_FIELDS, ['stock_quantity']);
+
+        return array_values(array_map('strval', array_filter(is_array($fields) ? $fields : [], 'is_scalar')));
+    }
+
+    /**
+     * The value a relative revert writes: the current value minus what the
+     * batch added (new - old). Null when any of the three is not a number.
+     */
+    public static function relativeValue(?string $old, ?string $new, ?string $current): ?string
+    {
+        foreach ([$old, $new, $current] as $value) {
+            if ($value === null || ! is_numeric($value)) {
+                return null;
+            }
+        }
+
+        $result = (float) $current - ((float) $new - (float) $old);
+
+        return (string) (floor($result) === $result && abs($result) < PHP_INT_MAX ? (int) $result : $result);
+    }
+
+    /**
+     * A field's name for a person: the registry label, or the key in words.
+     */
+    public static function fieldLabel(string $field): string
+    {
+        $registered = null;
+
+        foreach (Registry::fields() as $def) {
+            if ($def['id'] === $field || ($def['writePath'] ?? null) === $field) {
+                $registered = $def;
+
+                break;
+            }
+        }
+
+        if ($registered !== null && $registered['label'] !== '' && $registered['label'] !== $registered['id']) {
+            return $registered['label'];
+        }
+
+        $words = str_replace(['meta_data.', '_', '.'], ['', ' ', ' '], $field);
+
+        return ucfirst(trim($words));
+    }
+
+    /**
+     * The original old value the plan writes for one field of one object.
+     *
+     * @param  Plan  $plan
+     */
+    private static function plannedOld(array $plan, int $id, string $field): ?string
+    {
+        if (isset($plan['products'][$id]) && array_key_exists($field, $plan['products'][$id])) {
+            return $plan['products'][$id][$field];
+        }
+
+        foreach ($plan['variations'] as $byId) {
+            if (isset($byId[$id]) && array_key_exists($field, $byId[$id])) {
+                return $byId[$id][$field];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Set the value the plan writes for one field of one object.
+     *
+     * @param  Plan  $plan
+     */
+    private static function setPlanned(array &$plan, int $id, string $field, ?string $value): void
+    {
+        if (isset($plan['products'][$id])) {
+            $plan['products'][$id][$field] = $value;
+
+            return;
+        }
+
+        foreach ($plan['variations'] as $parent => $byId) {
+            if (isset($byId[$id])) {
+                $plan['variations'][$parent][$id][$field] = $value;
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * The parent (variation) or 0 (product) of an object in the plan.
+     *
+     * @param  Plan  $plan
+     * @return array{0: string, 1: int}
+     */
+    private static function planType(array $plan, int $id): array
+    {
+        foreach ($plan['variations'] as $parent => $byId) {
+            if (isset($byId[$id])) {
+                return ['variation', (int) $parent];
+            }
+        }
+
+        return ['product', 0];
     }
 
     /**
@@ -294,9 +431,10 @@ final class Revert
      * @param  ?string  $batchId  the revert batch id; generated when null (one per chunked revert, kept by the app)
      * @param  bool  $force  write even where the field was changed again since the batch
      * @param  string  $reverts  the batch being reverted, stored on the rows the revert writes (`reverts` column)
+     * @param  bool  $relative  where a relative field (`relativeFields()`) changed again, take the batch's change off the current value instead
      * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
      */
-    public static function apply(array $rows, ?string $fields = null, ?string $batchId = null, bool $force = false, string $reverts = ''): array
+    public static function apply(array $rows, ?string $fields = null, ?string $batchId = null, bool $force = false, string $reverts = '', bool $relative = false): array
     {
         if ($reverts === '') {
             $reverts = (string) ($rows[0]['batch_id'] ?? '');
@@ -305,7 +443,7 @@ final class Revert
         Logger::setReverts($reverts);
 
         try {
-            return self::write($rows, $fields, $batchId, $force);
+            return self::write($rows, $fields, $batchId, $force, $relative);
         } finally {
             Logger::setReverts('');
         }
@@ -315,7 +453,7 @@ final class Revert
      * @param  array<int, array<string, mixed>>  $rows
      * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
      */
-    private static function write(array $rows, ?string $fields, ?string $batchId, bool $force): array
+    private static function write(array $rows, ?string $fields, ?string $batchId, bool $force, bool $relative = false): array
     {
         $plan = self::plan($rows);
         $batchId = $batchId !== null && $batchId !== '' ? $batchId : wp_generate_uuid4();
@@ -330,35 +468,105 @@ final class Revert
         }
 
         if (! $force) {
-            foreach ($plan['final'] as $id => $final) {
-                $conflicts = self::conflicts((int) $id, $final);
+            $relativeFields = $relative ? self::relativeFields() : [];
+            $skippedRows = [];
 
-                if ($conflicts === []) {
+            foreach ($plan['final'] as $id => $final) {
+                $id = (int) $id;
+                $current = self::conflictValues($id, $final);
+
+                if ($current === []) {
                     continue;
+                }
+
+                [$type, $parent] = self::planType($plan, $id);
+
+                // Relative: every conflicting field is one whose change can be taken off.
+                $adjusted = [];
+
+                foreach ($current as $field => $value) {
+                    $target = in_array($field, $relativeFields, true)
+                        ? self::relativeValue(self::plannedOld($plan, $id, $field), $final[$field] ?? null, $value)
+                        : null;
+
+                    if ($target === null) {
+                        $adjusted = null;
+
+                        break;
+                    }
+
+                    $adjusted[$field] = $target;
+                }
+
+                if ($adjusted !== null) {
+                    foreach ($adjusted as $field => $target) {
+                        self::setPlanned($plan, $id, $field, $target);
+                    }
+
+                    continue;
+                }
+
+                $expected = [];
+
+                foreach (array_keys($current) as $field) {
+                    $expected[$field] = self::plannedOld($plan, $id, $field);
                 }
 
                 unset($plan['products'][$id]);
 
-                foreach ($plan['variations'] as $parent => $byId) {
-                    unset($plan['variations'][$parent][$id]);
+                foreach ($plan['variations'] as $variationParent => $byId) {
+                    unset($plan['variations'][$variationParent][$id]);
 
-                    if ($plan['variations'][$parent] === []) {
-                        unset($plan['variations'][$parent]);
+                    if ($plan['variations'][$variationParent] === []) {
+                        unset($plan['variations'][$variationParent]);
                     }
                 }
 
+                $conflicts = array_keys($current);
+                $labels = array_map([self::class, 'fieldLabel'], $conflicts);
+                $post = get_post($id);
+                $message = sprintf(
+                    /* translators: %s: comma-separated field names */
+                    _n('%s was changed again after this batch and was left as it is.', '%s were changed again after this batch and were left as they are.', count($conflicts), 'wp-woocommerce-products-list'),
+                    implode(', ', $labels)
+                );
+
                 $results[] = [
-                    'id' => (int) $id,
+                    'id' => $id,
                     'ok' => false,
                     'code' => 'conflict',
+                    'object_type' => $type,
+                    'parent_id' => $parent,
+                    'name' => $post !== null ? (string) $post->post_title : '',
                     'fields' => $conflicts,
-                    'message' => sprintf(
-                        /* translators: %s: comma-separated field names */
-                        _n('%s was changed again after this batch and was left as it is.', '%s were changed again after this batch and were left as they are.', count($conflicts), 'wp-woocommerce-products-list'),
-                        implode(', ', $conflicts)
-                    ),
+                    'labels' => $labels,
+                    // field => the value now / the value the batch left / the value a revert would put back
+                    'current' => $current,
+                    'batch' => array_intersect_key($final, $current),
+                    'expected' => $expected,
+                    // Every conflicting field can be undone relatively (`relative: true`).
+                    'relative' => array_diff($conflicts, self::relativeFields()) === [],
+                    'message' => $message,
                 ];
+
+                foreach ($conflicts as $field) {
+                    $skippedRows[] = [
+                        'batch_id' => $batchId,
+                        'source' => 'revert',
+                        'object_type' => $type,
+                        'object_id' => $id,
+                        'parent_id' => $parent,
+                        'field' => $field,
+                        'old_value' => $current[$field],
+                        'new_value' => $expected[$field],
+                        'status' => Logger::STATUS_SKIPPED,
+                        'message' => $message,
+                        'context' => ['reason' => 'conflict', 'batch_value' => $final[$field] ?? null],
+                    ];
+                }
             }
+
+            Logger::log($skippedRows);
         }
 
         foreach ($plan['skipped'] as $item) {
