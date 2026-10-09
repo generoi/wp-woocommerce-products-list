@@ -304,10 +304,33 @@ export function roundTo( value: number, decimals: number ): string {
 }
 
 /** A finished value as wc/v3 wants it: `"12.50"` for money, `"7"` for integers. */
-export function formatNumeric( value: number, kind: NumericKind, settings: Settings ): string {
+export function formatNumeric( value: number, kind: NumericKind, settings: Settings, allowNegative = false ): string {
 	const decimals = kind === 'integer' ? 0 : settings.currency.decimals;
+	const units = toUnits( value, decimals );
 
-	return fromUnits( Math.max( 0, toUnits( value, decimals ) ), decimals );
+	return fromUnits( allowNegative ? units : Math.max( 0, units ), decimals );
+}
+
+/**
+ * Whether a relative op on this row's stock may leave it below zero: the row
+ * takes backorders, or its stock is negative already (an increase or decrease
+ * then moves it by exactly the amount, as wc_update_product_stock does). Other
+ * rows, and every money field, clamp at zero.
+ */
+export function stockMayGoNegative( id: string, item: ProductListItem, current: unknown, settings?: Settings ): boolean {
+	if ( leafOf( id ) !== 'stock_quantity' ) {
+		return false;
+	}
+
+	const backorders = ( item as Record< string, unknown > ).backorders;
+
+	if ( backorders === 'yes' || backorders === 'notify' ) {
+		return true;
+	}
+
+	const number = parseNumeric( current, settings );
+
+	return number !== undefined && number < 0;
 }
 
 export function validateNumericOp( op: NumericOp | undefined, kind: NumericKind, settings?: Settings ): string | null {
@@ -335,6 +358,8 @@ export function validateNumericOp( op: NumericOp | undefined, kind: NumericKind,
 export interface NumericContext {
 	/** The row's regular price (stored, projected or reference), for `regular_minus`. */
 	regular?: string | number | null;
+	/** The result may be negative (stock on backorder); otherwise it is clamped at zero. */
+	allowNegative?: boolean;
 }
 
 /**
@@ -370,6 +395,11 @@ export function computeNumericOp( current: string | number | null | undefined, o
 	const increase = op.operation === 'increase';
 	let units: number;
 
+	// A percentage of a backorder (negative stock) has no sensible direction: "+10 %" would lower it. Such rows are left alone.
+	if ( op.percent && baseUnits < 0 ) {
+		return null;
+	}
+
 	if ( op.percent ) {
 		const percentUnits = toUnits( amount, PERCENT_DECIMALS );
 
@@ -394,7 +424,7 @@ export function computeNumericOp( current: string | number | null | undefined, o
 export function applyNumericOp( current: string | number | null | undefined, op: NumericOp, kind: NumericKind, settings: Settings, context: NumericContext = {} ): string | null {
 	const next = computeNumericOp( current, op, kind, settings, context );
 
-	return next === null ? null : formatNumeric( next, kind, settings );
+	return next === null ? null : formatNumeric( next, kind, settings, context.allowNegative ?? false );
 }
 
 function regularIdFor( saleId: string ): string {
@@ -423,6 +453,13 @@ export function effectiveRegularPrice( item: ProductListItem, regularId: string,
 /** The context a numeric op on `id` needs for this row: the regular price (as edited in the same form) for a sale price. */
 function contextFor( item: ProductListItem, id: string, edits: Record< string, unknown >, byId: Map< string, ProductField >, settings: Settings ): NumericContext {
 	if ( ! isSalePriceField( id ) ) {
+		if ( leafOf( id ) === 'stock_quantity' ) {
+			const field = byId.get( id );
+			const current = field ? readFieldValue( field, item ) : ( item as Record< string, unknown > )[ id ];
+
+			return stockMayGoNegative( id, item, current, settings ) ? { allowNegative: true } : {};
+		}
+
 		return {};
 	}
 
@@ -616,7 +653,7 @@ export function validateBulkNumericEdits( items: ProductListItem[], edits: Recor
 				continue;
 			}
 
-			if ( number < 0 ) {
+			if ( number < 0 && ! ( isNumericOp( own[ id ] ) && stockMayGoNegative( id, item, readFieldValue( field, item ), settings ) ) ) {
 				errors.push( { id: item.id, field: id, message: sprintf( /* translators: %s: field label */ __( '%s cannot be negative.', 'wp-woocommerce-products-list' ), field.label ?? id ) } );
 				continue;
 			}
@@ -739,9 +776,11 @@ export function projectWarnings( items: ProductListItem[], edits: Record< string
 			}
 
 			const current = relativeBase( field, item, value, settings );
-			const next = computeNumericOp( current, value, kind, settings, contextFor( item, id, own, byId, settings ) );
+			const context = contextFor( item, id, own, byId, settings );
+			const next = computeNumericOp( current, value, kind, settings, context );
 
-			if ( next === null || next >= 0 ) {
+			// A row on backorder keeps the arithmetic: nothing is clamped, nothing to confirm.
+			if ( next === null || next >= 0 || context.allowNegative ) {
 				continue;
 			}
 
@@ -801,4 +840,18 @@ export function validateNumericOps( edits: Record< string, unknown >, fields: Pr
 	}
 
 	return errors;
+}
+
+/**
+ * Whether the edits hold a relative op the save resolves in the browser from
+ * the values loaded with the editor (increase/decrease by an amount or a
+ * percent, "regular price minus"). A row changed by someone else meanwhile
+ * would get the op applied to a value it no longer has. Stock is excluded:
+ * its relative ops go as `inventory_delta`, which the server adds to the
+ * stock as stored at write time.
+ */
+export function hasLoadRelativeOps( edits: Record< string, unknown > ): boolean {
+	return Object.entries( edits ).some(
+		( [ id, value ] ) => isNumericOp( value ) && isPendingOp( value ) && ( value.operation === 'increase' || value.operation === 'decrease' || value.operation === 'regular_minus' ) && leafOf( id ) !== 'stock_quantity'
+	);
 }

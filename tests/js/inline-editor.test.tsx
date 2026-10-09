@@ -236,7 +236,7 @@ describe( 'InlineEditor', () => {
 		await screen.findByRole( 'button', { name: 'Update 3 products' } );
 		fireEvent.click( screen.getByRole( 'button', { name: 'Update 3 products' } ) );
 
-		await screen.findAllByText( /leaves the list when this editor closes/ );
+		await screen.findAllByText( /deleted meanwhile and was left out/ );
 		// Named (with its reloaded name) in the editor's own list.
 		expect( screen.getAllByText( /Simple 3/ ).length ).toBeGreaterThan( 0 );
 		// Dropping the row now would change the selection under the open editor.
@@ -285,6 +285,7 @@ describe( 'InlineEditor', () => {
 			fireEvent.click( await screen.findByText( /tools: Edit translated text/ ) );
 
 			// Chrome hands the Escape that closes a native select's dropdown to the page: it stays with the select.
+			fireEvent.mouseDown( screen.getByLabelText( 'Operation' ) );
 			fireEvent.keyDown( screen.getByLabelText( 'Operation' ), { key: 'Escape' } );
 			expect( view.close ).not.toHaveBeenCalled();
 

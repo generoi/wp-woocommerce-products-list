@@ -77,6 +77,8 @@ export interface SaveOptions extends RowEditOptions {
 	prefetchedVariations?: ReadonlyMap< number, ProductListItem[] >;
 	/** Variable parents that only carry their variations (a retry): their own edits are not sent again. */
 	carriersOnly?: ReadonlySet< number >;
+	/** The History batch to write under (the editor shares one with the tool runs of the same Update); a new one when missing. */
+	batchId?: string;
 }
 
 export interface Prepared {
@@ -344,7 +346,7 @@ async function preparePlan( deps: Pick< SaveDeps, 'fetchVariations' >, items: Pr
 }
 
 export async function runSave( deps: SaveDeps, items: ProductListItem[], edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: SaveOptions ): Promise< SaveResult > {
-	const batchId = deps.newBatchId();
+	const batchId = options.batchId ?? deps.newBatchId();
 	const plan = await preparePlan( deps, items, edits, fields, settings, options );
 	const prepared = plan.writes;
 	const result: SaveResult = {

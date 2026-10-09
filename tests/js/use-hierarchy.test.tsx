@@ -285,10 +285,10 @@ describe( 'useHierarchy', () => {
 	} );
 
 	it( 'expands all variable products on the page with at most MAX_CONCURRENT_REQUESTS requests in flight', async () => {
-		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, i === 4 ? 0 : 120 ) );
+		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, i === 4 ? 0 : 60 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls, maxActive } = fakeFetch( counts, { delay: 2 } );
-		// 9 x 120 rows is above EXPAND_ALL_WARN_ROWS; the warning is answered here.
+		// 9 x 60 rows is above EXPAND_ALL_WARN_ROWS; the warning is answered here.
 		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null, confirmExpandAll: () => true } ) );
 
 		let ok: boolean | undefined;
@@ -298,9 +298,9 @@ describe( 'useHierarchy', () => {
 
 		expect( ok ).toBe( true );
 		expect( result.current.expandedItemIds ).toEqual( [ 1, 2, 3, 4, 6, 7, 8, 9, 10 ] );
-		expect( calls ).toHaveLength( 9 * 2 );
+		expect( calls ).toHaveLength( 9 );
 		expect( maxActive() ).toBeLessThanOrEqual( MAX_CONCURRENT_REQUESTS );
-		expect( result.current.rows ).toHaveLength( 10 + 9 * 120 );
+		expect( result.current.rows ).toHaveLength( 10 + 9 * 60 );
 
 		act( () => result.current.collapseAll() );
 		expect( result.current.expandedItemIds ).toEqual( [] );
@@ -308,8 +308,8 @@ describe( 'useHierarchy', () => {
 	} );
 
 	it( 'asks before expanding more than EXPAND_ALL_WARN_ROWS rows and respects the answer', async () => {
-		// 10 parents + 1,000 rows: above the warning, under the hard limit.
-		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, 100 ) );
+		// 10 parents + 500 rows: above the warning, under the hard limit.
+		const parents = Array.from( { length: 10 }, ( _, i ) => parent( i + 1, 50 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls } = fakeFetch( counts );
 		const confirm = vi.fn( async () => false );
@@ -321,7 +321,7 @@ describe( 'useHierarchy', () => {
 		} );
 
 		expect( ok ).toBe( false );
-		expect( confirm ).toHaveBeenCalledWith( 10 + 1000 );
+		expect( confirm ).toHaveBeenCalledWith( 10 + 500 );
 		expect( calls ).toHaveLength( 0 );
 		expect( result.current.expandedItemIds ).toEqual( [] );
 
@@ -330,7 +330,7 @@ describe( 'useHierarchy', () => {
 			ok = await result.current.expandAll();
 		} );
 		expect( ok ).toBe( true );
-		expect( result.current.rows ).toHaveLength( 1010 );
+		expect( result.current.rows ).toHaveLength( 510 );
 
 		// force skips the question.
 		act( () => result.current.collapseAll() );
@@ -647,7 +647,7 @@ describe( 'useHierarchy', () => {
 	it( 'drops queued pages of a collapsed parent before they take a request slot', async () => {
 		// 7 one-page loads through MAX_CONCURRENT_REQUESTS slots (below the EXPAND_ALL_WARN_ROWS
 		// confirm, so the loads start synchronously): one is queued; collapsing all while the first batch is in flight.
-		const parents = Array.from( { length: 7 }, ( _, i ) => parent( i + 1, 80 ) );
+		const parents = Array.from( { length: 7 }, ( _, i ) => parent( i + 1, 50 ) );
 		const counts = Object.fromEntries( parents.map( ( p ) => [ p.id, p._childCount ] ) );
 		const { fetch, calls } = fakeFetch( counts, { delay: 20 } );
 		const { result } = renderHook( () => useHierarchy( parents, fields, { fetchVariations: fetch, storage: null } ) );
@@ -962,11 +962,11 @@ describe( 'expandAll progressive commits', () => {
 		const counts: Record< number, number > = {};
 		const parents: ProductRow[] = [];
 
-		// 20 x 50 rows: above EXPAND_ALL_WARN_ROWS (answered), well under EXPAND_ALL_MAX_ROWS;
+		// 20 x 25 rows: above EXPAND_ALL_WARN_ROWS (answered), under EXPAND_ALL_MAX_ROWS;
 		// MAX_CONCURRENT_REQUESTS slots make the loads arrive in waves.
 		for ( let id = 1; id <= 20; id++ ) {
-			counts[ id ] = 50;
-			parents.push( parent( id, 50 ) );
+			counts[ id ] = 25;
+			parents.push( parent( id, 25 ) );
 		}
 
 		const { fetch } = fakeFetch( counts, { delay: 30 } );
@@ -979,7 +979,7 @@ describe( 'expandAll progressive commits', () => {
 		} );
 		unsubscribe();
 
-		expect( result.current.rows ).toHaveLength( 20 + 1000 );
+		expect( result.current.rows ).toHaveLength( 20 + 500 );
 		// About one commit per BULK_PUBLISH_ROWS rows: several, never one per parent.
 		expect( loadedAtEmit.length ).toBeGreaterThanOrEqual( 3 );
 		expect( loadedAtEmit.length ).toBeLessThanOrEqual( 10 );
@@ -988,7 +988,7 @@ describe( 'expandAll progressive commits', () => {
 		expect( loadedAtEmit[ 0 ] ).toBeLessThan( 20 );
 		expect( loadedAtEmit.at( -1 ) ).toBe( 20 );
 		expect( [ ...loadedAtEmit ].sort( ( a, b ) => a - b ) ).toEqual( loadedAtEmit );
-		expect( Math.ceil( 1000 / BULK_PUBLISH_ROWS ) ).toBeGreaterThanOrEqual( loadedAtEmit.length - 1 );
+		expect( Math.ceil( 500 / BULK_PUBLISH_ROWS ) ).toBeGreaterThanOrEqual( loadedAtEmit.length - 1 );
 	} );
 } );
 

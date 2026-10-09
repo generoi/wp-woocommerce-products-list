@@ -475,7 +475,7 @@ final class Revert
         Logger::setReverts($reverts);
 
         try {
-            return self::write($rows, $fields, $batchId, $force, $relative);
+            return self::write($rows, $fields, $batchId, $force, $relative, $reverts);
         } finally {
             Logger::setReverts('');
         }
@@ -485,7 +485,7 @@ final class Revert
      * @param  array<int, array<string, mixed>>  $rows
      * @return array{batch_id: string, results: array<int, array<string, mixed>>, items: array<int, mixed>}
      */
-    private static function write(array $rows, ?string $fields, ?string $batchId, bool $force, bool $relative = false): array
+    private static function write(array $rows, ?string $fields, ?string $batchId, bool $force, bool $relative = false, string $reverts = ''): array
     {
         $plan = self::plan($rows);
         $batchId = $batchId !== null && $batchId !== '' ? $batchId : wp_generate_uuid4();
@@ -501,6 +501,9 @@ final class Revert
 
         if (! $force) {
             $relativeFields = $relative ? self::relativeFields() : [];
+            // Fields an earlier revert already put back: taking the batch's
+            // change off them again would undo it twice.
+            $reverted = self::revertedFields($reverts, array_map('intval', array_keys($plan['final'])));
             $skippedRows = [];
 
             foreach ($plan['final'] as $id => $final) {
@@ -517,7 +520,7 @@ final class Revert
                 $adjusted = [];
 
                 foreach ($current as $field => $value) {
-                    $target = in_array($field, $relativeFields, true)
+                    $target = in_array($field, $relativeFields, true) && ! isset($reverted[$id][$field])
                         ? self::relativeValue(self::plannedOld($plan, $id, $field), $final[$field] ?? null, $value)
                         : null;
 
@@ -557,11 +560,18 @@ final class Revert
                 $conflicts = array_keys($current);
                 $labels = array_map([self::class, 'fieldLabel'], $conflicts);
                 $post = get_post($id);
-                $message = sprintf(
-                    /* translators: %s: comma-separated field names */
-                    _n('%s was changed again after this batch and was left as it is.', '%s were changed again after this batch and were left as they are.', count($conflicts), 'wp-woocommerce-products-list'),
-                    implode(', ', $labels)
-                );
+                $alreadyReverted = array_values(array_filter($conflicts, static fn (string $field): bool => isset($reverted[$id][$field])));
+                $message = $alreadyReverted !== []
+                    ? sprintf(
+                        /* translators: %s: comma-separated field names */
+                        _n('%s was already put back by an earlier revert of this batch and was left as it is.', '%s were already put back by an earlier revert of this batch and were left as they are.', count($alreadyReverted), 'wp-woocommerce-products-list'),
+                        implode(', ', array_map([self::class, 'fieldLabel'], $alreadyReverted))
+                    )
+                    : sprintf(
+                        /* translators: %s: comma-separated field names */
+                        _n('%s was changed again after this batch (by an order or another edit) and was left as it is.', '%s were changed again after this batch (by an order or another edit) and were left as they are.', count($conflicts), 'wp-woocommerce-products-list'),
+                        implode(', ', $labels)
+                    );
 
                 $results[] = [
                     'id' => $id,
@@ -576,8 +586,11 @@ final class Revert
                     'current' => $current,
                     'batch' => array_intersect_key($final, $current),
                     'expected' => $expected,
-                    // Every conflicting field can be undone relatively (`relative: true`).
-                    'relative' => array_diff($conflicts, self::relativeFields()) === [],
+                    // Every conflicting field can be undone relatively (`relative: true`):
+                    // not once an earlier revert has put it back.
+                    'relative' => $alreadyReverted === [] && array_diff($conflicts, self::relativeFields()) === [],
+                    // Fields an earlier revert of this batch already put back.
+                    'already_reverted' => $alreadyReverted,
                     'message' => $message,
                 ];
 
@@ -593,7 +606,7 @@ final class Revert
                         'new_value' => $expected[$field],
                         'status' => Logger::STATUS_SKIPPED,
                         'message' => $message,
-                        'context' => ['reason' => 'conflict', 'batch_value' => $final[$field] ?? null],
+                        'context' => ['reason' => 'conflict', 'batch_value' => $final[$field] ?? null] + (isset($reverted[$id][$field]) ? ['already_reverted' => true] : []),
                     ];
                 }
             }
@@ -642,6 +655,98 @@ final class Revert
         }
 
         return ['batch_id' => $batchId, 'results' => $results, 'items' => $items];
+    }
+
+    /**
+     * What a revert of these rows would leave alone, without writing: the
+     * objects whose fields changed again since the batch (an order, a
+     * stock movement, another edit) and those an earlier revert of the
+     * batch already put back. Same comparison as `apply()`.
+     *
+     * @param  array<int, array<string, mixed>>  $rows  the batch's log rows (of the checked objects)
+     * @param  string  $reverts  the batch being reverted
+     * @return array<int, array{id: int, object_type: string, parent_id: int, name: string, fields: array<int, string>, labels: array<int, string>, current: array<string, ?string>, batch: array<string, ?string>, expected: array<string, ?string>, relative: bool, already_reverted: array<int, string>}>
+     */
+    public static function check(array $rows, string $reverts): array
+    {
+        $plan = self::plan($rows);
+
+        if ($plan['final'] === []) {
+            return [];
+        }
+
+        $ids = array_map('intval', array_keys($plan['final']));
+        _prime_post_caches($ids, true, true);
+        Rows::primeRawMetaOf($ids);
+        $reverted = self::revertedFields($reverts, $ids);
+        $relativeFields = self::relativeFields();
+        $changed = [];
+
+        foreach ($plan['final'] as $id => $final) {
+            $id = (int) $id;
+            $current = self::conflictValues($id, $final);
+
+            if ($current === []) {
+                continue;
+            }
+
+            [$type, $parent] = self::planType($plan, $id);
+            $fields = array_keys($current);
+            $alreadyReverted = array_values(array_filter($fields, static fn (string $field): bool => isset($reverted[$id][$field])));
+            $expected = [];
+
+            foreach ($fields as $field) {
+                $expected[$field] = self::plannedOld($plan, $id, $field);
+            }
+
+            $post = get_post($id);
+            $changed[] = [
+                'id' => $id,
+                'object_type' => $type,
+                'parent_id' => $parent,
+                'name' => $post !== null ? (string) $post->post_title : '',
+                'fields' => $fields,
+                'labels' => array_map([self::class, 'fieldLabel'], $fields),
+                'current' => $current,
+                'batch' => array_intersect_key($final, $current),
+                'expected' => $expected,
+                'relative' => $alreadyReverted === [] && array_diff($fields, $relativeFields) === [],
+                'already_reverted' => $alreadyReverted,
+            ];
+        }
+
+        return $changed;
+    }
+
+    /**
+     * The fields of these objects that a revert of the batch already wrote
+     * (`ok` rows whose `reverts` column names it): id => field => true.
+     * One query on the indexed `reverts` column.
+     *
+     * @param  array<int, int>  $ids
+     * @return array<int, array<string, true>>
+     */
+    public static function revertedFields(string $reverts, array $ids): array
+    {
+        global $wpdb;
+
+        $ids = array_values(array_unique(array_filter($ids)));
+
+        if ($reverts === '' || $ids === []) {
+            return [];
+        }
+
+        $table = Table::name();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT DISTINCT object_id, field FROM {$table} WHERE reverts = %s AND status = %s AND object_id IN ({$placeholders})", array_merge([$reverts, Logger::STATUS_OK], $ids)), ARRAY_A);
+        $fields = [];
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            $fields[(int) $row['object_id']][(string) $row['field']] = true;
+        }
+
+        return $fields;
     }
 
     /**

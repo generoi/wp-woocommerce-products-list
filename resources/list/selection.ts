@@ -30,6 +30,7 @@ import type { ListResult } from '../api/client';
 import { CORE_REQUEST_FIELDS } from '../api/query';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
+import { subscribeRemoved } from '../store/products';
 import { getItemId } from '../types';
 import type { BatchResult, ProductListItem, QueryParams } from '../types';
 
@@ -152,7 +153,7 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 	useEffect( () => () => cancelSelectAll(), [ cancelSelectAll ] );
 
 	// Rows that no longer exist (trashed, deleted, or gone by the time a save
-	// reached them) leave the selection. Saved rows and the rows an action
+	// or an editor reached them) leave the selection. Saved rows and the rows an action
 	// processed stay: the next bulk step works on the same set, and rows that
 	// failed are still there for a retry.
 	useEffect( () => {
@@ -175,10 +176,13 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 			drop( ( result?.errors ?? [] ).filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id ) );
 		} );
 		addAction( ACTIONS.deleted, namespace, ( ids: number[] ) => drop( Array.isArray( ids ) ? ids : [] ) );
+		// Rows dropped from the list for any reason (an editor found them trashed or deleted meanwhile, a restore out of the Trash tab).
+		const unsubscribe = subscribeRemoved( drop );
 
 		return () => {
 			removeAction( ACTIONS.saved, namespace );
 			removeAction( ACTIONS.deleted, namespace );
+			unsubscribe();
 		};
 	}, [] );
 

@@ -5,7 +5,7 @@ import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { resetHierarchyStore } from '../../resources/hierarchy/use-hierarchy';
 import { setSettings } from '../../resources/settings';
-import { PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, isEdited, markEdited, patchItems, refreshParentsOf, resetEditedRows, retainEditedRows, useProductList } from '../../resources/store/products';
+import { COUNTS_KEY, PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, isEdited, markEdited, patchItems, refreshParentsOf, removeItems, resetEditedRows, retainEditedRows, subscribeRemoved, useProductList, variationsKey } from '../../resources/store/products';
 import type { View } from '../../resources/dataviews';
 import { cache } from '../../resources/store/query-cache';
 import type { ListResult } from '../../resources/api/client';
@@ -199,5 +199,32 @@ describe( 'edited rows that leave the filter', () => {
 		expect( result.current.total ).toBe( 1 );
 
 		unmount();
+	} );
+} );
+
+describe( 'removeItems', () => {
+	setup();
+
+	it( 'drops the rows, tells the listeners, refetches the counts and updates the parents of removed variations', async () => {
+		await seedPage( [ parent( 10 ), parent( 11 ), normalizeProduct( { id: 12, type: 'simple', name: 'S' } ) ] );
+		await cache.fetch< ListResult< ProductListItem > >( variationsKey( 10, 1 ), async () => ( { items: [ normalizeVariation( { id: 1001 }, 10 ), normalizeVariation( { id: 1002 }, 10 ) ], total: 2, totalPages: 1 } ) );
+		await cache.fetch( COUNTS_KEY, async () => ( { all: 3 } ) );
+		listProducts.mockResolvedValue( { items: [ { ...parent( 10 ), _childCount: 1, wc_products_list: { variation_count: 1, edit_link: '', can_edit: true, can_delete: true, parent_id: 0 } } ], total: 1, totalPages: 1 } );
+		const removed = vi.fn();
+		const unsubscribe = subscribeRemoved( removed );
+
+		removeItems( [ 1002, 12 ] );
+		unsubscribe();
+
+		expect( removed ).toHaveBeenCalledWith( [ 1002, 12 ] );
+		const page = cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data;
+		expect( page?.items.map( ( item ) => item.id ) ).toEqual( [ 10, 11 ] );
+		// The parent shows one variation fewer at once, then its derived fields are refetched.
+		expect( page?.items[ 0 ] ).toMatchObject( { id: 10, _childCount: 1, _hasChildren: true, wc_products_list: { variation_count: 1 } } );
+		expect( page?.items[ 1 ] ).toMatchObject( { id: 11, _childCount: 2 } );
+		expect( cache.get< ListResult< ProductListItem > >( variationsKey( 10, 1 ) )?.data?.items.map( ( item ) => item.id ) ).toEqual( [ 1001 ] );
+		// Nobody watches the counts here, so the invalidation drops them (a mounted tab bar refetches).
+		expect( cache.get( COUNTS_KEY ) ).toBeUndefined();
+		await vi.waitFor( () => expect( listProducts ).toHaveBeenCalledWith( expect.objectContaining( { include: '10', _fields: PARENT_DERIVED_FIELDS.join( ',' ) } ) ) );
 	} );
 } );

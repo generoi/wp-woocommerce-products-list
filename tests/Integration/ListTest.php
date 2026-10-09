@@ -352,6 +352,52 @@ class ListTest extends RestTestCase
         $this->assertSame([$gallery], array_column($data['images'], 'id'));
     }
 
+    public function test_list_mode_writes_keep_the_gallery_for_save_listeners(): void
+    {
+        $featured = self::factory()->attachment->create(['post_mime_type' => 'image/jpeg']);
+        update_post_meta($featured, '_wp_attached_file', '2026/10/featured.jpg');
+        $gallery = [];
+
+        foreach (['a', 'b'] as $name) {
+            $gallery[] = $attachment = self::factory()->attachment->create(['post_mime_type' => 'image/jpeg']);
+            update_post_meta($attachment, '_wp_attached_file', '2026/10/'.$name.'.jpg');
+        }
+
+        $id = $this->simpleProduct(['image_id' => $featured, 'gallery_image_ids' => $gallery])->get_id();
+
+        // An ERP / feed sync that reads the gallery while the product is saved.
+        $seen = [];
+        $listener = static function (int $productId) use (&$seen, $id): void {
+            if ($productId === $id) {
+                $seen[] = wc_get_product($productId)->get_gallery_image_ids();
+            }
+        };
+        add_action('woocommerce_update_product', $listener);
+        $inserted = [];
+        $insert = static function (\WC_Product $product) use (&$inserted): void {
+            $inserted[] = $product->get_gallery_image_ids();
+        };
+        add_action('woocommerce_rest_insert_product_object', $insert);
+
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $id, 'menu_order' => 7]]], [], ['fields' => 'id,images']);
+        $this->assertStatus(200, $response);
+        $this->assertNotEmpty($seen);
+        $this->assertSame([$gallery], array_unique($seen, SORT_REGULAR));
+        $this->assertSame([$gallery], $inserted);
+        // The response row is still the list's: featured image only.
+        $this->assertSame([$featured], array_column($this->data($response)['update'][0]['images'], 'id'));
+
+        // Actions save outside the wc/v3 controllers: the gallery is whole there too.
+        $seen = [];
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/actions/feature', ['ids' => [$id], 'args' => ['featured' => true]]));
+        $this->assertNotEmpty($seen);
+        $this->assertSame([$gallery], array_unique($seen, SORT_REGULAR));
+
+        remove_action('woocommerce_update_product', $listener);
+        remove_action('woocommerce_rest_insert_product_object', $insert);
+        $this->assertSame($gallery, wc_get_product($id)->get_gallery_image_ids());
+    }
+
     public function test_product_query_args_filter_runs_last_and_only_in_list_mode(): void
     {
         $keep = $this->simpleProduct()->get_id();

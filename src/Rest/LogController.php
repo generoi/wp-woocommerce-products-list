@@ -99,6 +99,20 @@ final class LogController
             ],
         ]);
 
+        register_rest_route(Plugin::REST_NAMESPACE, '/log/batch/(?P<batch_id>[A-Za-z0-9_-]{1,64})/check', [
+            'methods' => 'GET',
+            'callback' => [$this, 'check'],
+            'permission_callback' => $permission,
+            'args' => [
+                'batch_id' => ['type' => 'string', 'required' => true],
+                'ids' => [
+                    'type' => 'array',
+                    'items' => ['type' => 'integer'],
+                    'description' => 'Check only these objects of the batch (one chunk of GET /log/batch/{id}); the first chunk when absent.',
+                ],
+            ],
+        ]);
+
         register_rest_route(Plugin::REST_NAMESPACE, '/log/skipped', [
             'methods' => 'POST',
             'callback' => [$this, 'skipped'],
@@ -565,6 +579,57 @@ final class LogController
             $batchId,
             (bool) $request->get_param('relative')
         ));
+    }
+
+    /**
+     * GET /log/batch/{id}/check: a dry run of the revert for one chunk of
+     * the batch (`ids`, or the first chunk). Says which items changed
+     * again since the batch (an order, a stock movement, another edit) or
+     * were already put back by an earlier revert, and would be left as
+     * they are; writes nothing.
+     */
+    public function check(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        global $wpdb;
+
+        $batchId = (string) $request['batch_id'];
+        $table = Table::name();
+        $chunk = Revert::chunk();
+        $ids = $request->get_param('ids');
+        $ids = is_array($ids) ? array_values(array_unique(array_filter(array_map('intval', $ids)))) : null;
+
+        if ($ids !== null && ($ids === [] || count($ids) > $chunk)) {
+            return new WP_Error('wc_products_list_invalid_ids', sprintf(
+                /* translators: %d: objects per request */
+                __('ids must name between 1 and %d objects.', 'wp-woocommerce-products-list'),
+                $chunk
+            ), ['status' => 400]);
+        }
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE batch_id = %s ORDER BY id ASC", $batchId), ARRAY_A);
+
+        if (! is_array($rows) || $rows === []) {
+            return new WP_Error('wc_products_list_batch_not_found', __('No such batch.', 'wp-woocommerce-products-list'), ['status' => 404]);
+        }
+
+        $objects = array_column(Revert::objects($rows)['objects'], 'id');
+        $checked = $ids !== null ? array_values(array_intersect($objects, $ids)) : array_slice($objects, 0, $chunk);
+        $keep = array_flip($checked);
+        $rows = array_values(array_filter($rows, static fn (array $row): bool => isset($keep[(int) $row['object_id']])));
+        $changed = Revert::check($rows, $batchId);
+
+        return rest_ensure_response([
+            'batch_id' => $batchId,
+            'checked' => count($checked),
+            'objects' => count($objects),
+            // Every object of the batch was checked (it fits one chunk, or `ids` named the rest).
+            'complete' => count($checked) === count($objects),
+            // Items a revert would leave alone: changed since, or already put back.
+            'changed' => count($changed),
+            'already_reverted' => count(array_filter($changed, static fn (array $item): bool => $item['already_reverted'] !== [])),
+            'items' => $changed,
+        ]);
     }
 
     /**

@@ -59,6 +59,8 @@ export interface EditError {
 export interface EditErrorsProps {
 	errors: EditError[];
 	items: ProductListItem[];
+	/** Names known beyond `items` (a row a save failed on that is in no list any more); `items` win. */
+	names?: ReadonlyMap< number, string >;
 	fieldLabels: Record< string, string >;
 	title?: string;
 	/** `error` (default) or `warning` for a list the user may accept. */
@@ -68,12 +70,14 @@ export interface EditErrorsProps {
 	onFocusField?: ( fieldId: string ) => void;
 }
 
-export function EditErrors( { errors, items, fieldLabels, title, status = 'error', className = 'wc-pl-edit__errors', onFocusField }: EditErrorsProps ) {
+export function EditErrors( { errors, items, names: knownNames, fieldLabels, title, status = 'error', className = 'wc-pl-edit__errors', onFocusField }: EditErrorsProps ) {
 	if ( errors.length === 0 ) {
 		return null;
 	}
 
-	const names = new Map( items.map( ( item ) => [ item.id, itemLabel( item ) ] ) );
+	const names = new Map< number, string >( knownNames ?? [] );
+
+	items.forEach( ( item ) => names.set( item.id, itemLabel( item ) ) );
 	const shown = errors.slice( 0, 50 );
 
 	return (

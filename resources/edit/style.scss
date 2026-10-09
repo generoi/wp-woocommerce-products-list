@@ -607,6 +607,21 @@ html.wc-pl-editing .wc-products-list__notices {
 
 .wc-pl-bulk-numeric__round {
 	margin-top: 8px;
+
+	// Kept in the layout while it does not apply: picking an operation or a rounding moves nothing below.
+	&.is-inactive,
+	.is-inactive {
+		visibility: hidden;
+	}
+}
+
+// The operation's note sits in a slot two lines high whether or not there is one, for the same reason.
+.wc-pl-bulk-numeric__note {
+	display: block;
+	min-height: calc( 2 * 1.4em );
+	margin-top: 4px;
+	font-size: 12px;
+	line-height: 1.4;
 }
 
 // The direction of a numeric bulk edit under its summary line; a sale price that rises is flagged.
@@ -688,4 +703,15 @@ html.wc-pl-editing .wc-products-list__notices {
 	padding-left: 8px;
 	border-left: 4px solid #dba617;
 	color: #614200;
+}
+
+// The language tools' runs waiting for Update, listed next to the buttons.
+.wc-pl-edit__staged {
+	margin: 8px 0;
+
+	ul {
+		margin: 4px 0 0;
+		padding-inline-start: 18px;
+		list-style: disc;
+	}
 }

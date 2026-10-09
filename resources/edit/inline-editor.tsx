@@ -28,7 +28,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
 import type { KeyboardEvent } from 'react';
-import { getVariations, logSkipped } from '../api/client';
+import { getVariations, logSkipped, newBatchId } from '../api/client';
 import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
@@ -38,16 +38,17 @@ import type { ProductListItem, QuickEditTab, Settings } from '../types';
 import { rowFields } from '../actions/context';
 import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
-import { fetchAllVariations, variationFetchFields } from './apply-to-variations';
+import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { editFetchFields, hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
-import { lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
+import { changedSinceLoaded, editFetchFields, hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { hasLoadRelativeOps, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary, describeSiteDateTime } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
 import { isGoneCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
-import { LanguageTools } from './language-tools';
+import { LanguageTools, toolIds } from './language-tools';
+import type { StagedTool } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
 import { buildInlineForm, buildTabs, fieldsOfTab, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
@@ -304,13 +305,15 @@ export function nextRowOnScreen( id: number, rows: ProductListItem[] = getCurren
  * select (Chrome hands the Escape that closes its dropdown to the page), a
  * combobox or an open popup. It closes that control, never the editor.
  */
-export function escapeBelongsToControl( target: EventTarget | null ): boolean {
+export function escapeBelongsToControl( target: EventTarget | null, openSelect: Element | null = null ): boolean {
 	if ( ! ( target instanceof Element ) ) {
 		return false;
 	}
 
+	// A native select keeps the Escape only while its dropdown is open (a press or a key opened it):
+	// focus sitting on a closed select, as right after a bulk editor opens, lets Escape cancel.
 	if ( target instanceof HTMLSelectElement ) {
-		return true;
+		return target === openSelect;
 	}
 
 	if ( target.getAttribute( 'aria-expanded' ) === 'true' ) {
@@ -331,6 +334,11 @@ function isTextEntry( target: EventTarget | null ): target is HTMLInputElement {
 
 	// Token and combobox inputs use Enter to pick a suggestion.
 	return ! target.getAttribute( 'aria-autocomplete' ) && ! target.closest( '[role="combobox"], .components-form-token-field, [aria-haspopup="listbox"]' );
+}
+
+/** The keys that open a native select's dropdown (Alt+Arrow everywhere, Space, and plain arrows on macOS). */
+function opensSelect( event: KeyboardEvent< HTMLFormElement > ): boolean {
+	return event.key === ' ' || event.key === 'F4' || ( ( event.key === 'ArrowDown' || event.key === 'ArrowUp' ) && ( event.altKey || /Mac/i.test( navigator.platform ) ) );
 }
 
 /**
@@ -649,9 +657,37 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const [ submitRequested, setSubmitRequested ] = useState< false | 'save' | 'next' >( false );
 	const [ progress, setProgress ] = useState( { done: 0, total: 0 } );
 	const [ variations, setVariations ] = useState< VariationLoad >( IDLE_LOAD );
+	// Bumped when fetched variations are known to be stale (a save wrote some, someone else changed their parent): the forgotten parents load again.
+	const [ variationEpoch, setVariationEpoch ] = useState( 0 );
+	// Why the warning list is up: rows a decrease clamps at zero, or rows saved by someone else since the editor loaded them.
+	const [ warningKind, setWarningKind ] = useState< 'clamp' | 'stale' >( 'clamp' );
+	// The names of the rows a save failed on, as they were when it ran (a variation deleted meanwhile is in no list any more).
+	const [ errorNames, setErrorNames ] = useState< ReadonlyMap< number, string > >( () => new Map() );
+	// The language tools' runs added to this Update (they save with it, in its History batch), in the order added.
+	const [ staged, setStaged ] = useState< ReadonlyMap< string, StagedTool > >( () => new Map() );
+	const stagedCount = staged.size;
+	const stageTool = useCallback( ( key: string, entry: StagedTool | null ) => {
+		setStaged( ( current ) => {
+			if ( ! entry && ! current.has( key ) ) {
+				return current;
+			}
+
+			const next = new Map( current );
+
+			if ( entry ) {
+				next.set( key, entry );
+			} else {
+				next.delete( key );
+			}
+
+			return next;
+		} );
+		setErrors( [] );
+	}, [] );
 	const rootRef = useRef< HTMLFormElement >( null );
 	const formRef = useRef< HTMLDivElement >( null );
 	const focusedRef = useRef( false );
+	const openSelectRef = useRef< HTMLSelectElement | null >( null );
 	const saveRef = useRef< ( advance?: boolean, implicit?: boolean ) => Promise< void > >( async () => {} );
 
 	const fieldsWithToggle = useMemo( () => withScheduleSale( allFields ), [ allFields ] );
@@ -783,54 +819,107 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	// Load the variations of the selected variable parents once the option is on,
 	// so relative price ops, the sale < regular check and the plan see their current values.
+	// Keyed on the parent ids and the fetched keys, not on the rows' identity: a tab load,
+	// a hydration merge or a list patch rebuilds `items` without changing what to fetch.
+	// Parents already fetched (with the same keys) are kept; only new ones are loaded.
+	const variableParentKey = variableParents.map( ( parent ) => parent.id ).join( ',' );
+	const variationFieldKey = useMemo( () => {
+		const sellableIds = Object.fromEntries( visibleFields.filter( isSellableField ).map( ( field ) => [ field.id, true ] ) );
+
+		return variationFetchFields( fieldsWithToggle, sellableIds ).sort().join( ',' );
+	}, [ visibleFields, fieldsWithToggle ] );
+	const variationCacheRef = useRef< { fieldKey: string; byParent: Map< number, ProductListItem[] > } >( { fieldKey: '', byParent: new Map() } );
+
 	useEffect( () => {
-		if ( ! applyToVariations || variableParents.length === 0 ) {
+		const parentIds = variableParentKey ? variableParentKey.split( ',' ).map( Number ) : [];
+
+		if ( ! applyToVariations || parentIds.length === 0 ) {
 			setVariations( IDLE_LOAD );
 
 			return;
 		}
 
-		let cancelled = false;
-		const sellableIds = Object.fromEntries( visibleFields.filter( isSellableField ).map( ( field ) => [ field.id, true ] ) );
-		const fetchFields = variationFetchFields( fieldsWithToggle, sellableIds );
-		const getPage = ( parentId: number, page: number, fieldList: string[] ) => getVariations( parentId, page, { perPage: settings.limits.perPageMax, fields: fieldList } );
+		const cache = variationCacheRef.current;
 
-		setVariations( { status: 'loading', byParent: new Map(), count: 0 } );
+		if ( cache.fieldKey !== variationFieldKey ) {
+			variationCacheRef.current = { fieldKey: variationFieldKey, byParent: new Map() };
+		}
 
-		( async () => {
+		const known = variationCacheRef.current.byParent;
+		const pick = () => {
 			const byParent = new Map< number, ProductListItem[] >();
 			let count = 0;
-			const queue = [ ...variableParents ];
 
-			const worker = async () => {
-				while ( queue.length ) {
-					const parent = queue.shift()!;
-					const rows = await fetchAllVariations( parent.id, fetchFields, getPage );
+			for ( const id of parentIds ) {
+				const rows = known.get( id );
 
-					byParent.set( parent.id, rows );
+				if ( rows ) {
+					byParent.set( id, rows );
 					count += rows.length;
+				}
+			}
+
+			return { byParent, count };
+		};
+		const queue = parentIds.filter( ( id ) => ! known.has( id ) );
+
+		if ( queue.length === 0 ) {
+			setVariations( { status: 'loaded', ...pick() } );
+
+			return;
+		}
+
+		const controller = new AbortController();
+		const fetchFields = variationFieldKey.split( ',' );
+		const getPage = ( parentId: number, page: number, fieldList: string[] ) =>
+			getVariations( parentId, page, { perPage: settings.limits.perPageMax, fields: fieldList, signal: controller.signal } );
+
+		setVariations( { status: 'loading', ...pick() } );
+
+		( async () => {
+			const worker = async () => {
+				while ( queue.length && ! controller.signal.aborted ) {
+					const parentId = queue.shift()!;
+					const rows = await fetchAllVariations( parentId, fetchFields, getPage );
+
+					if ( ! controller.signal.aborted ) {
+						known.set( parentId, rows );
+					}
 				}
 			};
 
 			try {
-				await Promise.all( Array.from( { length: Math.min( 4, queue.length ) }, worker ) );
+				await Promise.all( Array.from( { length: Math.min( VARIATION_FETCH_CONCURRENCY, queue.length ) }, worker ) );
 
-				if ( ! cancelled ) {
-					setVariations( { status: 'loaded', byParent, count } );
+				if ( ! controller.signal.aborted ) {
+					setVariations( { status: 'loaded', ...pick() } );
 				}
 			} catch ( error ) {
-				if ( ! cancelled ) {
-					setVariations( { status: 'error', byParent, count, error: error instanceof Error ? error.message : String( error ) } );
+				if ( ! controller.signal.aborted ) {
+					setVariations( { status: 'error', ...pick(), error: error instanceof Error ? error.message : String( error ) } );
 				}
 			}
 		} )();
 
 		return () => {
-			cancelled = true;
+			controller.abort();
 		};
-		// The fetched keys depend only on which sellable fields exist, not on edits.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [ applyToVariations, variableParents, settings.limits.perPageMax ] );
+	}, [ applyToVariations, variableParentKey, variationFieldKey, settings.limits.perPageMax, variationEpoch ] );
+
+	/** After a save the fetched variations are stale: the next load (a retry, a further edit) fetches them again. */
+	const forgetVariations = useCallback( ( ids?: Iterable< number > ) => {
+		const known = variationCacheRef.current.byParent;
+
+		if ( ! ids ) {
+			known.clear();
+
+			return;
+		}
+
+		for ( const id of ids ) {
+			known.delete( id );
+		}
+	}, [] );
 
 	const visibleIds = useMemo( () => new Set( visibleFields.map( ( field ) => field.id ) ), [ visibleFields ] );
 	const pendingEdits = useMemo( () => pick( state.edits, visibleIds ), [ state.edits, visibleIds ] );
@@ -852,40 +941,6 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	);
 
 	const variationsReady = ! applyToVariations || variableParents.length === 0 || variations.status === 'loaded';
-
-	const targetsForValidation = useMemo( () => {
-		if ( ! applyToVariations ) {
-			return items;
-		}
-
-		// A variation both selected and reached through its parent is one row, not two.
-		const selected = new Set( items.map( ( item ) => item.id ) );
-
-		return [ ...items, ...Array.from( variations.byParent.values() ).flat().filter( ( row ) => ! selected.has( row.id ) ) ];
-	}, [ applyToVariations, items, variations ] );
-
-	// The plan and the warnings walk every target row; on a large selection they
-	// follow the keystroke a frame later rather than slowing the input down.
-	const plannedEdits = useDeferredValue( pendingEdits );
-	const plannedCount = Object.keys( plannedEdits ).length;
-
-	/** What the save will write, skip and leave alone, for the labels and the summary. */
-	const plan = useMemo< SavePlan | null >( () => {
-		if ( loading || plannedCount === 0 || ! variationsReady ) {
-			return null;
-		}
-
-		return planSave( items, plannedEdits, editFields, settings, { applyToVariations, variationsByParent: variations.byParent, ...rowOptions } );
-	}, [ loading, plannedCount, variationsReady, items, plannedEdits, editFields, settings, applyToVariations, variations.byParent, rowOptions ] );
-
-	// Rows a stock edit would be dropped for, before the "turn on Manage stock" option is applied.
-	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( targetsForValidation, plannedEdits ) : [] ), [ plannedCount, targetsForValidation, plannedEdits ] );
-	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
-	// Rows whose current sale the edits replace (bulk only: quick edit shows the field itself).
-	const existingSales = useMemo( () => ( bulk && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ bulk, plannedCount, targetsForValidation, plannedEdits ] );
-	// Sales running now that the edits would end: the user says replace or skip before anything is written.
-	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
-	const saleChoiceNeeded = bulk && runningSales.count > 0 && saleChoice === null;
 
 	/**
 	 * After a partial failure only the failed rows are sent again: a parent
@@ -914,6 +969,49 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			carriersOnly: new Set( retried.filter( ( item ) => ! failedIds.has( item.id ) ).map( ( item ) => item.id ) ) as ReadonlySet< number >,
 		};
 	}, [ failedIds, items, variations ] );
+
+	// What the checks, the preview and the guards look at: every row, or after a partial failure only the rows
+	// the retry sends (the saved ones are done: their new sale is not "a sale running now" to replace).
+	const targetsForValidation = useMemo( () => {
+		const base = failedIds ? retryTargets.items.filter( ( item ) => ! retryTargets.carriersOnly?.has( item.id ) ) : items;
+
+		if ( ! applyToVariations ) {
+			return base;
+		}
+
+		// A variation both selected and reached through its parent is one row, not two.
+		const selected = new Set( base.map( ( item ) => item.id ) );
+
+		return [ ...base, ...Array.from( retryTargets.prefetched.values() ).flat().filter( ( row ) => ! selected.has( row.id ) ) ];
+	}, [ applyToVariations, items, failedIds, retryTargets ] );
+
+	// The plan and the warnings walk every target row; on a large selection they
+	// follow the keystroke a frame later rather than slowing the input down.
+	const plannedEdits = useDeferredValue( pendingEdits );
+	const plannedCount = Object.keys( plannedEdits ).length;
+
+	/** What the save will write, skip and leave alone, for the labels and the summary. */
+	const plan = useMemo< SavePlan | null >( () => {
+		if ( loading || plannedCount === 0 || ! variationsReady ) {
+			return null;
+		}
+
+		return planSave( retryTargets.items, plannedEdits, editFields, settings, {
+			applyToVariations,
+			variationsByParent: retryTargets.prefetched,
+			...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
+			...rowOptions,
+		} );
+	}, [ loading, plannedCount, variationsReady, retryTargets, plannedEdits, editFields, settings, applyToVariations, rowOptions ] );
+
+	// Rows a stock edit would be dropped for, before the "turn on Manage stock" option is applied.
+	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( targetsForValidation, plannedEdits ) : [] ), [ plannedCount, targetsForValidation, plannedEdits ] );
+	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
+	// Rows whose current sale the edits replace (bulk only: quick edit shows the field itself).
+	const existingSales = useMemo( () => ( bulk && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ bulk, plannedCount, targetsForValidation, plannedEdits ] );
+	// Sales running now that the edits would end: the user says replace or skip before anything is written.
+	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
+	const saleChoiceNeeded = bulk && runningSales.count > 0 && saleChoice === null;
 
 	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) ), [ bulk, selectedRows ] );
 
@@ -1087,12 +1185,83 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}, 0 );
 	};
 
+	/**
+	 * Run the staged tools under the Update's batch, one after the other in the order they were added. A tool
+	 * that ran leaves the staged list; one that failed stays there (the next Update runs it again) and is reported.
+	 */
+	const runStagedTools = async ( rows: ProductListItem[], batchId: string ): Promise< { ran: number; errors: EditError[] } > => {
+		const errors: EditError[] = [];
+		let ran = 0;
+		const ranTabs = new Set< string >();
+
+		for ( const entry of Array.from( staged.values() ) ) {
+			const ids = toolIds( entry.def, rows );
+
+			if ( ids.length === 0 ) {
+				stageTool( entry.key, null );
+				continue;
+			}
+
+			try {
+				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true } );
+				ran++;
+				ranTabs.add( entry.tabId );
+				stageTool( entry.key, null );
+			} catch ( reason ) {
+				errors.push( {
+					id: 0,
+					message: `${ entry.def.label } (${ entry.tabLabel }): ${ reason instanceof Error ? reason.message : __( 'The action failed.', 'wp-woocommerce-products-list' ) }`,
+				} );
+			}
+		}
+
+		// The tabs whose values a tool changed load again if the editor stays open.
+		if ( ranTabs.size && mountedRef.current ) {
+			setLoadedTabs( ( previous ) => new Set( Array.from( previous ).filter( ( id ) => ! ranTabs.has( id ) ) ) );
+		}
+
+		return { ran, errors };
+	};
+
+	/**
+	 * Load again the rows someone else saved since the editor loaded them (every tab visited so far), and the
+	 * variations of such variable parents, so the preview and the next Update work on the values stored now.
+	 */
+	const refreshStale = async ( rows: ProductListItem[] ) => {
+		const wanted = Array.from( new Set( Array.from( loadedTabs ).flatMap( ( entry ) => editFetchFields( allFields, rows, mode, { tab: entry } ) ) ) ).sort();
+		const { items: full } = await hydrateSelection( rows, wanted );
+
+		if ( ! mountedRef.current ) {
+			return;
+		}
+
+		patchItems( full );
+		setHydrated( ( current ) => {
+			const next = new Map( current );
+
+			for ( const row of full ) {
+				const known = next.get( row.id );
+
+				next.set( row.id, known ? ( mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem ) : row );
+			}
+
+			return next;
+		} );
+
+		const parents = rows.filter( isVariableParent ).map( ( row ) => row.id );
+
+		if ( applyToVariations && parents.length ) {
+			forgetVariations( parents );
+			setVariationEpoch( ( epoch ) => epoch + 1 );
+		}
+	};
+
 	const save = async ( advance = false, implicit = false ) => {
 		if ( saving || loading ) {
 			return;
 		}
 
-		if ( pendingCount === 0 ) {
+		if ( pendingCount === 0 && stagedCount === 0 ) {
 			if ( state.hasInput ) {
 				notify.info( __( 'Nothing changed: the values equal the current ones.', 'wp-woocommerce-products-list' ) );
 			}
@@ -1109,68 +1278,77 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		setErrors( [] );
 
-		const opErrors = validateNumericOps( pendingEdits, visibleFields, settings ).map( ( error ) => ( { id: 0, ...error } ) );
+		// A previous Update saved every field edit (only rows deleted meanwhile failed): what is left are the staged tool runs.
+		const fieldsDone = failedIds !== null && failedIds.size === 0;
+		const runFields = pendingCount > 0 && ! fieldsDone;
 
-		if ( opErrors.length ) {
-			reportProblems( opErrors, 'errors' );
+		if ( runFields ) {
+			const opErrors = validateNumericOps( pendingEdits, visibleFields, settings ).map( ( error ) => ( { id: 0, ...error } ) );
 
-			return;
-		}
+			if ( opErrors.length ) {
+				reportProblems( opErrors, 'errors' );
 
-		if ( blockOnValidity() ) {
-			return;
-		}
+				return;
+			}
 
-		if ( ! variationsReady ) {
-			reportProblems( [ { id: 0, message: variations.error ?? __( 'The variations are still loading.', 'wp-woocommerce-products-list' ) } ], 'errors' );
+			if ( blockOnValidity() ) {
+				return;
+			}
 
-			return;
-		}
+			if ( ! variationsReady ) {
+				reportProblems( [ { id: 0, message: variations.error ?? __( 'The variations are still loading.', 'wp-woocommerce-products-list' ) } ], 'errors' );
 
-		const projected = validateBulkNumericEdits( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
+				return;
+			}
 
-		if ( projected.length ) {
-			reportProblems( projected, 'errors' );
+			const projected = validateBulkNumericEdits( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
 
-			return;
-		}
+			if ( projected.length ) {
+				reportProblems( projected, 'errors' );
 
-		if ( saleChoiceNeeded ) {
-			setErrors( [
-				{
-					id: 0,
-					message: sprintf(
-						/* translators: %d: number of rows on sale now */
-						_n( 'Choose what happens to the %d sale running now: replace it or skip that row.', 'Choose what happens to the %d sales running now: replace them or skip those rows.', runningSales.count, 'wp-woocommerce-products-list' ),
-						runningSales.count
-					),
-				},
-			] );
-			setTimeout( () => {
-				if ( mountedRef.current ) {
-					focusWithin( rootRef.current, '.wc-pl-edit__sale-warning input[type="radio"]' );
-				}
-			}, 0 );
+				return;
+			}
 
-			return;
-		}
+			if ( saleChoiceNeeded ) {
+				setErrors( [
+					{
+						id: 0,
+						message: sprintf(
+							/* translators: %d: number of rows on sale now */
+							_n( 'Choose what happens to the %d sale running now: replace it or skip that row.', 'Choose what happens to the %d sales running now: replace them or skip those rows.', runningSales.count, 'wp-woocommerce-products-list' ),
+							runningSales.count
+						),
+					},
+				] );
+				setTimeout( () => {
+					if ( mountedRef.current ) {
+						focusWithin( rootRef.current, '.wc-pl-edit__sale-warning input[type="radio"]' );
+					}
+				}, 0 );
 
-		// Rows a decrease would push below zero are clamped; say so and ask once.
-		const clamped = projectWarnings( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
-		const warningKey = clamped.map( ( warning ) => `${ warning.id }:${ warning.field }` ).join( '|' );
+				return;
+			}
 
-		// The yes is a press of "Update anyway" itself: an Enter in a field (or a select) shows the question again instead.
-		if ( clamped.length && ( acknowledged !== warningKey || implicit ) ) {
-			reportProblems(
-				clamped.map( ( warning ) => ( { id: warning.id, field: warning.field, message: warning.message } ) ),
-				'warnings'
-			);
-			setAcknowledged( warningKey );
+			// Rows a decrease would push below zero are clamped; say so and ask once.
+			const clamped = projectWarnings( targetsForValidation, pendingEdits, editFields, settings, rowOptions );
+			const warningKey = clamped.map( ( warning ) => `${ warning.id }:${ warning.field }` ).join( '|' );
 
-			return;
+			// The yes is a press of "Update anyway" itself: an Enter in a field (or a select) shows the question again instead.
+			if ( clamped.length && ( acknowledged !== warningKey || implicit ) ) {
+				setWarningKind( 'clamp' );
+				reportProblems(
+					clamped.map( ( warning ) => ( { id: warning.id, field: warning.field, message: warning.message } ) ),
+					'warnings'
+				);
+				setAcknowledged( warningKey );
+
+				return;
+			}
 		}
 
 		// From here on the editor works on these rows, whatever the selection does meanwhile.
+		const frozenBefore = frozenRows;
+
 		setFrozenRows( selectedRows );
 		setSaving( true );
 		setErrors( [] );
@@ -1182,16 +1360,37 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		try {
 			// Rows trashed or deleted since the editor loaded them are left out and named, not written in the Trash as if nothing happened.
-			const changed = bulk ? await recheckStatuses( retryTargets.items ) : { trashed: [], missing: [] };
+			// With a relative price op the same request also brings each row's last-modified stamp: a row saved by someone
+			// else meanwhile would get the op applied to a value it no longer has.
+			const checkBases = runFields && bulk && hasLoadRelativeOps( pendingEdits );
+			// The rows this Update writes: the field edits' (all, or the failed ones on a retry), and the staged tools' (every row).
+			const checkItems = runFields ? ( stagedCount ? Array.from( new Map( [ ...retryTargets.items, ...items ].map( ( item ) => [ item.id, item ] ) ).values() ) : retryTargets.items ) : items;
+			let changed: { trashed: number[]; missing: number[] } = { trashed: [], missing: [] };
+			let stale: ProductListItem[] = [];
+
+			if ( checkBases ) {
+				const check = await hydrateSelection( checkItems, [ 'id', 'status', 'date_modified_gmt' ] );
+				const goneNow = new Set( [ ...check.trashed, ...check.missing ] );
+
+				changed = { trashed: check.trashed, missing: check.missing };
+				stale = changedSinceLoaded(
+					retryTargets.items.filter( ( item ) => ! goneNow.has( item.id ) ),
+					new Map( check.items.map( ( row ) => [ row.id, row ] ) )
+				);
+			} else if ( bulk ) {
+				changed = await recheckStatuses( checkItems );
+			}
+
 			const dropped = new Set( [ ...changed.trashed, ...changed.missing ] );
 			const saveItems = dropped.size ? retryTargets.items.filter( ( item ) => ! dropped.has( item.id ) ) : retryTargets.items;
+			const toolItems = dropped.size ? items.filter( ( item ) => ! dropped.has( item.id ) ) : items;
 
 			if ( dropped.size ) {
 				dropped.forEach( ( id ) => pendingRemovalRef.current.add( id ) );
 
 				if ( mountedRef.current ) {
 					const trashedSet = new Set( changed.trashed );
-					const rows = retryTargets.items.filter( ( item ) => dropped.has( item.id ) );
+					const rows = checkItems.filter( ( item ) => dropped.has( item.id ) );
 
 					setExcluded( ( current ) => ( {
 						missing: [ ...current.missing, ...rows.filter( ( item ) => ! trashedSet.has( item.id ) ) ],
@@ -1200,20 +1399,66 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				}
 			}
 
-			const result = await saveEdits( saveItems, pendingEdits, editFields, {
-				applyToVariations,
-				source: bulk ? 'bulk' : 'quick',
-				prefetchedVariations: retryTargets.prefetched,
-				...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
-				...rowOptions,
-				onProgress: ( done, total ) => {
-					if ( mountedRef.current ) {
-						setProgress( { done, total } );
-					}
-				},
-			} );
+			if ( stale.length ) {
+				await refreshStale( stale );
 
-			const updated = result.updated.length;
+				if ( mountedRef.current ) {
+					// Nothing was written: the rows stay free to change until a save runs.
+					setFrozenRows( frozenBefore );
+					setWarningKind( 'stale' );
+					reportProblems(
+						stale.map( ( item ) => ( {
+							id: item.id,
+							message: __( 'Saved by someone else since this editor loaded it. The preview now uses its current values: check it, then press Update again.', 'wp-woocommerce-products-list' ),
+						} ) ),
+						'warnings'
+					);
+				}
+
+				return;
+			}
+
+			// The field edits and the staged tool runs of one Update are one History batch: one Undo takes all of it back.
+			const sharedBatch = stagedCount ? newBatchId() : undefined;
+			const result: SaveResult = runFields
+				? await saveEdits( saveItems, pendingEdits, editFields, {
+						applyToVariations,
+						source: bulk ? 'bulk' : 'quick',
+						prefetchedVariations: retryTargets.prefetched,
+						...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
+						...( sharedBatch ? { batchId: sharedBatch } : {} ),
+						...rowOptions,
+						onProgress: ( done, total ) => {
+							if ( mountedRef.current ) {
+								setProgress( { done, total } );
+							}
+						},
+				  } )
+				: { updated: [], errors: [], batchId: sharedBatch ?? '', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 };
+
+			// Then the staged tools, in the order they were added, once the field edits all saved (a failed field edit keeps them for the retry).
+			const tools = result.errors.length === 0 ? await runStagedTools( toolItems, result.batchId ) : { ran: 0, errors: [] as EditError[] };
+
+			if ( tools.errors.length ) {
+				failed = true;
+
+				if ( mountedRef.current ) {
+					// The field edits are saved: what is left is the tools that failed (Update retries them).
+					setFailedIds( new Set() );
+					setErrors( tools.errors );
+				}
+
+				const partial = result.updated.length > 0 || tools.ran > 0;
+
+				notify.error( tools.errors.map( ( error ) => error.message ).join( ' ' ), {
+					id: SAVED_NOTICE_ID,
+					actions: partial && canUndo() ? [ undoAction( result.batchId ) ] : undefined,
+				} );
+
+				return;
+			}
+
+			const updated = result.updated.length + tools.ran;
 
 			// What the save left out goes into the batch's audit trail as `skipped` rows (fire and forget).
 			const editKeys = Object.keys( pendingEdits );
@@ -1257,7 +1502,16 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					...selectSkipped,
 				];
 
-				notify.success( successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ), {
+				const toolsLine = tools.ran
+					? sprintf(
+							/* translators: %d: number of language changes (tool runs) */
+							_n( '%d language change applied.', '%d language changes applied.', tools.ran, 'wp-woocommerce-products-list' ),
+							tools.ran
+					  )
+					: '';
+				const fieldsLine = runFields ? successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ) : '';
+
+				notify.success( [ fieldsLine, toolsLine ].filter( Boolean ).join( ' ' ), {
 					id: SAVED_NOTICE_ID,
 					actions: savedActions.length ? savedActions : undefined,
 				} );
@@ -1292,15 +1546,32 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			if ( mountedRef.current ) {
 				const goneSet = new Set( gone );
 
+				setErrorNames( names );
 				setErrors(
 					result.errors.map( ( error ) => ( {
 						id: error.id,
-						message: goneSet.has( error.id ) ? `${ error.message } ${ __( 'It leaves the list when this editor closes.', 'wp-woocommerce-products-list' ) }` : error.message,
+						message: goneSet.has( error.id ) ? __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' ) : error.message,
 					} ) )
 				);
 				const failedNow = new Set( result.errors.filter( ( error ) => ! goneSet.has( error.id ) ).map( ( error ) => error.id ) );
 
 				setFailedIds( failedNow );
+
+				// The variations fetched for the plan are stale where this save wrote some: the parents of the failed ones load
+				// again (a retry resolves its relative ops on what they hold now), and so does each such parent's row (its stamp
+				// moved with the save, and the retry's "changed by someone else" check compares against it).
+				const carriers = new Set< number >();
+
+				for ( const [ parentId, rows ] of variations.byParent ) {
+					if ( rows.some( ( row ) => failedNow.has( row.id ) || goneSet.has( row.id ) ) ) {
+						carriers.add( parentId );
+					}
+				}
+
+				if ( carriers.size ) {
+					forgetVariations( carriers );
+					setVariationEpoch( ( epoch ) => epoch + 1 );
+				}
 
 				// A retry works on the values the rows have now, not on the ones the editor opened with: the saved rows
 				// take what the server returned, and the failed rows are fetched again (a relative op resolves on that).
@@ -1316,6 +1587,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					}
 
 					failedNow.forEach( ( id ) => next.delete( id ) );
+					carriers.forEach( ( id ) => next.delete( id ) );
 
 					return next;
 				} );
@@ -1364,8 +1636,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	// Settings typed into a language tool and not run yet count as unsaved too.
 	const [ toolsDirty, setToolsDirty ] = useState( 0 );
-	const unsavedCount = pendingCount + toolsDirty;
-	const dirty = ( state.hasInput && pendingCount > 0 ) || toolsDirty > 0;
+	// After a save whose only failures were rows deleted meanwhile, what was typed is saved: nothing is left to discard.
+	const savedAll = failedIds !== null && failedIds.size === 0;
+	const unsavedCount = ( savedAll ? 0 : pendingCount ) + toolsDirty + stagedCount;
+	const dirty = ( ! savedAll && state.hasInput && pendingCount > 0 ) || toolsDirty > 0 || stagedCount > 0;
 
 	// A running save keeps the editor mounted: the screen does not close it when the selection or the rows change meanwhile.
 	const setBusy = host.setBusy;
@@ -1443,9 +1717,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	};
 
 	const onKeyDown = ( event: KeyboardEvent< HTMLFormElement > ) => {
+		if ( event.target instanceof HTMLSelectElement && opensSelect( event ) ) {
+			openSelectRef.current = event.target;
+		}
+
 		if ( event.key === 'Escape' ) {
+			const openSelect = openSelectRef.current;
+
+			// The Escape that closes a select's dropdown closes only that.
+			openSelectRef.current = null;
+
 			// A control that used Escape itself (a closed picker, a native select's dropdown) keeps it; otherwise the editor closes, after a confirm when dirty.
-			if ( event.defaultPrevented || escapeBelongsToControl( event.target ) ) {
+			if ( event.defaultPrevented || escapeBelongsToControl( event.target, openSelect ) ) {
 				return;
 			}
 
@@ -1568,7 +1851,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// one row goes through POST products/{id} instead (api/client.ts), several cannot.
 	const needsEditOthers = ! settings.caps.editOthers && ( items.length > 1 || applyToVariations );
 	const retryable = failedIds ? failedIds.size : 0;
-	const failedButNothingToRetry = failedIds !== null && retryable === 0;
+	// Staged tools a failed Update left are still to run: Update retries them.
+	const failedButNothingToRetry = failedIds !== null && retryable === 0 && stagedCount === 0;
 	const nothingToWrite = plan !== null && plan.writes.length === 0;
 	// The list of rows is fixed once a save has run.
 	const listFrozen = frozenRows !== null;
@@ -1582,12 +1866,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return __( 'Close', 'wp-woocommerce-products-list' );
 		}
 
+		if ( failedIds && retryable === 0 ) {
+			/* translators: %d: number of language changes still to run */
+			return sprintf( _n( 'Retry %d language change', 'Retry %d language changes', stagedCount, 'wp-woocommerce-products-list' ), stagedCount );
+		}
+
 		if ( failedIds ) {
 			/* translators: %d: number of rows that failed */
 			return sprintf( _n( 'Retry %d failed', 'Retry %d failed', retryable, 'wp-woocommerce-products-list' ), retryable );
 		}
 
-		if ( warnings.length ) {
+		if ( warnings.length && warningKind === 'clamp' ) {
 			return __( 'Update anyway', 'wp-woocommerce-products-list' );
 		}
 
@@ -1595,8 +1884,24 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return __( 'Update', 'wp-woocommerce-products-list' );
 		}
 
+		// The staged tool runs go with the Update and say so on its button.
+		const withTools = ( label: string ) =>
+			stagedCount
+				? sprintf(
+						/* translators: 1: "Update N items", 2: number of language changes (tool runs) */
+						_n( '%1$s + %2$d language change', '%1$s + %2$d language changes', stagedCount, 'wp-woocommerce-products-list' ),
+						label,
+						stagedCount
+				  )
+				: label;
+
+		if ( pendingCount === 0 && stagedCount > 0 ) {
+			/* translators: %d: number of language changes (tool runs) */
+			return sprintf( _n( 'Apply %d language change', 'Apply %d language changes', stagedCount, 'wp-woocommerce-products-list' ), stagedCount );
+		}
+
 		if ( plan ) {
-			const base = saveLabelFor( plan );
+			const base = withTools( saveLabelFor( plan ) );
 
 			// Replacing sales that run now ends them on save: the button says how many, counted on the rows the plan really writes
 			// (the "only where it gets cheaper" guard and the other skip rules leave some running).
@@ -1613,11 +1918,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		/* translators: %d: number of rows */
-		return sprintf( _n( 'Update %d item', 'Update %d items', items.length, 'wp-woocommerce-products-list' ), items.length );
+		return withTools( sprintf( _n( 'Update %d item', 'Update %d items', items.length, 'wp-woocommerce-products-list' ), items.length ) );
 	} )();
 
 	// Busy buttons stay focusable (a disabled button drops keyboard focus to <body>); the handlers ignore the extra press.
-	const saveBlocked = saving || loading || needsEditOthers || ( ! failedButNothingToRetry && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
+	const saveBlocked = saving || loading || needsEditOthers || ( ! failedButNothingToRetry && stagedCount === 0 && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
 	const showNext = ! bulk && nextRow !== null && ! failedIds;
 	// "Save & next" with nothing typed just moves on; with edits it saves them first.
 	const nextBlocked = saving || loading || needsEditOthers || nothingToWrite;
@@ -1654,6 +1959,20 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// rules itself on every attempt, names each problem and moves focus to the first.
 			noValidate
 			onKeyDown={ onKeyDown }
+			// Which native select has its dropdown open: pressed open, closed again by a pick or by leaving it.
+			onMouseDown={ ( event ) => {
+				openSelectRef.current = event.target instanceof HTMLSelectElement && openSelectRef.current !== event.target ? event.target : null;
+			} }
+			onChange={ ( event ) => {
+				if ( event.target === openSelectRef.current ) {
+					openSelectRef.current = null;
+				}
+			} }
+			onBlur={ ( event ) => {
+				if ( ( event.target as EventTarget ) === openSelectRef.current ) {
+					openSelectRef.current = null;
+				}
+			} }
 			onSubmit={ ( event ) => {
 				event.preventDefault();
 
@@ -1848,6 +2167,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						disabled={ saving }
 						onDirtyChange={ setToolsDirty }
 						defaultOpen={ bulk }
+						// The tools run with Update, in its batch: one save model, one Undo.
+						stage={ stageTool }
+						staged={ staged }
 						// A failure shows inline under the tool, not as a snackbar that outlives it.
 						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ), { inlineErrors: true } ) }
 						onDone={ () => {
@@ -1992,15 +2314,48 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						fieldLabels={ fieldLabels }
 						status="warning"
 						className="wc-pl-edit__warnings"
-						title={ sprintf(
-							/* translators: %d: number of rows */
-							_n( '%d row would go below zero. Update anyway?', '%d rows would go below zero. Update anyway?', warnings.length, 'wp-woocommerce-products-list' ),
-							warnings.length
-						) }
+						title={
+							warningKind === 'stale'
+								? sprintf(
+										/* translators: %d: number of rows */
+										_n( '%d row changed since this editor loaded it', '%d rows changed since this editor loaded them', warnings.length, 'wp-woocommerce-products-list' ),
+										warnings.length
+								  )
+								: sprintf(
+										/* translators: %d: number of rows */
+										_n( '%d row would go below zero. Update anyway?', '%d rows would go below zero. Update anyway?', warnings.length, 'wp-woocommerce-products-list' ),
+										warnings.length
+								  )
+						}
 					/>
 				) : null }
 
-				<EditErrors errors={ errors } items={ targetsForValidation } fieldLabels={ fieldLabels } onFocusField={ focusField } />
+				{ stagedCount ? (
+					<div className="wc-pl-edit__staged">
+						<strong>{ __( 'Also saved with Update:', 'wp-woocommerce-products-list' ) }</strong>
+						<ul>
+							{ Array.from( staged.values() ).map( ( entry ) => {
+								const count = toolIds( entry.def, items ).length;
+
+								return (
+									<li key={ entry.key }>
+										{ sprintf(
+											/* translators: 1: tool label, 2: language, 3: number of items */
+											_n( '%1$s (%2$s) on %3$d item', '%1$s (%2$s) on %3$d items', count, 'wp-woocommerce-products-list' ),
+											entry.def.label,
+											entry.tabLabel,
+											count
+										) }{ ' ' }
+										<Button variant="link" disabled={ saving } onClick={ () => stageTool( entry.key, null ) }>
+											{ __( 'Take it out', 'wp-woocommerce-products-list' ) }
+										</Button>
+									</li>
+								);
+							} ) }
+						</ul>
+					</div>
+				) : null }
+				<EditErrors errors={ errors } items={ targetsForValidation } names={ errorNames } fieldLabels={ fieldLabels } onFocusField={ focusField } />
 				<div hidden>
 					{ invalidFields.map( ( entry ) => (
 						<span key={ entry.field } id={ invalidMessageId( entry.field ) }>

@@ -7,6 +7,7 @@ import { __ } from '@wordpress/i18n';
 const MESSAGES: Record< string, () => string > = {
 	woocommerce_rest_product_invalid_id: () => __( 'This product no longer exists (it was deleted).', 'wp-woocommerce-products-list' ),
 	woocommerce_rest_variation_invalid_id: () => __( 'This variation no longer exists (it was deleted).', 'wp-woocommerce-products-list' ),
+	woocommerce_rest_product_variation_invalid_id: () => __( 'This variation no longer exists (it was deleted).', 'wp-woocommerce-products-list' ),
 	woocommerce_rest_invalid_id: () => __( 'This item no longer exists (it was deleted).', 'wp-woocommerce-products-list' ),
 	woocommerce_rest_cannot_edit: () => __( 'You are not allowed to edit this item.', 'wp-woocommerce-products-list' ),
 	woocommerce_rest_cannot_batch: () => __( 'You are not allowed to bulk edit (edit_others_products is required).', 'wp-woocommerce-products-list' ),
@@ -35,7 +36,14 @@ export function humanizeError( code: string | undefined, message: string ): stri
 	return text;
 }
 
-const GONE_CODES: ReadonlySet< string > = new Set( [ 'woocommerce_rest_product_invalid_id', 'woocommerce_rest_variation_invalid_id', 'woocommerce_rest_invalid_id', 'rest_post_invalid_id' ] );
+const GONE_CODES: ReadonlySet< string > = new Set( [
+	'woocommerce_rest_product_invalid_id',
+	'woocommerce_rest_variation_invalid_id',
+	// wc/v3's variations controller (woocommerce_rest_{post_type}_invalid_id) and the plugin's variations batch route.
+	'woocommerce_rest_product_variation_invalid_id',
+	'woocommerce_rest_invalid_id',
+	'rest_post_invalid_id',
+] );
 
 /** Whether an error code means the row no longer exists (nothing to retry; the row leaves the list). */
 export function isGoneCode( code: string | undefined ): boolean {

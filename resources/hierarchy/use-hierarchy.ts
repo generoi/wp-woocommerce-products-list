@@ -47,17 +47,21 @@ export const EXPANDED_STORAGE_KEY = 'wcProductsList.expanded';
  * row (no virtualisation): a 1,800-row table takes ~2 s per render with
  * production React and holds hundreds of MB, so the warning comes early.
  */
-export const EXPAND_ALL_WARN_ROWS = 600;
+export const EXPAND_ALL_WARN_ROWS = 400;
 
 /**
  * Rows a page never grows beyond through expandAll or a restored expansion:
- * a 2,500-row table froze the renderer for most of a minute. expandAll stops
+ * a 2,500-row table froze the renderer for most of a minute, and at 1,470
+ * rows "select all" took ~2 s of synchronous work (development React) and a
+ * single checkbox 0.25-0.5 s, more than a minute on a loaded machine. Every
+ * selection or collapse re-renders each row, so the cap keeps those under
+ * a second until rows are virtualised. expandAll stops
  * at the parent that would cross it (the rest stay collapsed, with a notice);
  * expanded ids restored from storage or revisited on a later page are trimmed
  * to it in page order (to EXPAND_ALL_WARN_ROWS when restored on load, where
  * nobody asked for a large table).
  */
-export const EXPAND_ALL_MAX_ROWS = 1500;
+export const EXPAND_ALL_MAX_ROWS = 600;
 
 export const VARIATIONS_PER_PAGE = 100;
 

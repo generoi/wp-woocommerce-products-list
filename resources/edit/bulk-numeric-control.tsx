@@ -169,6 +169,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 		// and core's) each count `inspector-*-control-N` from zero and collide.
 		const baseId = `wc-pl-bulk-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }-${ useId().replace( /:/g, '' ) }`;
 		const note = hint( op, salePrice );
+		const roundable = ! idle && op.operation !== 'set';
 
 		const update = ( next: NumericOp ) => onChange( { [ field.id ]: next } );
 
@@ -214,35 +215,49 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						onChange={ ( value: string ) => update( { ...op, value } ) }
 					/>
 				</HStack>
-				{ rounding.length > 0 && ! idle && op.operation !== 'set' ? (
-					<SelectControl
-						__nextHasNoMarginBottom
-						__next40pxDefaultSize
-						id={ `${ baseId }-round` }
-						className="wc-pl-bulk-numeric__round"
-						aria-label={ `${ field.label }: ${ __( 'rounding', 'wp-woocommerce-products-list' ) }` }
-						value={ op.round ?? '' }
-						options={ rounding }
-						onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
-					/>
-				) : null }
-				{ rounding.length > 0 && ! idle && op.operation !== 'set' && op.round ? (
-					<SelectControl
-						__nextHasNoMarginBottom
-						__next40pxDefaultSize
-						id={ `${ baseId }-round-mode` }
-						className="wc-pl-bulk-numeric__round"
-						aria-label={ `${ field.label }: ${ __( 'rounding direction', 'wp-woocommerce-products-list' ) }` }
-						value={ op.roundMode ?? 'nearest' }
-						options={ modes }
-						onChange={ ( value: string ) => {
-							const { roundMode: _previous, ...rest } = op;
+				{ rounding.length > 0 ? (
+					// Always in the layout (hidden while it does not apply), so choosing an operation or a rounding never
+					// moves the controls below it: the next click lands where the eye aimed (Schedule sale, the dates).
+					<HStack
+						alignment="top"
+						spacing={ 2 }
+						className={ `wc-pl-bulk-numeric__row wc-pl-bulk-numeric__round${ roundable ? '' : ' is-inactive' }` }
+						aria-hidden={ roundable ? undefined : true }
+					>
+						<SelectControl
+							__nextHasNoMarginBottom
+							__next40pxDefaultSize
+							id={ `${ baseId }-round` }
+							aria-label={ `${ field.label }: ${ __( 'rounding', 'wp-woocommerce-products-list' ) }` }
+							value={ op.round ?? '' }
+							options={ rounding }
+							disabled={ ! roundable }
+							tabIndex={ roundable ? undefined : -1 }
+							onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
+						/>
+						<div className={ `wc-pl-bulk-numeric__round-mode${ roundable && op.round ? '' : ' is-inactive' }` } aria-hidden={ roundable && op.round ? undefined : true }>
+							<SelectControl
+								__nextHasNoMarginBottom
+								__next40pxDefaultSize
+								id={ `${ baseId }-round-mode` }
+								aria-label={ `${ field.label }: ${ __( 'rounding direction', 'wp-woocommerce-products-list' ) }` }
+								value={ op.roundMode ?? 'nearest' }
+								options={ modes }
+								disabled={ ! ( roundable && op.round ) }
+								tabIndex={ roundable && op.round ? undefined : -1 }
+								onChange={ ( value: string ) => {
+									const { roundMode: _previous, ...rest } = op;
 
-							update( value === 'nearest' ? rest : { ...rest, roundMode: value as RoundMode } );
-						} }
-					/>
+									update( value === 'nearest' ? rest : { ...rest, roundMode: value as RoundMode } );
+								} }
+							/>
+						</div>
+					</HStack>
 				) : null }
-				{ note ? <Text variant="muted">{ note }</Text> : null }
+				{ /* A fixed slot: an operation's note appearing or going never moves the fields below. */ }
+				<Text variant="muted" className="wc-pl-bulk-numeric__note">
+					{ note ?? '' }
+				</Text>
 			</BaseControl>
 		);
 	}

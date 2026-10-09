@@ -287,6 +287,29 @@ export function toolIds( def: DeclarativeAction, items: ProductListItem[] ): num
 		.map( ( item ) => item.id );
 }
 
+/**
+ * A tool run waiting for the editor's Update: in the editor the tools do
+ * not save on their own button, they add their run to the same Update (one
+ * History batch, one Undo with the field edits).
+ */
+export interface StagedTool {
+	/** `<tab id>:<action id>`: one staged run per tool and language. */
+	key: string;
+	def: DeclarativeAction;
+	tabId: string;
+	tabLabel: string;
+	/** The ids it runs on (resolved again from the editor's rows at Update). */
+	ids: number[];
+	/** What is sent (only the arguments shown, the language fixed to the tab's). */
+	args: Record< string, unknown >;
+	/** The settings as typed, to show them again when the tab is revisited. */
+	data: Record< string, unknown >;
+}
+
+export function stagedKey( tabId: string, def: Pick< DeclarativeAction, 'id' > ): string {
+	return `${ tabId }:${ def.id }`;
+}
+
 export interface LanguageToolsProps {
 	tabId: string;
 	tabLabel: string;
@@ -302,6 +325,10 @@ export interface LanguageToolsProps {
 	onDirtyChange?( count: number ): void;
 	/** Start unfolded (bulk edit: the tools are how a language is changed for many items). */
 	defaultOpen?: boolean;
+	/** Staging instead of running: the tool's button adds its run to the editor's Update (null takes it out again). */
+	stage?( key: string, entry: StagedTool | null ): void;
+	/** The runs staged so far, by key. */
+	staged?: ReadonlyMap< string, StagedTool >;
 }
 
 function sameData( a: Record< string, unknown >, b: Record< string, unknown > ): boolean {
@@ -310,9 +337,11 @@ function sameData( a: Record< string, unknown >, b: Record< string, unknown > ):
 
 type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultOpen' > & { def: DeclarativeAction; lang: string; tabId: string; onDirty( id: string, dirty: boolean ): void };
 
-function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty }: ToolProps ) {
+function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged }: ToolProps ) {
 	const defaults = useMemo( () => defaultsOf( def, lang ), [ def, lang ] );
-	const [ data, setData ] = useState< Record< string, unknown > >( defaults );
+	const key = stagedKey( tabId, def );
+	const stagedEntry = staged?.get( key );
+	const [ data, setData ] = useState< Record< string, unknown > >( () => stagedEntry?.data ?? defaults );
 	// What the last run was made with: settings equal to these are not "unsaved".
 	const [ ranWith, setRanWith ] = useState< Record< string, unknown > >( defaults );
 	const [ running, setRunning ] = useState( false );
@@ -331,8 +360,14 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		setApplied( null );
 		setConfirming( false );
 		setData( ( previous ) => ( { ...previous, [ id ]: value } ) );
+
+		// Changed after it was added: it comes out of the Update until added again with the new settings.
+		if ( stagedEntry ) {
+			stage?.( key, null );
+		}
 	};
-	const dirty = ! sameData( data, ranWith );
+	// A staged run is counted by the editor as a pending change, not as unsaved tool settings.
+	const dirty = ! stagedEntry && ! sameData( data, stage ? defaults : ranWith );
 	const onDirtyRef = useRef( onDirty );
 
 	useEffect( () => {
@@ -346,11 +381,8 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	// A tool that leaves (another tab) holds nothing unsaved any more.
 	useEffect( () => () => onDirtyRef.current( def.id, false ), [ def.id ] );
 
-	const go = () => {
-		setRunning( true );
-		setError( null );
-
-		// Only the arguments shown are sent; the fields argument only carries what this run may copy (prices dropped across currencies).
+	// Only the arguments shown are sent; the fields argument only carries what this run may copy (prices dropped across currencies).
+	const sentArgs = (): Record< string, unknown > => {
 		const sent: Record< string, unknown > = { [ LANG_ARG ]: lang };
 
 		for ( const arg of args ) {
@@ -362,6 +394,15 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 				sent[ arg.id ] = ( sent[ arg.id ] as string[] ).filter( ( value ) => allowed.has( value ) );
 			}
 		}
+
+		return sent;
+	};
+
+	const go = () => {
+		setRunning( true );
+		setError( null );
+
+		const sent = sentArgs();
 
 		const snapshot = data;
 		const count = ids.length;
@@ -386,6 +427,13 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		if ( missing ) {
 			/* translators: %s: the label of an input, e.g. "Amount" */
 			setError( sprintf( __( 'Fill in "%s" first.', 'wp-woocommerce-products-list' ), missing.label ) );
+
+			return;
+		}
+
+		// In the editor the run joins the Update: no question, Update (and Cancel) decide.
+		if ( stage ) {
+			stage( key, { key, def, tabId, tabLabel, ids, args: sentArgs(), data } );
 
 			return;
 		}
@@ -578,6 +626,31 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 						</Button>
 					</div>
 				</div>
+			) : stage && stagedEntry ? (
+				<div className="wc-pl-language-tools__staged" role="status">
+					<span>
+						{ sprintf(
+							/* translators: 1: action label, 2: language, 3: "N items" */
+							__( '%1$s (%2$s) runs on %3$s with Update.', 'wp-woocommerce-products-list' ),
+							def.label,
+							tabLabel,
+							itemsCount
+						) }
+					</span>{ ' ' }
+					<Button variant="link" onClick={ () => stage( key, null ) }>
+						{ __( 'Take it out', 'wp-woocommerce-products-list' ) }
+					</Button>
+				</div>
+			) : stage ? (
+				<Button variant="secondary" isDestructive={ def.destructive } aria-disabled={ blocked } onClick={ start } __next40pxDefaultSize>
+					{ sprintf(
+						/* translators: 1: action label, 2: language, 3: "N items" */
+						__( '%1$s: %2$s, add to Update (%3$s)', 'wp-woocommerce-products-list' ),
+						def.label,
+						tabLabel,
+						itemsCount
+					) }
+				</Button>
 			) : (
 				<Button variant="secondary" isDestructive={ def.destructive } isBusy={ running } aria-disabled={ blocked } onClick={ start } __next40pxDefaultSize>
 					{ sprintf(

@@ -180,6 +180,19 @@ describe( 'projectWarnings', () => {
 		expect( projectWarnings( items, { stock_quantity: op( 'set', '0' ), status: 'draft' }, fields, settings ) ).toEqual( [] );
 	} );
 
+	it( 'does not warn (or clamp) on backordered stock: the arithmetic is kept below zero', () => {
+		const items = [ simple( 1, { stock_quantity: -3, manage_stock: true } ), simple( 2, { stock_quantity: 1, manage_stock: true, backorders: 'notify' } ) ];
+
+		expect( projectWarnings( items, { stock_quantity: op( 'increase', '2' ) }, fields, settings ) ).toEqual( [] );
+		expect( projectWarnings( items, { stock_quantity: op( 'decrease', '2' ) }, fields, settings ) ).toEqual( [] );
+		expect( projectEdits( items[ 0 ]!, { stock_quantity: op( 'decrease', '2' ) }, fields, settings ) ).toEqual( { stock_quantity: '-5' } );
+		expect( projectEdits( items[ 0 ]!, { stock_quantity: op( 'increase', '2' ) }, fields, settings ) ).toEqual( { stock_quantity: '-1' } );
+		expect( projectEdits( items[ 1 ]!, { stock_quantity: op( 'decrease', '3' ) }, fields, settings ) ).toEqual( { stock_quantity: '-2' } );
+		expect( validateBulkNumericEdits( items, { stock_quantity: op( 'decrease', '2' ) }, fields, settings ) ).toEqual( [] );
+		// A row without backorders and stock above zero still clamps, and says so.
+		expect( projectWarnings( [ simple( 3, { stock_quantity: 1, manage_stock: true, backorders: 'no' } ) ], { stock_quantity: op( 'decrease', '3' ) }, fields, settings ) ).toHaveLength( 1 );
+	} );
+
 	it( 'covers money too, formatted', () => {
 		const warnings = projectWarnings( [ simple( 1, { regular_price: '10' } ) ], { regular_price: op( 'decrease', '15' ) }, fields, settings );
 

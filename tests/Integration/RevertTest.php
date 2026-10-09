@@ -470,6 +470,82 @@ class RevertTest extends RestTestCase
         $this->assertSame(-1, wc_get_product($v37)->get_stock_quantity());
     }
 
+    public function test_a_second_relative_revert_does_not_take_the_change_off_twice(): void
+    {
+        $product = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 5]);
+        $id = $product->get_id();
+        $url = '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert';
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $id, 'inventory_delta' => 2]]]));
+        $this->assertSame(7, wc_get_product($id)->get_stock_quantity());
+
+        $data = $this->data($this->request('POST', $url));
+        $this->assertSame([true], array_column($data['results'], 'ok'));
+        $this->assertSame(5, wc_get_product($id)->get_stock_quantity());
+
+        // Again: a conflict, and not one a relative revert is offered for.
+        $data = $this->data($this->request('POST', $url));
+        $this->assertSame('conflict', $data['results'][0]['code']);
+        $this->assertFalse($data['results'][0]['relative']);
+        $this->assertSame(['stock_quantity'], $data['results'][0]['already_reverted']);
+        $this->assertStringContainsString('already put back', $data['results'][0]['message']);
+
+        // Asked for anyway: nothing is taken off a second time.
+        $data = $this->data($this->request('POST', $url, ['relative' => true]));
+        $this->assertSame('conflict', $data['results'][0]['code']);
+        $this->assertSame(5, wc_get_product($id)->get_stock_quantity());
+
+        // The dry run says the same, without writing.
+        $check = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId().'/check'));
+        $this->assertSame(1, $check['changed']);
+        $this->assertSame(1, $check['already_reverted']);
+        $this->assertTrue($check['complete']);
+    }
+
+    public function test_the_revert_check_names_items_changed_since_without_writing(): void
+    {
+        $a = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 0]);
+        $b = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 0]);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $a->get_id(), 'stock_quantity' => 10], ['id' => $b->get_id(), 'stock_quantity' => 10]],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        // An order takes one of a.
+        wc_update_product_stock(wc_get_product($a->get_id()), 1, 'decrease');
+
+        global $wpdb;
+        $before = (int) $wpdb->get_var('SELECT COUNT(*) FROM '.Table::name()); // phpcs:ignore
+
+        $check = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId().'/check'));
+        $this->assertSame(2, $check['checked']);
+        $this->assertSame(2, $check['objects']);
+        $this->assertTrue($check['complete']);
+        $this->assertSame(1, $check['changed']);
+        $this->assertSame(0, $check['already_reverted']);
+        $item = $check['items'][0];
+        $this->assertSame($a->get_id(), $item['id']);
+        $this->assertSame(['Stock quantity'], $item['labels']);
+        $this->assertSame(['stock_quantity' => '9'], $item['current']);
+        $this->assertSame(['stock_quantity' => '10'], $item['batch']);
+        $this->assertSame(['stock_quantity' => '0'], $item['expected']);
+        $this->assertTrue($item['relative']);
+
+        // Nothing written, nothing logged.
+        $this->assertSame(9, wc_get_product($a->get_id())->get_stock_quantity());
+        $this->assertSame(10, wc_get_product($b->get_id())->get_stock_quantity());
+        $this->assertSame($before, (int) $wpdb->get_var('SELECT COUNT(*) FROM '.Table::name())); // phpcs:ignore
+
+        // One chunk by ids.
+        $check = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId().'/check', ['ids' => [$b->get_id()]]));
+        $this->assertSame(1, $check['checked']);
+        $this->assertFalse($check['complete']);
+        $this->assertSame(0, $check['changed']);
+
+        $this->assertStatus(404, $this->request('GET', '/wc-products-list/v1/log/batch/nope/check'));
+        $this->assertStatus(400, $this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId().'/check', ['ids' => range(1, 101)]));
+    }
+
     public function test_relative_values_need_numbers(): void
     {
         $this->assertSame('-1', Revert::relativeValue('0', '10', '9'));

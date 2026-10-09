@@ -151,7 +151,7 @@ class LogSecurityTest extends RestTestCase
     {
         $this->actAs('catalog_limited');
 
-        foreach (['/log', '/log/users', '/log/batches', '/log/batch/'.wp_generate_uuid4()] as $route) {
+        foreach (['/log', '/log/users', '/log/batches', '/log/batch/'.wp_generate_uuid4(), '/log/batch/'.wp_generate_uuid4().'/check'] as $route) {
             $this->assertSame(403, $this->request('GET', '/wc-products-list/v1'.$route)->get_status(), $route);
         }
 

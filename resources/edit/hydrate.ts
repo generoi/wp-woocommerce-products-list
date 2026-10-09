@@ -24,7 +24,8 @@ import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
 
 /** Always fetched: what the row identity, the actions and the summary need. */
-export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list', 'name', 'sku', 'permalink' ] as const;
+/** `date_modified_gmt` is the baseline a save compares against: a row saved by someone else meanwhile has a newer one. */
+export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_products_list', 'name', 'sku', 'permalink', 'date_modified_gmt' ] as const;
 
 /**
  * What a partial (per-tab) load must never change on a row: the hierarchy
@@ -259,4 +260,21 @@ export async function recheckStatuses( items: ProductListItem[], deps: Pick< Hyd
 		trashed: products.filter( ( item ) => seen.get( item.id ) === 'trash' ).map( ( item ) => item.id ),
 		missing: products.filter( ( item ) => ! seen.has( item.id ) ).map( ( item ) => item.id ),
 	};
+}
+
+/**
+ * The rows saved by someone else since the editor loaded them: their
+ * `date_modified_gmt` now differs from the one loaded. WooCommerce stamps a
+ * product on every save, and a variable parent whenever one of its
+ * variations saves (the deferred parent sync), so a newer parent means its
+ * variations may have changed too. Rows whose baseline is unknown (the
+ * load failed, the date was not fetched) are never reported.
+ */
+export function changedSinceLoaded( known: ProductListItem[], fresh: ReadonlyMap< number, ProductListItem > ): ProductListItem[] {
+	return known.filter( ( item ) => {
+		const before = ( item as { date_modified_gmt?: unknown } ).date_modified_gmt;
+		const now = ( fresh.get( item.id ) as { date_modified_gmt?: unknown } | undefined )?.date_modified_gmt;
+
+		return typeof before === 'string' && before !== '' && typeof now === 'string' && now !== '' && now !== before;
+	} );
 }

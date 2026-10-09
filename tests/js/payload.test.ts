@@ -64,6 +64,24 @@ describe( 'buildPayload', () => {
 		expect( payload ).toEqual( { regular_price: '80.00', inventory_delta: 6 } );
 	} );
 
+	it( 'moves backordered (negative) stock by exactly the amount asked, sent as inventory_delta', () => {
+		const backordered = simple( 1, { manage_stock: true, stock_quantity: -3, backorders: 'yes' } );
+
+		expect( buildPayload( backordered, { stock_quantity: { operation: 'decrease', value: '2' } }, fields, settings ) ).toEqual( { inventory_delta: -2 } );
+		expect( buildPayload( backordered, { stock_quantity: { operation: 'increase', value: '2' } }, fields, settings ) ).toEqual( { inventory_delta: 2 } );
+		// Already negative without backorders now: still the exact amount, never a jump to 0.
+		const negative = simple( 1, { manage_stock: true, stock_quantity: -3, backorders: 'no' } );
+
+		expect( buildPayload( negative, { stock_quantity: { operation: 'decrease', value: '2' } }, fields, settings ) ).toEqual( { inventory_delta: -2 } );
+		expect( buildPayload( negative, { stock_quantity: { operation: 'increase', value: '2' } }, fields, settings ) ).toEqual( { inventory_delta: 2 } );
+		// A row taking backorders goes below zero on a decrease instead of being clamped.
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 1, backorders: 'notify' } ), { stock_quantity: { operation: 'decrease', value: '3' } }, fields, settings ) ).toEqual( {
+			inventory_delta: -3,
+		} );
+		// A percentage of a backorder has no direction ("+50 %" of -10 would lower it): the row is left alone.
+		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: -10, backorders: 'yes' } ), { stock_quantity: { operation: 'increase', value: '50', percent: true } }, fields, settings ) ).toEqual( {} );
+	} );
+
 	it( 'sends a relative stock op as inventory_delta, and a decrease clamped at zero as the absolute 0', () => {
 		expect( buildPayload( simple( 1, { manage_stock: true, stock_quantity: 62 } ), { stock_quantity: { operation: 'increase', value: '1' } }, fields, settings ) ).toEqual( {
 			inventory_delta: 1,

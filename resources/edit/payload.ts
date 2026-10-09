@@ -26,8 +26,8 @@ export const SCHEDULE_SALE_FIELD_ID = 'schedule_sale';
  * overwritten (classic bulk edit behaves the same). A relative stock op
  * (+N, -N, ±%) is sent this way instead of the projected absolute value;
  * the change log records it as a stock_quantity row, old to new. A decrease
- * the editor clamped at zero stays absolute (0), so the write never leaves
- * negative stock. See docs/contracts.md.
+ * the editor clamped at zero (a row without backorders) stays absolute (0);
+ * a row on backorder moves by exactly the amount, below zero too. See docs/contracts.md.
  */
 export const STOCK_DELTA_KEY = 'inventory_delta';
 
@@ -140,8 +140,10 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 /**
  * A relative op on the core stock quantity, as the signed delta the server
  * adds at write time; null for anything else (a "Change to", another field,
- * a row whose stock is not a number yet, a no-op, or a decrease the
- * projection clamped at zero, which is written as the absolute 0).
+ * a row whose stock is not a number yet, a no-op, or a decrease that
+ * lands on zero, which is written as the absolute 0: the projection clamps
+ * there on rows without backorders). Below zero (a row on backorder) the
+ * delta is the requested amount, exactly as classic bulk edit moves stock.
  */
 export function stockDeltaOf( field: ProductField, item: ProductListItem, op: unknown, next: unknown ): number | null {
 	if ( field.id !== 'stock_quantity' || field.rest?.write || ! isNumericOp( op ) || ( op.operation !== 'increase' && op.operation !== 'decrease' ) ) {
@@ -155,7 +157,7 @@ export function stockDeltaOf( field: ProductField, item: ProductListItem, op: un
 		return null;
 	}
 
-	if ( op.operation === 'decrease' && next <= 0 ) {
+	if ( op.operation === 'decrease' && next === 0 ) {
 		return null;
 	}
 

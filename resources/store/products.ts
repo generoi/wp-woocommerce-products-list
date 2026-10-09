@@ -11,7 +11,7 @@ import type { ListResult } from '../api/client';
 import { buildProductListQuery } from '../api/query';
 import type { View } from '../dataviews';
 import { ACTIONS } from '../extensions/hooks';
-import { invalidateVariations, patchVariationRows, removeVariationRows } from '../hierarchy/use-hierarchy';
+import { getChildrenState, invalidateVariations, patchVariationRows, removeVariationRows } from '../hierarchy/use-hierarchy';
 import { getSettings } from '../settings';
 import type { BatchResult, ProductField, ProductListItem, QueryParams } from '../types';
 import { cache, useQuery } from './query-cache';
@@ -214,13 +214,66 @@ export function patchItems( items: Array< Partial< ProductListItem > & { id: num
 	patchVariationRows( items );
 }
 
-/** Drop rows by id from every cached page (a trash or delete that already happened). */
+type RemovedListener = ( ids: number[] ) => void;
+
+const removedListeners = new Set< RemovedListener >();
+
+/**
+ * Called with the ids `removeItems` dropped (the selection lets go of them,
+ * so the next footer action cannot reach a row that is gone).
+ */
+export function subscribeRemoved( listener: RemovedListener ): () => void {
+	removedListeners.add( listener );
+
+	return () => {
+		removedListeners.delete( listener );
+	};
+}
+
+/** Parent id → how many of `ids` are its loaded or cached variations. */
+function removedVariationsByParent( ids: ReadonlySet< number > ): Map< number, number > {
+	const found = new Map< number, Set< number > >();
+	const add = ( parentId: number, id: number ) => {
+		if ( ! ids.has( parentId ) ) {
+			found.set( parentId, ( found.get( parentId ) ?? new Set() ).add( id ) );
+		}
+	};
+
+	for ( const [ parentId, state ] of getChildrenState() ) {
+		for ( const item of state.items ) {
+			if ( ids.has( item.id ) ) {
+				add( parentId, item.id );
+			}
+		}
+	}
+
+	for ( const key of cache.keys( VARIATIONS_PREFIX ) ) {
+		for ( const item of cache.get< ListResult< ProductListItem > >( key )?.data?.items ?? [] ) {
+			const parentId = parentIdOf( item );
+
+			if ( parentId && ids.has( item.id ) ) {
+				add( parentId, item.id );
+			}
+		}
+	}
+
+	return new Map( Array.from( found, ( [ parentId, removed ] ) => [ parentId, removed.size ] ) );
+}
+
+/**
+ * Drop rows by id from every cached page (a trash or delete that already
+ * happened, or rows a save or an editor found gone meanwhile). The rows
+ * leave the selection too, the status tab counts refetch, and the parents
+ * of removed variations show one variation fewer at once and then refetch
+ * their variations and their derived fields (the count, the price range).
+ */
 export function removeItems( ids: number[] ): void {
 	if ( ! ids.length ) {
 		return;
 	}
 
 	const set = new Set( ids );
+	const parents = removedVariationsByParent( set );
 
 	for ( const key of [ ...cache.keys( PRODUCTS_PREFIX ), ...cache.keys( VARIATIONS_PREFIX ) ] ) {
 		cache.patch< ListResult< ProductListItem > >( key, ( data ) => {
@@ -231,6 +284,40 @@ export function removeItems( ids: number[] ): void {
 	}
 
 	removeVariationRows( ids );
+
+	if ( parents.size ) {
+		const counts: Array< Partial< ProductListItem > & { id: number } > = [];
+
+		for ( const key of cache.keys( PRODUCTS_PREFIX ) ) {
+			for ( const item of cache.get< ListResult< ProductListItem > >( key )?.data?.items ?? [] ) {
+				const removed = parents.get( item.id );
+
+				if ( removed && item._kind === 'product' ) {
+					const count = Math.max( 0, item._childCount - removed );
+					const meta = ( item as { wc_products_list?: Record< string, unknown > } ).wc_products_list;
+
+					counts.push( { id: item.id, _childCount: count, _hasChildren: count > 0, ...( meta ? { wc_products_list: { ...meta, variation_count: count } } : {} ) } as Partial< ProductListItem > & { id: number } );
+				}
+			}
+		}
+
+		const byId = new Map( counts.map( ( row ) => [ row.id, row ] ) );
+
+		for ( const key of cache.keys( PRODUCTS_PREFIX ) ) {
+			patchList( key, byId );
+		}
+
+		const parentIds = Array.from( parents.keys() );
+
+		invalidateVariations( parentIds );
+		void refreshParentIds( parentIds ).catch( () => {} );
+	}
+
+	invalidateCounts();
+
+	for ( const listener of Array.from( removedListeners ) ) {
+		listener( ids );
+	}
 }
 
 /** Refetch what is on screen, drop the rest; counts too when asked. */
@@ -303,8 +390,13 @@ function parentIdOf( row: ProductListItem ): number | undefined {
 
 /** Refetch the derived fields of the parents of `rows` that are in a cached page, and patch them in. */
 export async function refreshParentsOf( rows: ProductListItem[], fetchList: typeof listProducts = listProducts ): Promise< number[] > {
+	return refreshParentIds( rows.map( parentIdOf ).filter( ( id ): id is number => typeof id === 'number' ), fetchList );
+}
+
+/** Refetch the derived fields of these parents (those in a cached page) and patch them in. */
+export async function refreshParentIds( ids: number[], fetchList: typeof listProducts = listProducts ): Promise< number[] > {
 	const cached = cachedProductIds();
-	const parents = Array.from( new Set( rows.map( parentIdOf ).filter( ( id ): id is number => typeof id === 'number' && cached.has( id ) ) ) );
+	const parents = Array.from( new Set( ids.filter( ( id ) => cached.has( id ) ) ) );
 
 	if ( ! parents.length ) {
 		return [];

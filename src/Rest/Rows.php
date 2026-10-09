@@ -49,6 +49,16 @@ final class Rows
     private static int $keepGallery = 0;
 
     /**
+     * Products a list-mode write has saved and is now serialising into its
+     * response row (`woocommerce_rest_insert_*_object` until
+     * `woocommerce_rest_prepare_*_object`): only then does a write drop
+     * the gallery, so save listeners read the real one.
+     *
+     * @var array<int, true>
+     */
+    private static array $serialising = [];
+
+    /**
      * Variation stock and sale summaries of the variable products on the
      * current list page, keyed by parent id, and the request they were
      * computed for (a different request starts over).
@@ -70,6 +80,11 @@ final class Rows
         add_filter('woocommerce_rest_prepare_product_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'trimBatchItem'], 1000, 3);
         add_filter('woocommerce_product_get_gallery_image_ids', [$this, 'dropGallery'], 10, 2);
+        // After every insert listener: from here on the write only builds its response row.
+        add_action('woocommerce_rest_insert_product_object', [self::class, 'startSerialising'], PHP_INT_MAX);
+        add_action('woocommerce_rest_insert_product_variation_object', [self::class, 'startSerialising'], PHP_INT_MAX);
+        add_filter('woocommerce_rest_prepare_product_object', [self::class, 'stopSerialising'], PHP_INT_MAX, 2);
+        add_filter('woocommerce_rest_prepare_product_variation_object', [self::class, 'stopSerialising'], PHP_INT_MAX, 2);
         add_filter('the_posts', [$this, 'primeVariationTerms'], 10, 2);
         add_filter('the_posts', [$this, 'primeChildTransients'], 10, 2);
         add_filter('the_posts', [$this, 'primeSummaries'], 10, 2);
@@ -183,14 +198,19 @@ final class Rows
      * only (or the first gallery image when there is no featured one, so
      * the thumbnail is the same as everywhere else).
      *
-     * Writes too: the rows a batch write answers with are the same rows
-     * the list shows, and a 50-product batch response is otherwise over a
-     * megabyte of gallery JSON (`images` is among the row fields). The
-     * gallery is left alone when the request (or any item of its batch
-     * body) sets `images`, so a gallery write is stored, logged and
-     * answered in full, and inside `withGallery()`, which the recorder
-     * uses to read the stored gallery. Saving never goes through this
-     * filter: the data store reads props in the `edit` context.
+     * Writes too, but only while a saved product is serialised into the
+     * response row (`startSerialising()` .. `stopSerialising()`): the rows
+     * a batch write answers with are the same rows the list shows, and a
+     * 50-product batch response is otherwise over a megabyte of gallery
+     * JSON (`images` is among the row fields). During the save itself
+     * (`woocommerce_update_product`, insert listeners, an action's save)
+     * every reader gets the real gallery, so an integration that syncs on
+     * save never sees a truncated one. The gallery is also left alone
+     * when the request (or any item of its batch body) sets `images`, so
+     * a gallery write is stored, logged and answered in full, and inside
+     * `withGallery()`, which the recorder uses to read the stored
+     * gallery. Saving never goes through this filter: the data store
+     * reads props in the `edit` context.
      *
      * @param  mixed  $ids
      * @param  mixed  $product
@@ -202,8 +222,12 @@ final class Rows
             return $ids;
         }
 
-        if (ListMode::method() !== 'GET' && self::requestWritesImages()) {
-            return $ids;
+        if (ListMode::method() !== 'GET') {
+            $id = $product instanceof WC_Product ? $product->get_id() : 0;
+
+            if (! isset(self::$serialising[$id]) || self::requestWritesImages()) {
+                return $ids;
+            }
         }
 
         /**
@@ -218,6 +242,34 @@ final class Rows
         $featured = $product instanceof WC_Product ? (int) $product->get_image_id('edit') : 0;
 
         return $featured > 0 ? [] : array_slice($ids, 0, 1);
+    }
+
+    /**
+     * A list-mode write saved this product and now builds its response row.
+     *
+     * @param  mixed  $object
+     */
+    public static function startSerialising($object): void
+    {
+        if ($object instanceof WC_Product && ListMode::active()) {
+            self::$serialising[$object->get_id()] = true;
+        }
+    }
+
+    /**
+     * The row is built: the product's gallery reads in full again.
+     *
+     * @param  mixed  $response
+     * @param  mixed  $object
+     * @return mixed
+     */
+    public static function stopSerialising($response, $object = null)
+    {
+        if ($object instanceof WC_Product) {
+            unset(self::$serialising[$object->get_id()]);
+        }
+
+        return $response;
     }
 
     /**

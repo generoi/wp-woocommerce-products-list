@@ -115,13 +115,17 @@ export interface RunDeclarativeOptions {
 	 * their success snackbar with Undo.
 	 */
 	inlineErrors?: boolean;
+	/** Write under this History batch (the editor's Update: its field edits and its staged tools are one batch, one Undo). */
+	batchId?: string;
+	/** No success snackbar: the caller reports the whole Update itself. */
+	silent?: boolean;
 }
 
 export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[], options: RunDeclarativeOptions = {} ): Promise< ActionResponse > {
 	let response: ActionResponse;
 
 	try {
-		response = await runAction( action, ids, args, { fields } );
+		response = await runAction( action, ids, args, { fields, ...( options.batchId ? { batchId: options.batchId } : {} ) } );
 	} catch ( error ) {
 		if ( ! options.inlineErrors ) {
 			notify.error( errorMessage( error ) );
@@ -147,7 +151,7 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 	}
 
 	if ( failed.length && options.inlineErrors ) {
-		if ( ok.length ) {
+		if ( ok.length && ! options.silent ) {
 			notifyDeclarativeSuccess( response, label );
 		}
 
@@ -180,7 +184,7 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 		return response;
 	}
 
-	if ( ! ok.length ) {
+	if ( ! ok.length || options.silent ) {
 		return response;
 	}
 

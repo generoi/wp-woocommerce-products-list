@@ -43,6 +43,7 @@ import { Button, ErrorBoundary, Notice, Notices, Spinner } from '../ui';
 import { ColumnsMenu } from './columns-menu';
 import { DEFAULT_LAYOUTS, PER_PAGE_SIZES } from './default-view';
 import { EmptyState } from './empty-state';
+import { useSearchEcho } from './search-echo';
 import { useSelection } from './selection';
 import type { SelectionApi } from './selection';
 import { useVariationFilter } from './variation-filter';
@@ -168,6 +169,8 @@ export function tableViewOf( view: View ): View {
 
 export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const { view, setView, tab, setTab, isModified, resetView } = useView( fields, settings );
+	// A search the editor's guard refused is taken back out of the search box.
+	const { shownView, reject: rejectViewChange } = useSearchEcho( view );
 	const list = useProductList( view, tab, fields );
 	const { counts } = useCounts();
 	const parents = useMemo( () => list.items.filter( isProductRow ) as ProductRow[], [ list.items ] );
@@ -302,10 +305,12 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			void leaveEditor().then( ( ok ) => {
 				if ( ok ) {
 					setView( next );
+				} else {
+					rejectViewChange( next );
 				}
 			} );
 		},
-		[ setView, leaveEditor ]
+		[ setView, leaveEditor, rejectViewChange ]
 	);
 	const guardedSetTab = useCallback(
 		( next: StatusTabId ) => {
@@ -567,7 +572,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						<HierarchicalDataViews
 							data={ data }
 							fields={ fields }
-							view={ view }
+							view={ shownView }
 							onChangeView={ guardedSetView }
 							actions={ actions }
 							isLoading={ list.isLoading }

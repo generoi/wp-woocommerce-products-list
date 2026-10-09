@@ -6,6 +6,7 @@ import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/
 import { MAX_SELECT_ALL, SELECT_ALL_FIELDS, selectRows, useSelection } from '../../resources/list/selection';
 import type { FetchPage } from '../../resources/list/selection';
 import { setSettings } from '../../resources/settings';
+import { removeItems } from '../../resources/store/products';
 import type { ProductListItem } from '../../resources/types';
 import { sampleSettings } from './settings.test';
 
@@ -131,6 +132,20 @@ describe( 'useSelection', () => {
 
 		rerender( { rows: page1, tab: 'trash' } );
 		expect( result.current.selection ).toEqual( [] );
+	} );
+
+	it( 'drops rows the list removed for any reason, on the page or elsewhere', () => {
+		const { result, rerender } = renderHook( ( { rows, tab } ) => useSelection( rows, tab ), { initialProps: { rows: page1, tab: 'all' } } );
+
+		act( () => result.current.onPageSelectionChange( [ '1', '3' ] ) );
+		rerender( { rows: page2, tab: 'all' } );
+		act( () => result.current.onPageSelectionChange( [ '4' ] ) );
+		expect( result.current.offPageCount ).toBe( 2 );
+
+		// An editor found 3 (on another page) trashed meanwhile and 4 deleted: it drops them from the list as it closes.
+		act( () => removeItems( [ 3, 4 ] ) );
+		expect( result.current.selection ).toEqual( [ '1' ] );
+		expect( result.current.offPageCount ).toBe( 1 );
 	} );
 
 	it( 'selectAllMatching walks every page of the list query with trimmed fields and reports progress', async () => {
