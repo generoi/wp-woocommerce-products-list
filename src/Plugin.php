@@ -101,7 +101,7 @@ class Plugin
          */
         $modules = apply_filters(self::FILTER_MODULES, self::MODULES);
 
-        // SPIKE: native revisions as product history, behind a constant.
+        // POC: native revisions next to the log, behind a constant (docs/revisions.md).
         if (History\History::enabled()) {
             $modules[] = History\History::class;
         }

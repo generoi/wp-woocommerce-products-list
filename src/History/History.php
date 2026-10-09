@@ -5,51 +5,55 @@ namespace GeneroWP\ProductsList\History;
 use GeneroWP\ProductsList\Module;
 
 /**
- * SPIKE (Phase 0): product history on native WordPress revisions.
+ * POC: native WordPress revisions as product history, next to the
+ * custom field log. `WC_PRODUCTS_LIST_HISTORY` picks the mode:
  *
- * Off unless `WC_PRODUCTS_LIST_HISTORY === 'revisions'`. When on, the
- * REST-layer field log recorder stays quiet and every product and
- * variation save made through the WooCommerce CRUD layer leaves a
- * revision that matches the saved state, grouped by a `wcpl_batch` term.
+ * - unset or `log` (default): today's behaviour; this module is not loaded.
+ * - `both`: the log records as today and revisions are recorded for the
+ *   same saves, under the same batch id, so the two can be compared
+ *   (`wp wc-products-list history compare --batch=<id>`).
+ * - `revisions`: only revisions are recorded (the log recorder is quiet);
+ *   undo reads from revisions (`wp wc-products-list history undo`).
  *
- * Options (constants, or the `wc_products_list/history_options` filter):
- * - WC_PRODUCTS_LIST_HISTORY_WRITER: `core` (wp_save_post_revision, as the
- *   plan says) or `lean` (id-only lookups and pruning, same data).
- * - WC_PRODUCTS_LIST_HISTORY_STORAGE: `meta` (one revision meta row per
- *   key, core's revisioned meta) or `packed` (one JSON row per revision).
+ * See docs/revisions.md.
  */
 final class History implements Module
 {
-    public const MODE = 'revisions';
+    public const MODES = ['log', 'both', 'revisions'];
 
     public const FILTER_OPTIONS = 'wc_products_list/history_options';
 
-    /** @var array{writer: string, storage: string, keep_product: int, keep_variation: int}|null */
+    /** @var array{keep_product: int, keep_variation: int}|null */
     private static ?array $options = null;
 
     /** For tests: the constant is process-wide, the suite is not. */
-    private static bool $suspended = false;
+    private static ?string $override = null;
 
+    public static function mode(): string
+    {
+        if (self::$override !== null) {
+            return self::$override;
+        }
+
+        $mode = defined('WC_PRODUCTS_LIST_HISTORY') ? (string) constant('WC_PRODUCTS_LIST_HISTORY') : 'log';
+
+        return in_array($mode, self::MODES, true) ? $mode : 'log';
+    }
+
+    /** Whether revisions are recorded (`both`, `revisions`). */
     public static function enabled(): bool
     {
-        return ! self::$suspended && defined('WC_PRODUCTS_LIST_HISTORY') && constant('WC_PRODUCTS_LIST_HISTORY') === self::MODE;
+        return self::mode() !== 'log';
     }
 
-    /**
-     * For tests that define the constant after the plugin booted: hook
-     * the module in (true) or take it out again (false), so the rest of
-     * the suite runs as without it.
-     */
-    public static function toggle(bool $on): void
+    /** Whether the custom field log records (`log`, `both`). */
+    public static function logs(): bool
     {
-        self::$suspended = ! $on;
-        Revisions::hooks($on);
-        Batches::hooks($on);
-        self::resetOptions();
+        return self::mode() !== 'revisions';
     }
 
     /**
-     * @return array{writer: string, storage: string, keep_product: int, keep_variation: int}
+     * @return array{keep_product: int, keep_variation: int}
      */
     public static function options(): array
     {
@@ -57,33 +61,46 @@ final class History implements Module
             return self::$options;
         }
 
-        $options = [
-            'writer' => defined('WC_PRODUCTS_LIST_HISTORY_WRITER') ? (string) constant('WC_PRODUCTS_LIST_HISTORY_WRITER') : 'core',
-            'storage' => defined('WC_PRODUCTS_LIST_HISTORY_STORAGE') ? (string) constant('WC_PRODUCTS_LIST_HISTORY_STORAGE') : 'meta',
-            'keep_product' => 50,
-            'keep_variation' => 20,
-        ];
+        /** @var array{keep_product: int, keep_variation: int} $options */
+        $options = apply_filters(self::FILTER_OPTIONS, ['keep_product' => 50, 'keep_variation' => 20]);
 
-        /** @var array{writer: string, storage: string, keep_product: int, keep_variation: int} $filtered */
-        $filtered = apply_filters(self::FILTER_OPTIONS, $options);
-
-        return self::$options = $filtered;
+        return self::$options = $options;
     }
 
-    /** For tests: read the options again. */
     public static function resetOptions(): void
     {
         self::$options = null;
+    }
+
+    /**
+     * For tests, which cannot redefine the constant: switch the mode and
+     * hook the module in or out, so the rest of the suite runs as without it.
+     */
+    public static function switchTo(string $mode): void
+    {
+        $was = self::enabled();
+        self::$override = $mode;
+        $on = self::enabled();
+        self::resetOptions();
+
+        if ($on && ! $was) {
+            Revisions::registerMeta();
+            Revisions::hooks(true);
+            Batches::hooks(true);
+        } elseif (! $on && $was) {
+            Revisions::unregisterMeta();
+            Revisions::hooks(false);
+            Batches::hooks(false);
+        }
     }
 
     public function register(): void
     {
         Revisions::register();
         Batches::register();
-        Restore::register();
 
         if (defined('WP_CLI') && WP_CLI && class_exists(\WP_CLI::class)) {
-            \WP_CLI::add_command('wc-products-list revisions', Cli::class);
+            \WP_CLI::add_command('wc-products-list history', Cli::class);
         }
     }
 }

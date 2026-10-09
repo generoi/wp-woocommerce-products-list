@@ -26,11 +26,6 @@ final class Restore
 
     public const POST_FIELDS = ['post_title' => 'name', 'post_content' => 'description', 'post_excerpt' => 'short_description'];
 
-    public static function register(): void
-    {
-        // Hooked in Revisions::register (wp_restore_post_revision).
-    }
-
     /**
      * The objects of a batch, in undo order.
      *
@@ -50,7 +45,7 @@ final class Restore
     /**
      * Undo one chunk of a batch.
      *
-     * @param  array{offset?: int, limit?: int, force?: bool, batch?: string|null}  $args
+     * @param  array{offset?: int, limit?: int, force?: bool, dry?: bool, batch?: string|null}  $args
      * @return array{batch: string, total: int, next: ?int, restored: array<int, int>, unchanged: array<int, int>, conflicts: array<int, array{id: int, keys: array<int, string>}>, skipped: array<int, array{id: int, reason: string}>}
      */
     public static function undo(string $uuid, array $args = []): array
@@ -58,6 +53,7 @@ final class Restore
         $offset = (int) ($args['offset'] ?? 0);
         $limit = (int) ($args['limit'] ?? self::CHUNK);
         $force = (bool) ($args['force'] ?? false);
+        $dry = (bool) ($args['dry'] ?? false);
         $batch = (string) ($args['batch'] ?? '') !== '' ? (string) $args['batch'] : wp_generate_uuid4();
 
         $objects = self::objects($uuid);
@@ -70,39 +66,26 @@ final class Restore
         }
 
         $ids = array_map('intval', array_keys($chunk));
-        Revisions::primeRevisionIds($ids);
-
-        $pairs = [];
+        $pairs = self::pairs($chunk);
         $load = [];
 
-        foreach ($chunk as $id => $batchRevisions) {
-            $first = min($batchRevisions);
-            $last = max($batchRevisions);
-            $predecessor = 0;
-
-            foreach (Revisions::revisionIds((int) $id) as $revisionId) {
-                if ($revisionId < $first) {
-                    $predecessor = $revisionId;
-
-                    break;
-                }
-            }
-
-            if ($predecessor === 0) {
-                $result['skipped'][] = ['id' => (int) $id, 'reason' => 'no_predecessor'];
+        foreach ($ids as $id) {
+            if (! isset($pairs[$id])) {
+                $result['skipped'][] = ['id' => $id, 'reason' => 'no_predecessor'];
 
                 continue;
             }
 
-            $pairs[(int) $id] = [$predecessor, $last];
-            $load[] = $predecessor;
-            $load[] = $last;
+            $load[] = $pairs[$id][0];
+            $load[] = $pairs[$id][1];
         }
 
         _prime_post_caches(array_merge($ids, $load), true, true);
         update_meta_cache('post', $load);
 
-        Batches::begin($batch, 'revert', $uuid);
+        if (! $dry) {
+            Batches::begin($batch, 'revert', $uuid);
+        }
 
         try {
             foreach ($pairs as $id => [$predecessor, $last]) {
@@ -121,7 +104,9 @@ final class Restore
                     $conflicts = [];
 
                     foreach ($keys as $key) {
-                        if (self::value($current, $key) !== self::value($after, $key)) {
+                        $name = explode(':', $key, 2)[1];
+
+                        if (self::normal($name, self::value($current, $key)) !== self::normal($name, self::value($after, $key))) {
                             $conflicts[] = $key;
                         }
                     }
@@ -133,6 +118,12 @@ final class Restore
                     }
                 }
 
+                if ($dry) {
+                    $result['restored'][] = $id;
+
+                    continue;
+                }
+
                 if (self::apply($id, $before, $keys)) {
                     $result['restored'][] = $id;
                 } else {
@@ -140,14 +131,43 @@ final class Restore
                 }
             }
 
-            if (class_exists(\WC_Post_Data::class)) {
+            if (! $dry && class_exists(\WC_Post_Data::class)) {
                 \WC_Post_Data::do_deferred_product_sync();
             }
         } finally {
-            Batches::end();
+            if (! $dry) {
+                Batches::end();
+            }
         }
 
         return $result;
+    }
+
+    /**
+     * Per object: the revision before the batch's first one of it and the
+     * batch's last one. Objects without a predecessor (pruned, or no
+     * baseline) are left out.
+     *
+     * @param  array<int, array<int, int>>  $objects  object id => the batch's revision ids
+     * @return array<int, array{0: int, 1: int}>
+     */
+    public static function pairs(array $objects): array
+    {
+        $pairs = [];
+
+        foreach ($objects as $id => $batchRevisions) {
+            $first = min($batchRevisions);
+
+            foreach (Revisions::revisionIds((int) $id) as $revisionId) {
+                if ($revisionId < $first) {
+                    $pairs[(int) $id] = [$revisionId, max($batchRevisions)];
+
+                    break;
+                }
+            }
+        }
+
+        return $pairs;
     }
 
     /**
@@ -194,7 +214,7 @@ final class Restore
      */
     public static function state(int $revisionId, int $postId): array
     {
-        $snapshot = Revisions::revisionSnapshot($revisionId);
+        $snapshot = Revisions::revisionSnapshot($revisionId, $postId);
         $revision = get_post($revisionId);
         $post = [];
 
@@ -240,13 +260,27 @@ final class Restore
 
         foreach (['meta', 'terms', 'post'] as $group) {
             foreach (array_unique(array_merge(array_keys($a[$group]), array_keys($b[$group]))) as $key) {
-                if (($a[$group][$key] ?? null) !== ($b[$group][$key] ?? null)) {
+                if (self::normal($key, $a[$group][$key] ?? null) !== self::normal($key, $b[$group][$key] ?? null)) {
                     $keys[] = $group.':'.$key;
                 }
             }
         }
 
         return $keys;
+    }
+
+    /**
+     * A missing key and an empty value are the same to WooCommerce (it
+     * writes `_thumbnail_id` 0 on a variation's first REST save, where
+     * there was no row): not a change.
+     */
+    private static function normal(string $key, mixed $value): mixed
+    {
+        if ($value === null || $value === '' || ($key === '_thumbnail_id' && $value === '0')) {
+            return '';
+        }
+
+        return $value;
     }
 
     /**

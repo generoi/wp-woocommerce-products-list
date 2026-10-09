@@ -3,10 +3,12 @@
 namespace GeneroWP\ProductsList\Tests\Integration;
 
 use GeneroWP\ProductsList\History\Batches;
+use GeneroWP\ProductsList\History\Compare;
 use GeneroWP\ProductsList\History\History;
 use GeneroWP\ProductsList\History\Restore;
 use GeneroWP\ProductsList\History\Revisions;
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\Table;
 use WC_Product;
 
 /**
@@ -26,54 +28,31 @@ class RevisionsSpikeTest extends RestTestCase
     {
         parent::set_up();
 
-        // Defined here, not when the file loads: PHPUnit loads every test
-        // file before the first test, and the rest of the suite runs
-        // without revisions. History::toggle(false) takes it out again.
-        if (! defined('WC_PRODUCTS_LIST_HISTORY')) {
-            define('WC_PRODUCTS_LIST_HISTORY', 'revisions');
-        }
-
         if (! self::$registered) {
             (new History)->register();
             self::$registered = true;
-        } else {
-            History::toggle(true);
         }
 
-        History::resetOptions();
+        History::switchTo('both');
         Revisions::forget();
         Batches::reset();
 
-        // Stand-in for gds-woo-i18n, which the suite does not load.
-        add_filter(Revisions::FILTER_META_KEYS, [self::class, 'i18nKeys'], 10, 2);
+        // What gds-woo-i18n does in Phase 1: its own register_post_meta
+        // with `revisions_enabled` (the suite does not load the plugin).
+        register_post_meta('product_variation', '_i18n_description_se', ['single' => true, 'type' => 'string', 'revisions_enabled' => true]);
     }
 
     public function tear_down(): void
     {
-        remove_filter(Revisions::FILTER_META_KEYS, [self::class, 'i18nKeys'], 10);
+        unregister_post_meta('product_variation', '_i18n_description_se');
         remove_all_filters(History::FILTER_OPTIONS);
         Batches::reset();
         Revisions::forget();
-        History::toggle(false);
+        History::switchTo('log');
         $_POST = [];
         set_current_screen('front');
 
         parent::tear_down();
-    }
-
-    /**
-     * @param  array<int, string>  $keys
-     * @return array<int, string>
-     */
-    public static function i18nKeys(array $keys, string $postType): array
-    {
-        $fields = $postType === 'product_variation' ? ['description', 'regular_price'] : ['name', 'description'];
-
-        foreach ($fields as $field) {
-            $keys[] = '_i18n_'.$field.'_se';
-        }
-
-        return $keys;
     }
 
     /** @return array<int, int> newest first */
@@ -534,26 +513,6 @@ class RevisionsSpikeTest extends RestTestCase
         $this->assertRevisionIsState($id, 3);
     }
 
-    public function test_lean_writer_and_packed_storage_give_the_same_history(): void
-    {
-        add_filter(History::FILTER_OPTIONS, static fn (array $options): array => ['writer' => 'lean', 'storage' => 'packed'] + $options);
-        History::resetOptions();
-
-        $parent = $this->variableProduct(['38', '39']);
-        [$v38] = $parent->get_children();
-        $this->ready();
-        $variation = wc_get_product($v38);
-        $variation->set_sale_price('149');
-        $variation->save();
-
-        $this->assertRevisionIsState($v38, 2);
-        $this->assertBaseline($v38, 'meta:_sale_price', null);
-        $this->assertSame(['_wcpl_snapshot'], array_keys(get_metadata('post', $this->revisions($v38)[0])));
-
-        $batch = (string) $this->batchOf($this->revisions($v38)[0]);
-        $this->assertUndoRedo($batch, [$v38 => ['meta:_sale_price' => null]], [$v38 => ['meta:_sale_price' => '149']]);
-    }
-
     public function test_retention_prunes_variations_to_the_limit(): void
     {
         add_filter(History::FILTER_OPTIONS, static fn (array $options): array => ['keep_variation' => 3] + $options);
@@ -569,5 +528,76 @@ class RevisionsSpikeTest extends RestTestCase
         }
 
         $this->assertRevisionIsState($v38, 3);
+    }
+
+    private function logRows(string $batch): int
+    {
+        global $wpdb;
+
+        $table = Table::name();
+
+        return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE batch_id = %s AND status = 'ok'", $batch)); // phpcs:ignore
+    }
+
+    private function bulkSale(): array
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        $simple = $this->simpleProduct(['sku' => 'M1'])->get_id();
+        [$a, $b] = $parent->get_children();
+        $this->ready();
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [
+            ['id' => $a, 'sale_price' => '99', 'i18n' => ['se' => ['description' => 'x']]],
+            ['id' => $b, 'sale_price' => '98', 'date_on_sale_to' => '2030-01-31'],
+        ]], ['X-WC-Products-List-Source' => 'bulk']));
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $simple, 'regular_price' => '120', 'name' => 'Both boot'],
+        ]], ['X-WC-Products-List-Source' => 'bulk']));
+        $this->settle();
+
+        return [$a, $b, $simple];
+    }
+
+    public function test_default_log_mode_records_no_revisions(): void
+    {
+        History::switchTo('log');
+        [$a, , $simple] = $this->bulkSale();
+
+        $this->assertSame([], $this->revisions($a));
+        $this->assertSame([], $this->revisions($simple));
+        $this->assertGreaterThan(0, $this->logRows($this->batchId()));
+        $this->assertNull(Batches::term($this->batchId()));
+        $this->assertFalse(post_type_supports('product_variation', 'revisions'));
+    }
+
+    public function test_both_mode_records_the_log_and_revisions_under_one_batch(): void
+    {
+        [$a, $b, $simple] = $this->bulkSale();
+
+        $this->assertSame(5, $this->logRows($this->batchId()));
+        $this->assertSame(3, count(Batches::revisions($this->batchId())));
+
+        $compare = Compare::run($this->batchId());
+        $this->assertSame(3, $compare['summary']['objects']);
+        $this->assertSame(3, $compare['summary']['match'], wp_json_encode($compare['objects']));
+        $this->assertSame(3, $compare['revisions']['undo_dry_run']['restored']);
+        $this->assertSame(0, $compare['log']['undo_would_skip_changed']);
+
+        // The log's own revert still works in `both` mode, and takes revisions too.
+        Restore::undoAll($this->batchId());
+        $this->settle();
+        $this->assertSame('', get_post_meta($a, '_sale_price', true));
+        $this->assertSame('189', get_post_meta($simple, '_regular_price', true));
+        $this->assertDerived($b);
+    }
+
+    public function test_revisions_mode_keeps_the_log_quiet(): void
+    {
+        History::switchTo('revisions');
+        [$a] = $this->bulkSale();
+
+        $this->assertSame(0, $this->logRows($this->batchId()));
+        $this->assertSame(3, count(Batches::revisions($this->batchId())));
+        $this->assertRevisionIsState($a, 2, $this->batchId());
     }
 }

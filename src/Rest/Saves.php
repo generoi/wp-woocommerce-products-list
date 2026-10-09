@@ -241,7 +241,7 @@ final class Saves
         unset(self::$dispatched[$key]);
 
         if ($request->get_method() !== 'GET' && (Recorder::hasPending() || ListMode::active())) {
-            if ($dispatched && self::mayLog()) {
+            if ($dispatched && self::mayLog() && History::logs()) {
                 Recorder::abandon($response, $request);
             } else {
                 // Refused before its callback ran (not logged in, no
@@ -380,8 +380,8 @@ final class Saves
 
         self::forwardFields($request);
 
-        // SPIKE: with native revisions the field log stays quiet.
-        if (! History::enabled()) {
+        // POC: in `revisions` mode the field log stays quiet (docs/revisions.md).
+        if (History::logs()) {
             Recorder::begin($product, $request, $creating);
         }
 
@@ -490,7 +490,7 @@ final class Saves
 
         self::clearBrands($product, $request);
 
-        if (! History::enabled()) {
+        if (History::logs()) {
             Recorder::complete($product, $request);
         }
     }

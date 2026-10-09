@@ -2,28 +2,23 @@
 
 namespace GeneroWP\ProductsList\History;
 
-use Genero\WooI18n\Meta;
-use Genero\WooI18n\Plugin;
 use WC_Product;
 use WP_Post;
 
 /**
- * SPIKE: revisions that match what WooCommerce saved.
+ * SPIKE: core revisions for WooCommerce products and variations.
  *
- * - The revision is taken on `woocommerce_after_product_object_save`
- *   (priority 99, products and variations alike), when meta and terms are
- *   written. Core's own revision during WooCommerce's `wp_update_post`
- *   would copy the meta one save behind, so it is suppressed with a
- *   per-id flag that makes `wp_revisions_to_keep` 0 for the duration.
- * - Before the first change of an object that has no revision yet, the
- *   pre-save state is put down as a baseline (`_wp_put_post_revision`),
- *   so the first change can be undone.
- * - The revisioned keys are WooCommerce's editable product meta, the
- *   variation's `attribute_*` keys and whatever
- *   `wc_products_list/revision_meta_keys` adds (gds-woo-i18n's
- *   `_i18n_{field}_{lang}`). Terms are a `_wcpl_terms` JSON snapshot.
- * - Revision meta is written with one INSERT per revision (core copies
- *   key by key with add_metadata()).
+ * Core does the work: `revisions` post type support, meta registered with
+ * `revisions_enabled`, wp_save_post_revision(), core's meta copy, change
+ * check and restore. What is added, and why, is listed in
+ * docs/revisions.md:
+ *
+ * 1. The revision is taken after WooCommerce's save, not during its
+ *    wp_update_post (which runs before the meta is written), and core's
+ *    revision in between is suppressed with wp_revisions_to_keep = 0.
+ * 2. A baseline before the first change of an object with no revision.
+ * 3. Terms: a `_wcpl_terms` revision meta snapshot and a change check.
+ * 4. Restore re-saves through WooCommerce CRUD before core's raw meta copy.
  */
 final class Revisions
 {
@@ -31,11 +26,7 @@ final class Revisions
 
     public const TERMS_KEY = '_wcpl_terms';
 
-    public const PACKED_KEY = '_wcpl_snapshot';
-
-    public const FILTER_META_KEYS = 'wc_products_list/revision_meta_keys';
-
-    /** Keys revisioned on both products and variations. */
+    /** Meta revisioned on both products and variations: what the editor can change. */
     public const COMMON_KEYS = [
         '_sku', '_global_unique_id',
         '_regular_price', '_sale_price', '_sale_price_dates_from', '_sale_price_dates_to',
@@ -51,13 +42,15 @@ final class Revisions
 
     public const VARIATION_KEYS = ['_variation_description'];
 
-    /** Taxonomies whose state a revision snapshots, per post type. */
     public const PRODUCT_TAXONOMIES = ['product_cat', 'product_tag', 'product_brand', 'product_shipping_class', 'product_visibility'];
 
     public const VARIATION_TAXONOMIES = ['product_shipping_class'];
 
-    /** product_visibility terms that are edited (the others are derived from stock and ratings). */
+    /** product_visibility terms that are edited (outofstock and rated-* are derived). */
     public const VISIBILITY_TERMS = ['exclude-from-catalog', 'exclude-from-search', 'featured'];
+
+    /** gds-woo-i18n's translated values, `_i18n_{field}_{lang}` (not its reviewed/machine markers). */
+    public const I18N_PATTERN = '/^_i18n_(?!reviewed_|machine_).+_[a-z]{2}$/';
 
     /** @var array<int, true> ids being saved through CRUD: core's own revision is suppressed */
     private static array $saving = [];
@@ -65,74 +58,110 @@ final class Revisions
     /** @var array<int, array<int, string>> id => the fields the pending save changes */
     private static array $pendingFields = [];
 
-    /** @var array<int, array<int, int>> id => revision ids, newest first (per-request memo) */
-    private static array $memo = [];
-
     /** @var array<int, true> spl_object_id of products being created */
     private static array $creating = [];
 
     /** Set while a baseline is written: it gets no batch term. */
     private static bool $baseline = false;
 
-    /** @var array<int, int> post id => the last revision core created outside a CRUD save (for restore cleanup) */
-    private static array $coreCreated = [];
-
     private static bool $inCrudRevision = false;
 
-    /** @var array<int, int> revision ids created in this request, for tests and the benchmark */
-    public static array $created = [];
+    /** @var array<int, int> post id => a revision core took outside a CRUD save (restore cleanup) */
+    private static array $coreCreated = [];
+
+    /** @var array<string, array<int, string>> post type => meta keys this module registered */
+    private static array $registered = [];
 
     public static function register(): void
     {
-        if (! did_action('init')) {
-            add_action('init', static function (): void {
-                foreach (self::POST_TYPES as $type) {
-                    add_post_type_support($type, 'revisions');
-                }
-            }, 20);
-        }
+        // After WooCommerce registers its post types and attribute
+        // taxonomies (init 5), before gds-woo-i18n registers its meta (init 20).
+        did_action('init') ? self::registerMeta() : add_action('init', [self::class, 'registerMeta'], 6);
+        add_filter('register_meta_args', [self::class, 'i18nArgs'], 10, 4);
 
         self::hooks(true);
     }
 
     /**
-     * Add (or, for tests, remove) the hooks; core's own meta copy, change
-     * check and meta restore are swapped out for ours and back.
+     * `revisions` support and the revisioned meta, with core's own API.
      */
+    public static function registerMeta(): void
+    {
+        foreach (self::POST_TYPES as $type) {
+            add_post_type_support($type, 'revisions');
+            $keys = array_merge(self::COMMON_KEYS, $type === 'product_variation' ? self::VARIATION_KEYS : self::PRODUCT_KEYS);
+
+            if ($type === 'product_variation') {
+                // Global attributes; a variation of a custom (product-level)
+                // attribute keeps `attribute_{name}` unrevisioned (docs/revisions.md).
+                foreach (wc_get_attribute_taxonomy_names() as $taxonomy) {
+                    $keys[] = 'attribute_'.$taxonomy;
+                }
+            }
+
+            foreach ($keys as $key) {
+                if (registered_meta_key_exists('post', $key, $type)) {
+                    continue;
+                }
+
+                register_post_meta($type, $key, ['single' => true, 'type' => 'string', 'revisions_enabled' => true]);
+                self::$registered[$type][] = $key;
+            }
+        }
+    }
+
+    /** For tests: undo registerMeta(). */
+    public static function unregisterMeta(): void
+    {
+        foreach (self::$registered as $type => $keys) {
+            foreach ($keys as $key) {
+                unregister_post_meta((string) $type, $key);
+            }
+
+            remove_post_type_support((string) $type, 'revisions');
+        }
+
+        self::$registered = [];
+    }
+
+    /**
+     * `register_meta_args`: gds-woo-i18n's translation keys become
+     * revisioned. Spike shim: in Phase 1 gds-woo-i18n passes
+     * `'revisions_enabled' => true` itself.
+     *
+     * @param  array<string, mixed>  $args
+     * @param  array<string, mixed>  $defaults
+     * @return array<string, mixed>
+     */
+    public static function i18nArgs($args, $defaults, $objectType, $metaKey): array
+    {
+        $args = (array) $args;
+
+        if ($objectType === 'post' && in_array($args['object_subtype'] ?? '', self::POST_TYPES, true) && preg_match(self::I18N_PATTERN, (string) $metaKey)) {
+            $args['revisions_enabled'] = true;
+        }
+
+        return $args;
+    }
+
     public static function hooks(bool $on): void
     {
         $add = $on ? 'add_filter' : 'remove_filter';
-        $core = $on ? 'remove_filter' : 'add_filter';
 
+        // 1. Suppress core's revision during WooCommerce's save; take it after.
         $add('wp_revisions_to_keep', [self::class, 'toKeep'], 99, 2);
-        $add('wp_post_revision_meta_keys', [self::class, 'coreMetaKeys'], 10, 2);
-
-        // Core's per-key meta copy, change check and raw meta restore are
-        // replaced for products and variations, and left alone otherwise.
-        $core('_wp_put_post_revision', 'wp_save_revisioned_meta_fields', 10, 2);
-        $add('_wp_put_post_revision', [self::class, 'writeRevisionMeta'], 10, 2);
-        $core('wp_save_post_revision_post_has_changed', 'wp_check_revisioned_meta_fields_have_changed', 10, 3);
-        $add('wp_save_post_revision_post_has_changed', [self::class, 'hasChanged'], 10, 3);
-        $core('wp_restore_post_revision', 'wp_restore_post_revision_meta', 10, 2);
-        $add('wp_restore_post_revision', [self::class, 'restored'], 10, 2);
-
-        $add('_wp_put_post_revision', [self::class, 'putRevision'], 20, 2);
-        $add('wp_delete_post_revision', [self::class, 'deletedRevision'], 10, 2);
-
         $add('woocommerce_before_product_object_save', [self::class, 'beforeSave'], 99, 1);
         $add('woocommerce_after_product_object_save', [self::class, 'afterSave'], 99, 1);
 
-        // The classic editor writes post fields with wp_update_post before
-        // WooCommerce's meta box saves: the baseline has to come first.
+        // 2. Baseline for the classic editor's wp_update_post, before the row changes.
         $add('pre_post_update', [self::class, 'prePostUpdate'], 1, 1);
 
-        $add(self::FILTER_META_KEYS, [self::class, 'i18nKeys'], 5, 2);
+        // 3. Terms.
+        $add('_wp_put_post_revision', [self::class, 'putRevision'], 20, 2);
+        $add('wp_save_post_revision_post_has_changed', [self::class, 'termsChanged'], 20, 3);
 
-        if (did_action('init')) {
-            foreach (self::POST_TYPES as $type) {
-                $on ? add_post_type_support($type, 'revisions') : remove_post_type_support($type, 'revisions');
-            }
-        }
+        // 4. Restore through CRUD, before core's raw meta copy (10).
+        $add('wp_restore_post_revision', [self::class, 'restored'], 5, 2);
     }
 
     public static function isOurs(mixed $post): bool
@@ -162,99 +191,28 @@ final class Revisions
     }
 
     /**
-     * Core's list of revisioned keys (used by its compare and restore
-     * code): the static keys. `attribute_*` and the filter's keys are
-     * per object and added where the object is known.
-     *
-     * @param  mixed  $keys
-     * @return array<int, string>
-     */
-    public static function coreMetaKeys($keys, string $postType): array
-    {
-        $keys = is_array($keys) ? $keys : [];
-
-        if (! in_array($postType, self::POST_TYPES, true)) {
-            return $keys;
-        }
-
-        return array_values(array_unique(array_merge($keys, self::staticKeys($postType))));
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    public static function staticKeys(string $postType): array
-    {
-        $keys = array_merge(self::COMMON_KEYS, $postType === 'product_variation' ? self::VARIATION_KEYS : self::PRODUCT_KEYS);
-
-        /**
-         * Filters the meta keys revisioned for products or variations.
-         *
-         * @param  array<int, string>  $keys
-         * @param  string  $postType
-         */
-        return array_values(array_unique((array) apply_filters(self::FILTER_META_KEYS, $keys, $postType)));
-    }
-
-    /**
-     * gds-woo-i18n's translation keys. In Phase 1 this filter callback
-     * belongs in gds-woo-i18n; here it is a compat shim so the spike can
-     * be measured without touching that plugin.
-     *
-     * @param  array<int, string>  $keys
-     * @return array<int, string>
-     */
-    public static function i18nKeys(array $keys, string $postType): array
-    {
-        if (! class_exists('Genero\\WooI18n\\Plugin') || ! class_exists('Genero\\WooI18n\\Meta')) {
-            return $keys;
-        }
-
-        static $cache = [];
-
-        if (! isset($cache[$postType])) {
-            $cache[$postType] = [];
-
-            try {
-                $plugin = Plugin::getInstance();
-
-                foreach (array_keys($plugin->meta()->fields($postType)) as $field) {
-                    foreach ($plugin->languages()->others() as $lang) {
-                        $cache[$postType][] = Meta::key((string) $field, (string) $lang);
-                    }
-                }
-            } catch (\Throwable) {
-                $cache[$postType] = [];
-            }
-        }
-
-        return array_merge($keys, $cache[$postType]);
-    }
-
-    /**
-     * The revisioned meta of a live product or variation: key => value,
-     * only keys that exist (as core copies them).
+     * The revisioned meta of a live object: key => value, existing keys only.
      *
      * @return array<string, string>
      */
     public static function currentMeta(int $id, ?string $postType = null): array
     {
         $postType ??= (string) get_post_type($id);
-        $all = get_post_meta($id);
-        $all = is_array($all) ? $all : [];
+
+        return self::pick((array) get_post_meta($id), $postType);
+    }
+
+    /**
+     * @param  array<string, array<int, mixed>>  $all
+     * @return array<string, string>
+     */
+    private static function pick(array $all, string $postType): array
+    {
         $values = [];
 
-        foreach (self::staticKeys($postType) as $key) {
+        foreach (wp_post_revision_meta_keys($postType) as $key) {
             if (isset($all[$key][0])) {
-                $values[$key] = (string) $all[$key][0];
-            }
-        }
-
-        if ($postType === 'product_variation') {
-            foreach ($all as $key => $list) {
-                if (str_starts_with((string) $key, 'attribute_') && isset($list[0])) {
-                    $values[(string) $key] = (string) $list[0];
-                }
+                $values[(string) $key] = (string) $all[$key][0];
             }
         }
 
@@ -264,36 +222,27 @@ final class Revisions
     }
 
     /**
-     * The terms of a live object: taxonomy => sorted term ids, empty
-     * taxonomies left out.
+     * Terms of a live object: taxonomy => sorted term ids, empty ones left out.
      *
      * @return array<string, array<int, int>>
      */
     public static function currentTerms(int $id, ?string $postType = null): array
     {
         $postType ??= (string) get_post_type($id);
-        $taxonomies = $postType === 'product_variation' ? self::VARIATION_TAXONOMIES : self::PRODUCT_TAXONOMIES;
         $snapshot = [];
 
-        foreach ($taxonomies as $taxonomy) {
+        foreach ($postType === 'product_variation' ? self::VARIATION_TAXONOMIES : self::PRODUCT_TAXONOMIES as $taxonomy) {
             if (! taxonomy_exists($taxonomy)) {
                 continue;
             }
 
             $terms = get_the_terms($id, $taxonomy);
-
-            if (! is_array($terms) || $terms === []) {
-                continue;
-            }
-
             $ids = [];
 
-            foreach ($terms as $term) {
-                if ($taxonomy === 'product_visibility' && ! in_array($term->slug, self::VISIBILITY_TERMS, true)) {
-                    continue;
+            foreach (is_array($terms) ? $terms : [] as $term) {
+                if ($taxonomy !== 'product_visibility' || in_array($term->slug, self::VISIBILITY_TERMS, true)) {
+                    $ids[] = (int) $term->term_id;
                 }
-
-                $ids[] = (int) $term->term_id;
             }
 
             if ($ids !== []) {
@@ -308,121 +257,23 @@ final class Revisions
     }
 
     /**
-     * What a revision holds: meta (revisioned keys) and terms.
+     * What a revision holds: its revisioned meta and its terms.
      *
      * @return array{meta: array<string, string>, terms: array<string, array<int, int>>}
      */
-    public static function revisionSnapshot(int $revisionId): array
+    public static function revisionSnapshot(int $revisionId, int $postId): array
     {
-        $all = get_metadata('post', $revisionId);
-        $all = is_array($all) ? $all : [];
-
-        if (isset($all[self::PACKED_KEY][0])) {
-            $packed = json_decode((string) $all[self::PACKED_KEY][0], true);
-
-            return [
-                'meta' => is_array($packed['meta'] ?? null) ? array_map('strval', $packed['meta']) : [],
-                'terms' => is_array($packed['terms'] ?? null) ? $packed['terms'] : [],
-            ];
-        }
-
-        $meta = [];
-        $terms = [];
-
-        foreach ($all as $key => $list) {
-            if ($key === self::TERMS_KEY) {
-                $decoded = json_decode((string) ($list[0] ?? ''), true);
-                $terms = is_array($decoded) ? $decoded : [];
-
-                continue;
-            }
-
-            if (str_starts_with((string) $key, '_wcpl_') || ! isset($list[0])) {
-                continue;
-            }
-
-            $meta[(string) $key] = (string) $list[0];
-        }
-
-        ksort($meta);
+        $all = (array) get_metadata('post', $revisionId);
+        $terms = json_decode((string) ($all[self::TERMS_KEY][0] ?? ''), true);
+        $terms = is_array($terms) ? $terms : [];
         ksort($terms);
 
-        return ['meta' => $meta, 'terms' => $terms];
+        return ['meta' => self::pick($all, (string) get_post_type($postId)), 'terms' => $terms];
     }
 
     /**
-     * Replaces core's `wp_save_revisioned_meta_fields` (`_wp_put_post_revision`, 10).
-     */
-    public static function writeRevisionMeta(int $revisionId, int $postId = 0): void
-    {
-        global $wpdb;
-
-        $postId = $postId > 0 ? $postId : (int) wp_get_post_parent_id($revisionId);
-
-        if (! self::isOurs($postId)) {
-            wp_save_revisioned_meta_fields($revisionId, $postId);
-
-            return;
-        }
-
-        $postType = (string) get_post_type($postId);
-        $meta = self::currentMeta($postId, $postType);
-        $terms = self::currentTerms($postId, $postType);
-        $rows = [];
-
-        if (History::options()['storage'] === 'packed') {
-            $rows[self::PACKED_KEY] = (string) wp_json_encode(['meta' => $meta, 'terms' => $terms]);
-        } else {
-            $rows = $meta;
-
-            if ($terms !== []) {
-                $rows[self::TERMS_KEY] = (string) wp_json_encode($terms);
-            }
-        }
-
-        if ($rows === []) {
-            return;
-        }
-
-        $values = [];
-
-        foreach ($rows as $key => $value) {
-            $values[] = $wpdb->prepare('(%d, %s, %s)', $revisionId, $key, $value);
-        }
-
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $wpdb->query("INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES ".implode(',', $values));
-        wp_cache_delete($revisionId, 'post_meta');
-    }
-
-    /**
-     * Replaces core's `wp_check_revisioned_meta_fields_have_changed`.
-     *
-     * @param  mixed  $changed
-     */
-    public static function hasChanged($changed, WP_Post $latest, WP_Post $post): bool
-    {
-        if (! in_array($post->post_type, self::POST_TYPES, true)) {
-            return wp_check_revisioned_meta_fields_have_changed((bool) $changed, $latest, $post);
-        }
-
-        if ($changed) {
-            return true;
-        }
-
-        return self::snapshotDiffers($post->ID, $post->post_type, $latest->ID);
-    }
-
-    public static function snapshotDiffers(int $postId, string $postType, int $revisionId): bool
-    {
-        $revision = self::revisionSnapshot($revisionId);
-
-        return $revision['meta'] !== self::currentMeta($postId, $postType)
-            || $revision['terms'] !== self::currentTerms($postId, $postType);
-    }
-
-    /**
-     * `_wp_put_post_revision`, 20: memo, batch term.
+     * `_wp_put_post_revision`, 20 (after core copied the meta at 10):
+     * the terms snapshot and the batch term.
      */
     public static function putRevision(int $revisionId, int $postId = 0): void
     {
@@ -432,11 +283,12 @@ final class Revisions
             return;
         }
 
-        if (isset(self::$memo[$postId])) {
-            array_unshift(self::$memo[$postId], $revisionId);
-        }
+        $terms = self::currentTerms($postId);
 
-        self::$created[] = $revisionId;
+        if ($terms !== []) {
+            // add_metadata, not add_post_meta: the latter writes to the parent of a revision.
+            add_metadata('post', $revisionId, self::TERMS_KEY, wp_slash((string) wp_json_encode($terms)));
+        }
 
         if (self::$baseline) {
             return;
@@ -450,73 +302,40 @@ final class Revisions
     }
 
     /**
-     * @param  mixed  $revision
+     * `wp_save_post_revision_post_has_changed`, 20 (core's meta check is at 10).
+     *
+     * @param  mixed  $changed
      */
-    public static function deletedRevision(int $revisionId, $revision = null): void
+    public static function termsChanged($changed, WP_Post $latest, WP_Post $post): bool
     {
-        $parent = $revision instanceof WP_Post ? (int) $revision->post_parent : 0;
-
-        if ($parent > 0 && isset(self::$memo[$parent])) {
-            self::$memo[$parent] = array_values(array_diff(self::$memo[$parent], [$revisionId]));
+        if ($changed || ! in_array($post->post_type, self::POST_TYPES, true)) {
+            return (bool) $changed;
         }
+
+        return self::revisionSnapshot($latest->ID, $post->ID)['terms'] !== self::currentTerms($post->ID, $post->post_type);
     }
 
     /**
-     * Revision ids of a post, newest first (autosaves left out).
+     * Revision ids of a post, newest first. Core's own lookup; it answers
+     * nothing while revisions are off for the post (during a CRUD save).
      *
      * @return array<int, int>
      */
-    public static function revisionIds(int $postId): array
+    public static function revisionIds(int $postId, int $limit = -1): array
     {
-        global $wpdb;
-
-        if (! isset(self::$memo[$postId])) {
-            $ids = $wpdb->get_col($wpdb->prepare(
-                "SELECT ID FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = 'revision' AND post_name NOT LIKE %s ORDER BY ID DESC",
-                $postId,
-                '%autosave%'
-            ));
-            self::$memo[$postId] = array_map('intval', $ids);
-        }
-
-        return self::$memo[$postId];
+        return array_values(array_map('intval', wp_get_post_revisions($postId, ['fields' => 'ids', 'posts_per_page' => $limit])));
     }
 
-    /**
-     * Load the revision id lists of many posts in one query.
-     *
-     * @param  array<int, int>  $postIds
-     */
-    public static function primeRevisionIds(array $postIds): void
+    public static function hasRevision(int $postId): bool
     {
-        global $wpdb;
-
-        $postIds = array_values(array_diff(array_unique(array_map('intval', $postIds)), array_keys(self::$memo)));
-
-        if ($postIds === []) {
-            return;
-        }
-
-        foreach ($postIds as $id) {
-            self::$memo[$id] = [];
-        }
-
-        $in = implode(',', $postIds);
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results("SELECT ID, post_parent FROM {$wpdb->posts} WHERE post_parent IN ({$in}) AND post_type = 'revision' AND post_name NOT LIKE '%autosave%' ORDER BY ID DESC");
-
-        foreach ((array) $rows as $row) {
-            self::$memo[(int) $row->post_parent][] = (int) $row->ID;
-        }
+        return wp_get_post_revisions($postId, ['fields' => 'ids', 'posts_per_page' => 1]) !== [];
     }
 
     public static function forget(): void
     {
-        self::$memo = [];
         self::$saving = [];
         self::$pendingFields = [];
         self::$coreCreated = [];
-        self::$created = [];
         self::$creating = [];
     }
 
@@ -530,10 +349,6 @@ final class Revisions
         $fields = array_keys($product->get_changes());
 
         foreach ($product->get_meta_data() as $meta) {
-            if (! $meta instanceof \WC_Meta_Data) {
-                continue;
-            }
-
             $data = $meta->get_data();
 
             if (empty($data['id']) || $meta->get_changes() !== []) {
@@ -545,8 +360,6 @@ final class Revisions
     }
 
     /**
-     * `woocommerce_before_product_object_save`, 99.
-     *
      * @param  mixed  $product
      */
     public static function beforeSave($product): void
@@ -556,32 +369,29 @@ final class Revisions
         }
 
         if ($product->get_id() <= 0) {
-            // Creating: the first change of the object puts the created
-            // state down as its baseline, so a create costs nothing here.
+            // A create takes no revision: the first change puts the created state down as the baseline.
             self::$creating[spl_object_id($product)] = true;
 
             return;
         }
 
-        $id = $product->get_id();
-        $post = get_post($id);
+        $post = get_post($product->get_id());
 
         if (! $post instanceof WP_Post || ! in_array($post->post_type, self::POST_TYPES, true)) {
             return;
         }
 
-        self::$saving[$id] = true;
         $fields = self::changedFields($product);
-        self::$pendingFields[$id] = $fields;
+        self::$pendingFields[$post->ID] = $fields;
 
         if ($fields !== [] && $post->post_status !== 'auto-draft') {
             self::baseline($post);
         }
+
+        self::$saving[$post->ID] = true;
     }
 
     /**
-     * `woocommerce_after_product_object_save`, 99.
-     *
      * @param  mixed  $product
      */
     public static function afterSave($product): void
@@ -606,25 +416,25 @@ final class Revisions
         $fields = self::$pendingFields[$id] ?? [];
         unset(self::$pendingFields[$id]);
 
-        // Nothing changed and nothing recorded yet: core would take a
-        // first revision of an unchanged object; the first change will
-        // take the baseline instead.
-        if ($fields === [] && self::revisionIds($id) === []) {
+        // Nothing changed and nothing recorded: core would take a first
+        // revision of an unchanged object.
+        if ($fields === [] && ! self::hasRevision($id)) {
             return;
         }
 
-        $revisionId = self::save($id);
+        self::$inCrudRevision = true;
+
+        try {
+            $revisionId = (int) wp_save_post_revision($id);
+        } finally {
+            self::$inCrudRevision = false;
+        }
 
         if ($revisionId > 0) {
-            Batches::addFields($fields === [] ? ['create'] : $fields);
+            Batches::addFields($fields === [] ? ['terms'] : $fields);
         }
     }
 
-    /**
-     * `pre_post_update`: an update through wp_update_post (the classic
-     * editor, quick edit) of an object with no revision gets its baseline
-     * before the post row changes.
-     */
     public static function prePostUpdate(int $postId): void
     {
         if (isset(self::$saving[$postId])) {
@@ -633,20 +443,14 @@ final class Revisions
 
         $post = get_post($postId);
 
-        if (! $post instanceof WP_Post || ! in_array($post->post_type, self::POST_TYPES, true) || $post->post_status === 'auto-draft') {
-            return;
+        if ($post instanceof WP_Post && in_array($post->post_type, self::POST_TYPES, true) && $post->post_status !== 'auto-draft') {
+            self::baseline($post);
         }
-
-        self::baseline($post);
     }
 
-    /**
-     * Put the stored (pre-save) state down as the first revision, when
-     * the object has none.
-     */
     public static function baseline(WP_Post $post): void
     {
-        if (self::revisionIds($post->ID) !== []) {
+        if (self::hasRevision($post->ID)) {
             return;
         }
 
@@ -660,88 +464,19 @@ final class Revisions
     }
 
     /**
-     * Take the revision of what was just saved. Returns the revision id,
-     * or 0 when nothing changed.
-     */
-    public static function save(int $id): int
-    {
-        self::$inCrudRevision = true;
-
-        try {
-            return History::options()['writer'] === 'lean' ? self::saveLean($id) : (int) wp_save_post_revision($id);
-        } finally {
-            self::$inCrudRevision = false;
-        }
-    }
-
-    /**
-     * Same result as wp_save_post_revision() for our types, with id-only
-     * lookups: the memo gives the latest revision and the count.
-     */
-    private static function saveLean(int $id): int
-    {
-        $post = get_post($id);
-
-        if (! $post instanceof WP_Post || $post->post_status === 'auto-draft' || ! wp_revisions_enabled($post)) {
-            return 0;
-        }
-
-        $ids = self::revisionIds($id);
-
-        if ($ids !== []) {
-            $latest = get_post($ids[0]);
-
-            if ($latest instanceof WP_Post) {
-                $changed = false;
-
-                foreach (array_keys(_wp_post_revision_fields($post)) as $field) {
-                    if (normalize_whitespace(maybe_serialize($post->$field)) !== normalize_whitespace(maybe_serialize($latest->$field))) {
-                        $changed = true;
-
-                        break;
-                    }
-                }
-
-                if (! $changed && ! self::snapshotDiffers($id, $post->post_type, $latest->ID)) {
-                    return 0;
-                }
-            }
-        }
-
-        $revisionId = _wp_put_post_revision($post);
-
-        if (! is_int($revisionId) || $revisionId <= 0) {
-            return 0;
-        }
-
-        $keep = wp_revisions_to_keep($post);
-        $ids = self::revisionIds($id);
-
-        if ($keep >= 0 && count($ids) > $keep) {
-            foreach (array_slice($ids, $keep) as $old) {
-                wp_delete_post_revision($old);
-            }
-        }
-
-        return $revisionId;
-    }
-
-    /**
-     * `wp_restore_post_revision`: core restored the post fields with
-     * wp_update_post; the rest goes through WooCommerce CRUD so derived
-     * data (`_price`, the parent's range, lookup tables) follows.
+     * `wp_restore_post_revision`, 5: core restored the post fields with
+     * wp_update_post; the meta and terms go through CRUD so WooCommerce
+     * keeps `_price`, the parent's range and the lookup tables right.
+     * Core's raw meta copy at 10 then writes the same values again.
      */
     public static function restored(int $postId, int $revisionId): void
     {
         if (! self::isOurs($postId)) {
-            wp_restore_post_revision_meta($postId, $revisionId);
-
             return;
         }
 
-        // The revision core took during its wp_update_post holds the
-        // restored post fields with the old meta: it is replaced by the
-        // one the CRUD save below takes.
+        // Core's wp_update_post took a revision with the restored post
+        // fields and the old meta; the CRUD save below takes the right one.
         if (isset(self::$coreCreated[$postId]) && self::$coreCreated[$postId] !== $revisionId) {
             wp_delete_post_revision(self::$coreCreated[$postId]);
             unset(self::$coreCreated[$postId]);
