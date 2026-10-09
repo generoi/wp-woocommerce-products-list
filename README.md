@@ -27,7 +27,7 @@ The package is on GitHub, not Packagist. In the site's `composer.json`:
     { "type": "vcs", "url": "https://github.com/generoi/wp-woocommerce-products-list" }
   ],
   "require": {
-    "generoi/wp-woocommerce-products-list": "^0.1.0"
+    "generoi/wp-woocommerce-products-list": "^0.1.1"
   }
 }
 ```
@@ -66,16 +66,22 @@ Every log row stores who made the change (`user_id`) and, in its `context` colum
 
 Budgets (completion criteria, [docs/contracts.md](docs/contracts.md) §9): list page < 1 s, expanding 100 variations < 1 s, 100-row bulk save < 5 s, optimistic UI, no reloads.
 
-Measured on the widetoes ddev site (855 products, 24k variations, no persistent object cache):
+Measured on the widetoes ddev site (855 products, 24k variations, no persistent object cache). Server numbers are in-process or Resource Timing TTFB on an otherwise idle machine unless noted; client numbers come from a background Chrome tab with the development React build, so they are upper bounds.
 
 | Operation | Measured |
 | --- | --- |
-| List, 100 per page, in-process | 307–452 ms, ~111–119 queries (plain wc/v3 without the list header: 388–1175 ms, 208–213 queries) |
-| List, 100 per page, browser TTFB | 420–560 ms warm; first request of a cold PHP-FPM worker up to 1.6 s |
-| Expand 100 variations | 244–367 ms, ~76–80 queries |
-| 100-row bulk save (menu order +1) | 2.8 s from Enter to snackbar (three parallel batch requests, 1.0–1.5 s each) |
+| List, 100 per page, in-process | 260–452 ms, ~111–121 queries (plain wc/v3 without the list header: 388–1175 ms, 208–213 queries) |
+| List, 100 per page, browser TTFB | 370–750 ms warm; counts 37–206 ms |
+| Skeleton (first paint) | about 1 s; the list request is prefetched before the bundle runs (default view only) |
+| Expand 100 variations (cross-parent route) | 244–504 ms, ~76–113 queries |
+| Expand all, 100 per page (5 cross-parent requests) | network done in about 1.7 s; about 600 rows rendered in 4–8 s |
+| Quick edit open | 86–340 ms (398 ms with about 555 rows on the page) |
+| Bulk edit open, 100 rows | 148–416 ms; current values loaded in 0.9–2 s |
+| 100-row bulk save (menu order +1, featured) | 2.8–3.3 s from Update to panel closed (three parallel batch requests) |
 | Scheduled sale on 125–220 variations | 2.2–4.3 s |
 | Revert of a 100-row batch | 3–4.5 s |
+
+With four audit sessions sharing the same ddev host (load average 20–100) the list TTFB rose to 1–5.6 s and a 100-row save to about 11.5 s; those runs are not comparable with the budgets and an idle re-measure in a foreground tab is still open (see Known gaps).
 
 Measure on a production-like build: `SCRIPT_DEBUG` off (Bedrock's development environment turns it on, which loads the development builds of React and makes rendering several times slower) and Query Monitor deactivated (its backtraces double REST timings).
 
@@ -111,14 +117,23 @@ Further reading:
 
 ## Known gaps
 
-- No row virtualisation: Expand all on a 100-per-page view is capped at about 1,500 rows and takes several seconds to render; selecting or collapsing at that size blocks the tab noticeably.
-- The first list request of a cold PHP-FPM worker can take 1.6–1.9 s (not profiled yet).
-- Translation work for names and short descriptions is form-based (quick edit, staged bulk tools); there is no spreadsheet-style per-language grid, no per-language image alt text and no per-language local attribute values.
-- Whole-krona price points (…9 / …99 kr) are not a rounding option; the market-price "Default" hint does not recompute from an unsaved EUR edit.
+- Speed under concurrency: with several editors saving at once the list request and 100-row saves exceeded the budgets in the last audit round. Client timings have only been measured in background tabs. A foreground, idle-host re-measure and CI timing gates are the next step.
+- No row virtualisation: Expand all on a 100-per-page view expands as many parents as fit in about 600 rows, and rendering that takes several seconds; selecting or collapsing at that size blocks the tab noticeably.
+- Only the default view's list request is prefetched; deep links with search or filters wait for the bundle.
+- Per-row variation summaries cost 226–437 ms of a list request on a loaded host, and batch writes compute them once per item.
+- History's batch list aggregates the whole log table on every request; History reverts whole batches only (no single-change revert) and is a separate page load.
+- Translations: the per-product grid lives in bulk edit's language tabs (name and short description; no SEO columns, short descriptions with markup show as HTML). There is no inline per-language editing in the list itself, no EUR → SEK/NOK/DKK conversion, no attribute-term translation UI, no per-language image alt text and no per-language local attribute values.
+- Whole-krona price points (…9 / …99 kr) are not a rounding option.
 - Back/Forward do not step through in-app URL state (it uses `replaceState`).
-- The SKU-owner error names the owning product by id without a link.
+- No uninstall cleanup or privacy exporter/eraser for the log.
 - The bundle is over the plan's original 1.5 MB target (see Speed).
 - `languages/` has no `.pot` yet.
+
+The full list of open findings from the last audit round is tracked as a GitHub follow-up issue.
+
+## Audit
+
+The plugin was audited in ten rounds by six personas each (three store managers running real weekly price, stock, campaign and translation work in the browser, and senior PHP, JS/TS and WordPress/WooCommerce reviewers). In round 10 four of six signed off: the operations lead, the PHP/REST reviewer, the JS/TS reviewer and the WordPress/WooCommerce reviewer (data correctness verified against the database in every scenario, every revert exact). The two store managers who did not sign off cited speed measured on a heavily loaded shared host and translation work that is still mostly form-based.
 
 ## License
 

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-09
+
+Changes since 0.1.0 (one feature commit, 3961c8c, plus this release commit).
 
 - Bulk edit's language tabs have "Translate product by product": a spreadsheet of each selected product's name and short description in that language, with the text the shop shows now as reference, Enter to move down the column, and saving with Update in the same History batch.
 - "Edit translated text" previews templates, set, prefix, suffix and find & replace from the server: tokens such as {name} and {brand} are resolved, and the preview says which products would take {name} from another language.
@@ -10,6 +12,10 @@
 - The name column no longer repeats the SKU on a second line (the SKU is its own column); saved views that had it are cleaned up.
 - Short description, description and their translations edit as formatted text (Bold, Italic, lists, links) with a Code view for the HTML, instead of raw markup with `&amp;` and `<br />` in a textarea. Nothing is rewritten unless edited, text stored without paragraph tags keeps that form, and HTML the visual editor cannot keep (scripts, embeds, block comments) opens in Code.
 - A click on the label of the editor's first checkbox ("Apply price and sale fields to all variations") no longer ticks every row of the list (the editor's checkboxes shared an id with the list's select-all checkbox).
+- The list page prints a static skeleton and prefetches the default view's list and counts requests before the bundle runs.
+- Expand all, Select all variations and bulk-edit hydration read variations across parents (`GET /wc-products-list/v1/variations`, one request per 100 variations instead of one per parent).
+- Name cells and row parts subscribe per row; saves write the cache twice per save instead of once per response; reverts are sent three chunks at a time.
+- Server: `brands: []` clears `product_brand` and logs it; History labels mixed batches as both edit and action; `/log/skipped` writes one row per item.
 
 ## 0.1.0 - 2026-10-09
 
