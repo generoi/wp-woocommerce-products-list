@@ -49,6 +49,8 @@ final class Compare
         'default_attributes' => 'meta:_default_attributes',
         'name' => 'post:post_title',
         'short_description' => 'post:post_excerpt',
+        'status' => 'post:post_status',
+        'menu_order' => 'post:menu_order',
         'categories' => 'terms:product_cat',
         'tags' => 'terms:product_tag',
         'brands' => 'terms:product_brand',

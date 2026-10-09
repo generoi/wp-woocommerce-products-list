@@ -2,7 +2,9 @@ import { act, fireEvent, render } from '@testing-library/react';
 import { dispatch, select } from '@wordpress/data';
 import { store as noticesStore } from '@wordpress/notices';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACTION_TIMEOUT, createDismissTimers, MAX_SNACKBARS, Notices, NOTICES_HEIGHT_VAR, overflowingNotices, PLAIN_TIMEOUT, snackbarTimeout } from '../../resources/ui/notices';
+import { ACTION_TIMEOUT, createDismissTimers, MAX_SNACKBARS, Notices, NOTICES_HEIGHT_VAR, outcomeNoticeId, overflowingNotices, PLAIN_TIMEOUT, snackbarTimeout } from '../../resources/ui/notices';
+/** edit/inline-editor.tsx SAVED_NOTICE_ID (not imported: the editor module is heavy). */
+const SAVED_NOTICE_ID = 'wc-pl-saved';
 
 describe( 'snackbarTimeout', () => {
 	it( 'hides an Undo snackbar after 10 s and a plain one after 6 s; errors and explicit ones stay', () => {
@@ -40,6 +42,87 @@ describe( 'overflowingNotices', () => {
 
 		expect( overflowingNotices( notices, 3 ) ).toEqual( [ 'campaign' ] );
 		expect( overflowingNotices( notices.slice( 0, 3 ), 3 ) ).toEqual( [] );
+	} );
+
+	it( 'never drops an error or a notice asked to stay, and does not count them toward the cap', () => {
+		const notices = [
+			{ id: 'error', status: 'error' },
+			{ id: 'reverting', status: 'info', explicitDismiss: true },
+			{ id: 'a', status: 'info' },
+			{ id: 'b', status: 'info' },
+			{ id: 'c', status: 'info' },
+			{ id: 'd', status: 'info' },
+		];
+
+		expect( overflowingNotices( notices, 3 ) ).toEqual( [ 'a' ] );
+	} );
+
+	it( 'gives each background save outcome its own id, apart from the shared success id', () => {
+		const first = outcomeNoticeId( 'batch-1' );
+
+		expect( first ).not.toBe( SAVED_NOTICE_ID );
+		expect( outcomeNoticeId( 'batch-2' ) ).not.toBe( first );
+		expect( outcomeNoticeId( '' ) ).not.toBe( outcomeNoticeId( '' ) );
+	} );
+} );
+
+describe( 'a background save failure notice', () => {
+	afterEach( () => {
+		select( noticesStore )
+			.getNotices()
+			.forEach( ( notice ) => void dispatch( noticesStore ).removeNotice( notice.id ) );
+	} );
+
+	it( 'survives a later save\'s success (with Undo) and 3 further info notices', async () => {
+		const undo = { label: 'Undo', onClick: () => {} };
+		const failureId = outcomeNoticeId( 'batch-bg' );
+
+		render( <Notices /> );
+
+		await act( async () => {
+			void dispatch( noticesStore ).createErrorNotice( '1889 updated, 195 failed.', {
+				id: failureId,
+				type: 'snackbar',
+				explicitDismiss: true,
+				actions: [ undo, { label: 'Select the 197 failed', onClick: () => {} } ],
+			} );
+		} );
+		await act( async () => {
+			void dispatch( noticesStore ).createSuccessNotice( '1 item updated.', { id: SAVED_NOTICE_ID, type: 'snackbar', actions: [ undo ] } );
+		} );
+		await act( async () => {
+			for ( const id of [ 'i1', 'i2', 'i3' ] ) {
+				void dispatch( noticesStore ).createInfoNotice( id, { id, type: 'snackbar' } );
+			}
+		} );
+
+		const ids = select( noticesStore )
+			.getNotices()
+			.map( ( notice ) => notice.id );
+
+		expect( ids ).toContain( failureId );
+		expect( ids ).not.toContain( SAVED_NOTICE_ID );
+		expect( ids ).toEqual( expect.arrayContaining( [ 'i1', 'i2', 'i3' ] ) );
+	} );
+
+	it( 'is not replaced or superseded when held rows are reported by another background save', async () => {
+		const undo = { label: 'Undo', onClick: () => {} };
+		const failureId = outcomeNoticeId( 'batch-1' );
+		const heldId = outcomeNoticeId( 'batch-2' );
+
+		render( <Notices /> );
+
+		await act( async () => {
+			void dispatch( noticesStore ).createErrorNotice( 'failed', { id: failureId, type: 'snackbar', explicitDismiss: true, actions: [ undo ] } );
+			void dispatch( noticesStore ).createInfoNotice( 'held', { id: heldId, type: 'snackbar', explicitDismiss: true, actions: [ undo ] } );
+			void dispatch( noticesStore ).createSuccessNotice( 'saved', { id: SAVED_NOTICE_ID, type: 'snackbar', actions: [ undo ] } );
+		} );
+
+		const ids = select( noticesStore )
+			.getNotices()
+			.map( ( notice ) => notice.id );
+
+		expect( ids ).toEqual( expect.arrayContaining( [ failureId, heldId, SAVED_NOTICE_ID ] ) );
 	} );
 } );
 

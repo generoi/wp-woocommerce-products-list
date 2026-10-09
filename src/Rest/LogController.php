@@ -164,7 +164,7 @@ final class LogController
      * Why the app left an item of a batch unwritten. Each gets a log row
      * with status `skipped` so History says why an item kept its value.
      */
-    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'locked', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'unchanged', 'failed', 'other'];
+    public const SKIP_REASONS = ['trashed', 'deleted', 'conflict', 'locked', 'editing', 'no_stock_management', 'has_sale', 'no_sale_price', 'below_zero', 'not_applicable', 'unchanged', 'failed', 'other'];
 
     /**
      * POST /log/skipped: record the items a save left out on the client
@@ -278,6 +278,7 @@ final class LogController
             'deleted' => __('Skipped: deleted meanwhile.', 'wp-woocommerce-products-list'),
             'conflict' => __('Skipped: changed by someone else since the editor opened.', 'wp-woocommerce-products-list'),
             'locked' => __('Skipped: another save of this item was running.', 'wp-woocommerce-products-list'),
+            'editing' => __('Skipped: another user had it open in the product editor.', 'wp-woocommerce-products-list'),
             'no_stock_management' => __('Skipped: stock is not managed for this item.', 'wp-woocommerce-products-list'),
             'has_sale' => __('Skipped: it already had a sale.', 'wp-woocommerce-products-list'),
             'no_sale_price' => __('Skipped: it has no sale price to adjust.', 'wp-woocommerce-products-list'),

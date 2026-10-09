@@ -17,6 +17,10 @@ export function skipReasonLabel( reason: string ): string {
 			return __( 'deleted meanwhile', 'wp-woocommerce-products-list' );
 		case 'conflict':
 			return __( 'changed by someone else', 'wp-woocommerce-products-list' );
+		case 'locked':
+			return __( 'another save was running', 'wp-woocommerce-products-list' );
+		case 'editing':
+			return __( 'open in the product editor', 'wp-woocommerce-products-list' );
 		case 'no_stock_management':
 			return __( 'stock not managed', 'wp-woocommerce-products-list' );
 		case 'has_sale':

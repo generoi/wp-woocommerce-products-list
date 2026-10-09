@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\Log;
 
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Rest\Concurrency;
 use WP_REST_Request;
 
 /**
@@ -28,6 +29,15 @@ use WP_REST_Request;
  *   request in flight died, WooCommerce's deferred parent sync never ran;
  *   `repair()` runs it for the parents that request named.
  * - A marker without a plan left behind by a killed request expires.
+ *
+ * `parents` is kept as a list with one entry per parent per request in
+ * flight: `begin()` adds the request's parents, `end()` takes away one
+ * entry of each of its own, so the requests of one batch sent at the same
+ * time (three by default) never drop each other's parents, and a request
+ * that died leaves its parents behind. `close()` repairs every parent
+ * still listed, whatever the TTL: the client says the job is over. Every
+ * change to the marker is read fresh and written under a named lock per
+ * batch.
  *
  * @phpstan-type Marker array{user: int, planned: int, started: int, updated: int, parents: array<int, int>}
  */
@@ -78,13 +88,54 @@ final class BatchState
             return null;
         }
 
+        return self::normalize($marker);
+    }
+
+    /**
+     * @param  array<string, mixed>  $marker
+     * @return Marker parents without repeats
+     */
+    private static function normalize(array $marker): array
+    {
         return [
             'user' => (int) ($marker['user'] ?? 0),
             'planned' => (int) ($marker['planned'] ?? 0),
             'started' => (int) ($marker['started'] ?? 0),
             'updated' => (int) ($marker['updated'] ?? 0),
-            'parents' => array_values(array_map('intval', (array) ($marker['parents'] ?? []))),
+            'parents' => array_values(array_unique(array_map('intval', (array) ($marker['parents'] ?? [])))),
         ];
+    }
+
+    /**
+     * Change a batch's marker: under a named lock per batch, from the
+     * stored value (not this process's option cache, which another
+     * request of the batch may have outdated). `$change` gets the stored
+     * marker (parents with one entry per request in flight) or null and
+     * returns the new one, null to delete it or false to leave it.
+     *
+     * @param  callable(array<string, mixed>|null): (array<string, mixed>|null|false)  $change
+     */
+    private static function mutate(string $batchId, callable $change): void
+    {
+        $lock = Concurrency::lockName('m', md5($batchId));
+        // Best effort: without the lock the write still happens, as before.
+        $locked = Concurrency::acquire($lock, 5);
+
+        try {
+            wp_cache_delete(self::option($batchId), 'options');
+            $stored = get_option(self::option($batchId), null);
+            $next = $change(is_array($stored) ? $stored : null);
+
+            if ($next === null) {
+                delete_option(self::option($batchId));
+            } elseif ($next !== false) {
+                update_option(self::option($batchId), $next, false);
+            }
+        } finally {
+            if ($locked) {
+                Concurrency::release($lock);
+            }
+        }
     }
 
     /**
@@ -139,22 +190,25 @@ final class BatchState
             return;
         }
 
-        $marker = self::get($batchId);
+        $user = get_current_user_id();
+        $planned = (int) $request->get_header(self::PLANNED_HEADER);
+        $parents = self::parentsOf($request);
 
-        if ($marker !== null && $marker['user'] !== get_current_user_id()) {
-            return;
-        }
+        self::mutate($batchId, static function (?array $marker) use ($user, $planned, $parents) {
+            if ($marker !== null && (int) ($marker['user'] ?? 0) !== $user) {
+                return false;
+            }
 
-        $planned = max((int) $request->get_header(self::PLANNED_HEADER), $marker['planned'] ?? 0);
-        $now = time();
+            $now = time();
 
-        update_option(self::option($batchId), [
-            'user' => get_current_user_id(),
-            'planned' => $planned,
-            'started' => $marker['started'] ?? $now,
-            'updated' => $now,
-            'parents' => self::parentsOf($request),
-        ], false);
+            return [
+                'user' => $user,
+                'planned' => max($planned, (int) ($marker['planned'] ?? 0)),
+                'started' => (int) ($marker['started'] ?? $now),
+                'updated' => $now,
+                'parents' => array_merge(array_map('intval', (array) ($marker['parents'] ?? [])), $parents),
+            ];
+        });
     }
 
     /**
@@ -169,22 +223,36 @@ final class BatchState
             return;
         }
 
-        $marker = self::get($batchId);
+        $user = get_current_user_id();
+        $parents = self::parentsOf($request);
 
-        if ($marker === null || $marker['user'] !== get_current_user_id()) {
-            return;
-        }
+        self::mutate($batchId, static function (?array $marker) use ($user, $parents) {
+            if ($marker === null || (int) ($marker['user'] ?? 0) !== $user) {
+                return false;
+            }
 
-        if ($marker['planned'] <= 0) {
-            // A write that registered no plan is one request: done now.
-            delete_option(self::option($batchId));
+            if ((int) ($marker['planned'] ?? 0) <= 0) {
+                // A write that registered no plan is one request: done now.
+                return null;
+            }
 
-            return;
-        }
+            // Only this request's parents: a sibling still running, or one
+            // that died, keeps its own.
+            $left = array_map('intval', (array) ($marker['parents'] ?? []));
 
-        $marker['updated'] = time();
-        $marker['parents'] = [];
-        update_option(self::option($batchId), $marker, false);
+            foreach ($parents as $parent) {
+                $at = array_search($parent, $left, true);
+
+                if ($at !== false) {
+                    unset($left[$at]);
+                }
+            }
+
+            $marker['updated'] = time();
+            $marker['parents'] = array_values($left);
+
+            return $marker;
+        });
     }
 
     /**
@@ -192,21 +260,31 @@ final class BatchState
      */
     public static function close(string $batchId): bool
     {
-        $marker = self::get($batchId);
+        $closed = false;
+        $parents = [];
 
-        if ($marker === null) {
-            return false;
-        }
+        self::mutate($batchId, static function (?array $marker) use (&$closed, &$parents) {
+            if ($marker === null) {
+                return false;
+            }
 
-        self::repair($batchId, $marker);
-        delete_option(self::option($batchId));
+            $closed = true;
+            $parents = self::normalize($marker)['parents'];
 
-        return true;
+            return null;
+        });
+
+        // The client says the job is over: a parent still listed belongs
+        // to a request that died, however recently.
+        self::syncParents($parents);
+
+        return $closed;
     }
 
     /**
      * A write that died left its variable parents unsynced (`_price`,
-     * the price range, the lookup table): sync them now.
+     * the price range, the lookup table): sync them now, once the batch
+     * is no longer running.
      *
      * @param  Marker  $marker
      */
@@ -216,14 +294,30 @@ final class BatchState
             return;
         }
 
-        foreach ($marker['parents'] as $parent) {
+        self::syncParents($marker['parents']);
+
+        self::mutate($batchId, static function (?array $stored) {
+            if ($stored === null) {
+                return false;
+            }
+
+            $stored['parents'] = [];
+
+            return $stored;
+        });
+    }
+
+    /**
+     * @param  array<int, int>  $parents
+     */
+    private static function syncParents(array $parents): void
+    {
+        foreach (array_unique($parents) as $parent) {
             if ($parent > 0 && class_exists(\WC_Product_Variable::class) && get_post_type($parent) === 'product') {
                 \WC_Product_Variable::sync($parent);
+                wc_delete_product_transients($parent);
             }
         }
-
-        $marker['parents'] = [];
-        update_option(self::option($batchId), $marker, false);
     }
 
     /**
@@ -260,13 +354,7 @@ final class BatchState
                 continue;
             }
 
-            $markers[substr((string) $row['option_name'], strlen(self::OPTION_PREFIX))] = [
-                'user' => (int) ($value['user'] ?? 0),
-                'planned' => (int) ($value['planned'] ?? 0),
-                'started' => (int) ($value['started'] ?? 0),
-                'updated' => (int) ($value['updated'] ?? 0),
-                'parents' => array_values(array_map('intval', (array) ($value['parents'] ?? []))),
-            ];
+            $markers[substr((string) $row['option_name'], strlen(self::OPTION_PREFIX))] = self::normalize($value);
         }
 
         return $markers;

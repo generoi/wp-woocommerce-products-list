@@ -22,10 +22,12 @@ const MESSAGES: Record< string, () => string > = {
 	wc_products_list_locked: () => __( 'Another save of this item was running, so it was not saved. Try again in a moment.', 'wp-woocommerce-products-list' ),
 	wc_products_list_trashed: () => __( 'This item is in the Trash, so it was not saved.', 'wp-woocommerce-products-list' ),
 	wc_products_list_deleted: () => __( 'Deleted meanwhile (another tab or user); nothing was saved for this item.', 'wp-woocommerce-products-list' ),
+	// The server's message names the user (Concurrency::editingError) and is shown instead; this is the fallback.
+	wc_products_list_editing: () => __( 'Another user is editing this product in the product editor; nothing was saved for this item.', 'wp-woocommerce-products-list' ),
 };
 
 /** Per-item refusals of the server's concurrency checks: the server logs them as skipped rows itself (not posted to /log/skipped again). */
-const SERVER_LOGGED_CODES: ReadonlySet< string > = new Set( [ 'wc_products_list_conflict', 'wc_products_list_locked', 'wc_products_list_trashed', 'wc_products_list_deleted' ] );
+const SERVER_LOGGED_CODES: ReadonlySet< string > = new Set( [ 'wc_products_list_conflict', 'wc_products_list_locked', 'wc_products_list_trashed', 'wc_products_list_deleted', 'wc_products_list_editing' ] );
 
 export function isServerLoggedCode( code: string | undefined ): boolean {
 	return code !== undefined && SERVER_LOGGED_CODES.has( code );
@@ -61,6 +63,11 @@ export function humanizeError( code: string | undefined, message: string ): stri
 
 	// The plugin names the product that owns a taken SKU ("… is already used by "Name" (#206).", Saves::skuOwnerMessage): that says more.
 	if ( code && SKU_CODES.has( code ) && message && /#\d+/.test( message ) ) {
+		return message;
+	}
+
+	// A post lock: the server names who has it open in the product editor.
+	if ( code === 'wc_products_list_editing' && message ) {
 		return message;
 	}
 

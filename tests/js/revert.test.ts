@@ -300,10 +300,49 @@ describe( 'runRevert and the list', () => {
 			return response( ( options?.ids ?? [] ).map( ( id ) => ( { id, ok: true } ) ) );
 		} );
 
-		await expect( runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ], [ 3 ] ] }, { close }, post ) ).rejects.toThrow( 'Gateway timeout' );
+		const outcome = await runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ], [ 3 ] ] }, { close }, post );
+
 		expect( post ).toHaveBeenCalledTimes( 3 );
 		expect( close ).toHaveBeenCalledTimes( 1 );
 		expect( activity.isRowPending( 1 ) ).toBe( false );
 		expect( activity.isRowPending( 3 ) ).toBe( false );
+		// The chunks that answered still count; the lost one is reported per object, not thrown away.
+		expect( outcome.ok ).toBe( 2 );
+		expect( outcome.failed.map( ( result ) => result.id ) ).toEqual( [ 2 ] );
+	} );
+
+	it( 'keeps what was put back when one of several requests is lost: per-object failures, outcome unknown said so', async () => {
+		const { ApiError } = await import( '../../resources/api/errors' );
+		const post = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => {
+			if ( options?.ids?.includes( 3 ) ) {
+				throw new Error( 'Could not get a valid response from the server.' );
+			}
+
+			if ( options?.ids?.includes( 5 ) ) {
+				throw new ApiError( 'Sorry, you are not allowed to do that.', 'rest_forbidden', 403 );
+			}
+
+			return response( ( options?.ids ?? [] ).map( ( id ) => ( { id, ok: true } ) ) );
+		} );
+
+		const outcome = await runRevert( 'batch-a', { chunk: 2, chunks: [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ] }, { close: async () => undefined }, post );
+
+		expect( post ).toHaveBeenCalledTimes( 3 );
+		expect( outcome.ok ).toBe( 2 );
+		expect( outcome.failed.map( ( result ) => result.id ) ).toEqual( [ 3, 4, 5, 6 ] );
+		// No answer: it may have been stored anyway.
+		expect( outcome.failed[ 0 ] ).toMatchObject( { ok: false, code: 'wc_products_list_uncertain', message: expect.stringContaining( 'may have been saved anyway' ) } );
+		// A 4xx was refused before anything was written.
+		expect( outcome.failed[ 2 ] ).toMatchObject( { ok: false, code: 'rest_forbidden' } );
+		expect( outcome.failed[ 2 ]?.message ).not.toContain( 'may have been saved anyway' );
+	} );
+
+	it( 'still throws when no request got an answer (nothing was put back for sure)', async () => {
+		const post = vi.fn( async () => {
+			throw new Error( 'Offline' );
+		} );
+
+		await expect( runRevert( 'batch-a', { chunk: 1, chunks: [ [ 1 ], [ 2 ] ] }, { close: async () => undefined }, post ) ).rejects.toThrow( 'Offline' );
+		expect( post ).toHaveBeenCalledTimes( 2 );
 	} );
 } );

@@ -461,7 +461,9 @@ final class Saves
      * state rather than from caches primed earlier in the request, refuse
      * a write to a trashed row or one deleted meanwhile (404
      * `wc_products_list_deleted`, logged as skipped with reason
-     * `deleted`), and refuse the item when a field it
+     * `deleted`), refuse an item another user has open in the product
+     * editor (409 `wc_products_list_editing`, reason `editing`), and
+     * refuse the item when a field it
      * changes no longer has the value the editor based the change on.
      *
      * @return WC_Product|\WP_Error the product to save (a fresh load when the cached one was stale)
@@ -478,6 +480,12 @@ final class Saves
 
         if ($product === null) {
             return Concurrency::deletedError($id);
+        }
+
+        $editing = Concurrency::editingUser($id, $product->is_type('variation') ? (int) $product->get_parent_id() : 0);
+
+        if ($editing > 0) {
+            return Concurrency::editingError($id, $editing);
         }
 
         if (Concurrency::trashed($product) && $request->get_param('status') === null) {

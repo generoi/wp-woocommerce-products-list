@@ -100,6 +100,16 @@ All of these are used as they are. Each extension below says what core does, why
   - `putRevision()` (Revisions.php:278) on `_wp_put_post_revision`, at 20 after core's meta copy at 10, stores the term ids as one `_wcpl_terms` revision meta row. It uses `add_metadata`, because `add_post_meta` on a revision writes to its parent;
   - `termsChanged()` (Revisions.php:309) on `wp_save_post_revision_post_has_changed`, at 20 after core's meta check, so a terms-only change still takes a revision.
 
+### 5b. Status and menu order (needed: Publish/Draft, Enable/Disable, Move)
+
+- **Core:** a revision holds only the revisioned post fields (title, content, excerpt; `_wp_post_revision_fields`) and the revisioned meta. `post_status` cannot be one of those fields (a revision's own status is always `inherit`) and `menu_order` is not one. So a status-only or order-only save took no revision: in `revisions` mode a "Disable variations" or "Move to draft" campaign left no record and `history undo` had nothing to undo.
+- **Added (same pattern as terms):**
+  - `putRevision()` also stores `{menu_order, post_status}` of the object as one `_wcpl_post` revision meta row (`Revisions::POST_KEY`);
+  - `termsChanged()` also compares it with the live row, so a status-only or order-only change takes a revision;
+  - `Restore::state()` / `current()` carry them as `post:post_status` and `post:menu_order` (products and variations), and `Restore::apply()` writes them through CRUD (`set_status()`, `set_menu_order()`), so an undo goes through WooCommerce like any other key;
+  - a revision taken before `_wcpl_post` existed does not say what they were: `Restore::diffKeys()` compares them only when both sides hold them, and a status or order save whose latest revision lacks the snapshot takes a catch-up revision first (§4), so its undo still has the old value.
+- **Not covered:** a Trash or a permanent delete is not a save (`wp_trash_post()`); the log's own actions (and their revert) stay the record for those.
+
 ### 6. Batches (needed for bulk undo; uses a core taxonomy)
 
 - **Core:** has no grouping of revisions across posts.
@@ -109,6 +119,7 @@ All of these are used as they are. Each extension below says what core does, why
   - term meta: source, user, time, `reverts` and the changed fields;
   - `assign()` uses core's `wp_set_object_terms()`;
   - the taxonomy's `update_count_callback` is `Batches::updateCount()`: core's `_update_generic_term_count()`, except inside `assign()`, where the term is only noted and recounted once per request in `flush()` (end of the REST request, `Batches::end()`, `shutdown`). Core recounts after every `wp_set_object_terms()` with a `COUNT(*)` over all of the batch's relationships, so each save of a campaign got slower as the batch grew: 100 assignments to a 24,000-revision batch took 1,069 ms, against 61 ms with the deferred count (150 ms and 49 ms at 2,000). Deletions (retention, purge) still count at once.
+- **Concurrent requests of one batch** (the app sends a batch's requests three at a time): the term is created under a MySQL named lock per batch (`Concurrency::lockName('b', md5(uuid))`), after a fresh lookup in the database (not core's term query cache), and when `wp_insert_term()` still fails (another request inserted it, no lock to be had) the stored term is read and used. Without this, two requests inserting the same slug made core delete one of the two as a duplicate, and the losing request's revisions went into no batch, so an undo left those rows as they were and reported nothing. The term meta counters (`revisions`, `fields`) are read from the database, added to and written under the same lock in `flush()`; a key written twice by an earlier version is collapsed into one row.
 - **Lighter for writes:** a direct `INSERT` into `term_relationships`. It saves about 2 more queries per revision. Kept on core's API for the POC.
 
 ### 7. Undo and the Restore button go through WooCommerce CRUD (needed)
@@ -124,7 +135,7 @@ All of these are used as they are. Each extension below says what core does, why
 - `restored()` also deletes the revision core took during its own `wp_update_post`. That revision has the restored post fields but the old meta.
 - **Lighter alternative:** keep that extra revision. It's harmless but confusing in the compare screen.
 - **Batch undo** (`Restore::undo()`): for each object, it restores the predecessor of the batch's first revision. That predecessor is the state right before the batch's save, because a save whose object drifted from its latest revision takes a catch-up revision first (§4). Only the keys that differ from the batch's last revision are written, through the same CRUD path. A key changed since the batch is a conflict: the object is left alone unless `--force` is given. The writes form a new batch with `reverts`, so undoing the undo redoes.
-- **Concurrency of the undo:** each object is checked and written under the object lock every list-mode save takes (`Rest\Concurrency::lockObject()`, contracts §3.6), after `Concurrency::forget()` drops the caches primed for the chunk, so the conflict check reads the stored state. A save of the object running meanwhile finishes first (and is then a conflict) or waits for the undo's write; an object still locked after `wc_products_list/lock_timeout` is reported in `skipped` with reason `locked`. A `--dry-run` takes no lock.
+- **Concurrency of the undo:** each object is checked and written under the object lock every list-mode save takes (`Rest\Concurrency::lockObject()`, contracts §3.6), after `Concurrency::forget()` drops the caches primed for the chunk, so the conflict check reads the stored state. A save of the object running meanwhile finishes first (and is then a conflict) or waits for the undo's write; an object still locked after `wc_products_list/lock_timeout` is reported in `skipped` with reason `locked`. An object another user has open in the product editor (core's post lock, on it or on a variation's parent) is reported in `skipped` with reason `editing`: their Update would otherwise put the form back over the undo. A `--dry-run` takes no lock.
 
 ### 8. Not built: compare-screen fields
 
@@ -199,7 +210,7 @@ These numbers come from the Phase 0 benchmark, a sale price on every variation. 
 
 ## Concurrency (all modes)
 
-The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lock per object for the duration of one item's save, a fresh load under the lock when the batch's primed caches are stale, refusal of trashed rows and of rows deleted meanwhile, the same lock around row actions (delete, trash, restore, status) and around each object of a revisions-mode undo (§7), optional expected values per item (`_wcpl_expect`, 409 `wc_products_list_conflict`), one revert per batch at a time, and a running-batch marker that blocks History's plan, check and revert of a batch still being written. In `both` mode the revision of a refused item is not taken (nothing is saved).
+The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lock per object for the duration of one item's save, a fresh load under the lock when the batch's primed caches are stale, refusal of trashed rows, of rows deleted meanwhile and of rows another user has open in the product editor (core's post lock, 409 `wc_products_list_editing`), the same lock around row actions (delete, trash, restore, status) and around each object of a revisions-mode undo (§7), optional expected values per item (`_wcpl_expect`, 409 `wc_products_list_conflict`), one revert per batch at a time, and a running-batch marker that blocks History's plan, check and revert of a batch still being written. In `both` mode the revision of a refused item is not taken (nothing is saved).
 
 ## Tests
 
@@ -211,6 +222,9 @@ The save path is guarded server-side (docs/contracts.md §3.6): a MySQL named lo
 - `WC_Product_CSV_Importer`;
 - plain CRUD;
 - conflicts, the Restore button and retention;
+- status and menu order (`_wcpl_post`), including revisions taken before the snapshot existed;
+- a batch term inserted by another request between the lookup and the insert, and counters written by other requests of the batch;
+- an undo of an object another user has open in the product editor;
 - the three modes.
 
 Each test asserts:

@@ -120,6 +120,14 @@ final class Restore
                         Concurrency::forget($id);
                     }
 
+                    // Another user's open product editor would put its
+                    // values back over the undo (docs/contracts.md §3.6).
+                    if (Concurrency::editingUser($id, (int) wp_get_post_parent_id($id)) > 0) {
+                        $result['skipped'][] = ['id' => $id, 'reason' => 'editing'];
+
+                        continue;
+                    }
+
                     if (! $force) {
                         $current = self::current($id);
                         $conflicts = [];
@@ -246,7 +254,8 @@ final class Restore
     }
 
     /**
-     * What a revision holds: meta, terms and (products) post fields.
+     * What a revision holds: meta, terms, (products) post fields, and the
+     * status and menu order when the revision has their snapshot.
      *
      * @return array{meta: array<string, string>, terms: array<string, array<int, int>>, post: array<string, string>}
      */
@@ -262,7 +271,9 @@ final class Restore
             }
         }
 
-        return $snapshot + ['post' => $post];
+        $snapshot['post'] = $post + $snapshot['post'];
+
+        return $snapshot;
     }
 
     /**
@@ -282,11 +293,12 @@ final class Restore
             }
         }
 
-        return ['meta' => Revisions::currentMeta($postId, $type), 'terms' => Revisions::currentTerms($postId, $type), 'post' => $post];
+        return ['meta' => Revisions::currentMeta($postId, $type), 'terms' => Revisions::currentTerms($postId, $type), 'post' => $post + Revisions::currentPost($postId)];
     }
 
     /**
-     * Keys (`meta:_regular_price`, `terms:product_cat`, `post:post_title`) that differ.
+     * Keys (`meta:_regular_price`, `terms:product_cat`, `post:post_title`,
+     * `post:post_status`, `post:menu_order`) that differ.
      *
      * @param  array{meta: array<string, string>, terms: array<string, array<int, int>>, post: array<string, string>}  $a
      * @param  array{meta: array<string, string>, terms: array<string, array<int, int>>, post: array<string, string>}  $b
@@ -298,6 +310,13 @@ final class Restore
 
         foreach (['meta', 'terms', 'post'] as $group) {
             foreach (array_unique(array_merge(array_keys($a[$group]), array_keys($b[$group]))) as $key) {
+                // Status and menu order are compared only when both sides
+                // hold them: a revision taken before `_wcpl_post` existed
+                // does not say what they were.
+                if ($group === 'post' && in_array($key, Revisions::POST_SNAPSHOT, true) && (! isset($a[$group][$key]) || ! isset($b[$group][$key]))) {
+                    continue;
+                }
+
                 if (self::normal($key, $a[$group][$key] ?? null) !== self::normal($key, $b[$group][$key] ?? null)) {
                     $keys[] = $group.':'.$key;
                 }
@@ -351,6 +370,22 @@ final class Restore
         foreach ($keys as $key) {
             [$group, $name] = explode(':', $key, 2);
             $value = $state[$group][$name] ?? null;
+
+            if ($group === 'post' && $name === 'post_status') {
+                if ($value !== null && $value !== '') {
+                    $product->set_status((string) $value);
+                }
+
+                continue;
+            }
+
+            if ($group === 'post' && $name === 'menu_order') {
+                if ($value !== null && $value !== '') {
+                    $product->set_menu_order((int) $value);
+                }
+
+                continue;
+            }
 
             if ($group === 'post') {
                 $product->{'set_'.self::POST_FIELDS[$name]}((string) $value);

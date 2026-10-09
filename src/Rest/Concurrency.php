@@ -35,6 +35,11 @@ use WP_REST_Request;
  *    logged as skipped (reason `conflict`). This also catches writes
  *    made outside the app (classic editor, orders, imports).
  *
+ * An item open in WordPress's product editor by another user (core's post
+ * lock, `_edit_lock`, on the product or on a variation's parent) is
+ * refused with `wc_products_list_editing` (409): their Update would put
+ * the form's values back over the save without a word.
+ *
  * Writes to a product in the Trash (or a variation of one) are refused
  * with `wc_products_list_trashed` (409) unless the request sets `status`.
  * A row deleted for good after the request loaded it is refused with
@@ -54,6 +59,8 @@ final class Concurrency
     public const DELETED_ERROR = 'wc_products_list_deleted';
 
     public const REVERT_RUNNING_ERROR = 'wc_products_list_revert_running';
+
+    public const EDITING_ERROR = 'wc_products_list_editing';
 
     /** Seconds a save waits for another save of the same object to finish. */
     public const FILTER_LOCK_TIMEOUT = 'wc_products_list/lock_timeout';
@@ -642,6 +649,62 @@ final class Concurrency
             self::DELETED_ERROR,
             __('This item was deleted meanwhile (in another tab or by another user). Nothing was saved for it.', 'wp-woocommerce-products-list'),
             ['status' => 404, 'id' => $id]
+        );
+    }
+
+    /**
+     * The other user who holds WordPress's post lock on an object, or on
+     * the parent of a variation (the product editor's variations panel
+     * saves them too), 0 when there is none. Core's lock (`_edit_lock`,
+     * "time:user", set by post.php and its heartbeat, removed when the
+     * screen is left) and core's window (`wp_check_post_lock_window`,
+     * 150 s), as wp_check_post_lock() reads them; read from the database,
+     * since a heartbeat may have set it after this request primed its
+     * caches. The current user's own lock (another tab) is no clash.
+     */
+    public static function editingUser(int $id, int $parentId = 0): int
+    {
+        global $wpdb;
+
+        $ids = array_values(array_filter([$id, $parentId], static fn (int $postId): bool => $postId > 0));
+
+        if ($ids === []) {
+            return 0;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $locks = $wpdb->get_col($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_edit_lock' AND post_id IN ({$placeholders})", ...$ids));
+
+        /** This filter is documented in wp-admin/includes/ajax-actions.php */
+        $window = (int) apply_filters('wp_check_post_lock_window', 150);
+        $me = get_current_user_id();
+
+        foreach (is_array($locks) ? $locks : [] as $lock) {
+            $parts = explode(':', (string) $lock);
+            $time = (int) $parts[0];
+            $user = (int) ($parts[1] ?? 0);
+
+            if ($time > 0 && $user > 0 && $user !== $me && $time > time() - $window) {
+                return $user;
+            }
+        }
+
+        return 0;
+    }
+
+    public static function editingError(int $id, int $user): WP_Error
+    {
+        $who = get_userdata($user);
+
+        return new WP_Error(
+            self::EDITING_ERROR,
+            sprintf(
+                /* translators: %s: user's display name */
+                __('%s is editing this product in the product editor. Nothing was saved for this item; try again when they are done.', 'wp-woocommerce-products-list'),
+                $who instanceof \WP_User ? $who->display_name : __('Another user', 'wp-woocommerce-products-list')
+            ),
+            ['status' => 409, 'id' => $id, 'user' => $user]
         );
     }
 

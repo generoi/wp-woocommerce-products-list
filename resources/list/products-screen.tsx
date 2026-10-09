@@ -59,7 +59,7 @@ import { StatusTabs } from './status-tabs';
 import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
 import { SaveActivityBar } from './save-activity-bar';
-import { isRowPending } from '../store/save-activity';
+import { isRowPending, useLockVersion } from '../store/save-activity';
 
 export interface ProductsScreenProps {
 	fields: ProductField[];
@@ -576,8 +576,12 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	useLayoutEffect( () => {
 		wholeRef.current = whole;
 	} );
+	// DataViews memoises a row's actions on [actions, item]: rebuilt when rows are locked or released, so a row rendered
+	// while a save held it (and never written, e.g. held back for a clash) gets its edit actions back when the save ends.
+	const lockVersion = useLockVersion();
 	// Destructive actions (Move to Trash, Delete permanently) come last in row menus and the footer.
-	const actions = useMemo( () => withWholeSelection( destructiveLast( baseActions ), () => wholeRef.current ), [ baseActions ] );
+	// eslint-disable-next-line react-hooks/exhaustive-deps -- lockVersion only makes DataViews re-run isEligible (which reads the locks itself).
+	const actions = useMemo( () => withWholeSelection( destructiveLast( baseActions ), () => wholeRef.current ), [ baseActions, lockVersion ] );
 	// Split view: the footer keeps Bulk edit; the other bulk actions are in the selection bar's "More actions" menu.
 	const tableActions = useMemo( () => ( panelOpen ? withoutFooterBulk( actions ) : actions ), [ panelOpen, actions ] );
 

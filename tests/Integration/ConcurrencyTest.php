@@ -617,6 +617,119 @@ class ConcurrencyTest extends RestTestCase
         $this->assertContains('99', get_post_meta($parent->get_id(), '_price'));
     }
 
+    public function test_requests_of_one_batch_keep_each_others_parents_and_close_repairs_a_dead_one(): void
+    {
+        $p1 = $this->variableProduct(['38']);
+        $p2 = $this->variableProduct(['39']);
+        [$a] = $p1->get_children();
+        [$b] = $p2->get_children();
+        $headers = [BatchState::PLANNED_HEADER => '10', ListMode::BATCH_HEADER => $this->batchId()];
+        $make = static function (int $id) use ($headers): \WP_REST_Request {
+            $request = new \WP_REST_Request('POST', '/wc-products-list/v1/variations/batch');
+
+            foreach ($headers as $name => $value) {
+                $request->set_header($name, $value);
+            }
+
+            $request->set_header(ListMode::HEADER, '1');
+            $request->set_body_params(['update' => [['id' => $id, 'sale_price' => '1']]]);
+
+            return $request;
+        };
+
+        // Two requests of the batch at once: the first one dies (no end()),
+        // the second one ends normally.
+        $dead = $make($a);
+        $alive = $make($b);
+        ListMode::force(true, $this->batchId());
+
+        try {
+            BatchState::begin($dead);
+            BatchState::begin($alive);
+            BatchState::end($alive);
+        } finally {
+            ListMode::reset();
+        }
+
+        $this->assertSame([$p1->get_id()], BatchState::get($this->batchId())['parents'], "the dead request's parent stays listed");
+
+        // What the dead request left: the variation on sale, its parent not synced.
+        update_post_meta($a, '_sale_price', '1');
+        update_post_meta($a, '_price', '1');
+        $this->assertNotContains('1', get_post_meta($p1->get_id(), '_price'));
+
+        // The client closes the batch right away, within the TTL.
+        $this->assertTrue(BatchState::close($this->batchId()));
+        $this->assertNull(BatchState::get($this->batchId()));
+        $this->assertContains('1', get_post_meta($p1->get_id(), '_price'), 'close repairs every parent still listed');
+    }
+
+    public function test_the_variations_batch_syncs_each_parent_before_the_request_ends(): void
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        [$a] = $parent->get_children();
+        $seen = null;
+
+        // The second group's dispatch: the first parent is synced by then.
+        $other = $this->variableProduct(['40']);
+        [$c] = $other->get_children();
+        add_filter('woocommerce_rest_pre_insert_product_variation_object', function ($object) use ($c, $parent, &$seen) {
+            if ($object instanceof \WC_Product && $object->get_id() === $c) {
+                wp_cache_delete($parent->get_id(), 'post_meta');
+                $seen = get_post_meta($parent->get_id(), '_price');
+            }
+
+            return $object;
+        }, 1);
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [
+            ['id' => $a, 'sale_price' => '7'],
+            ['id' => $c, 'sale_price' => '8'],
+        ]], [Logger::SOURCE_HEADER => 'bulk']));
+
+        $this->assertContains('7', (array) $seen);
+    }
+
+    public function test_a_save_of_an_item_another_user_has_open_in_the_editor_is_refused(): void
+    {
+        $me = get_current_user_id();
+        $other = self::factory()->user->create(['role' => 'shop_manager']);
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        $id = $product->get_id();
+        update_post_meta($id, '_edit_lock', time().':'.$other);
+
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '18']);
+        $this->assertStatus(409, $response);
+        $data = $this->data($response);
+        $this->assertSame(Concurrency::EDITING_ERROR, $data['code']);
+        $this->assertSame($other, $data['data']['user']);
+        $this->assertSame('15', get_post_meta($id, '_regular_price', true));
+        $rows = $this->rows();
+        $this->assertSame(Logger::STATUS_SKIPPED, $rows[0]['status']);
+        $this->assertSame('editing', json_decode((string) $rows[0]['context'], true)['reason']);
+        $this->assertSame([], Concurrency::heldObjects());
+
+        // A variation whose parent is open in the editor, in a batch: only that item.
+        $parent = $this->variableProduct(['38']);
+        [$v] = $parent->get_children();
+        $free = $this->variableProduct(['39']);
+        [$w] = $free->get_children();
+        update_post_meta($parent->get_id(), '_edit_lock', time().':'.$other);
+        $items = $this->data($this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [
+            ['id' => $v, 'sale_price' => '5'],
+            ['id' => $w, 'sale_price' => '5'],
+        ]]))['update'];
+        $this->assertSame(Concurrency::EDITING_ERROR, $items[0]['error']['code']);
+        $this->assertArrayNotHasKey('error', $items[1]);
+        $this->assertSame('', get_post_meta($v, '_sale_price', true));
+
+        // A lock past core's window, or the user's own lock (another tab), is no clash.
+        update_post_meta($id, '_edit_lock', (time() - 200).':'.$other);
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '18']));
+        update_post_meta($id, '_edit_lock', time().':'.$me);
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '19']));
+    }
+
     public function test_a_revert_of_several_requests_marks_its_revert_batch_until_closed(): void
     {
         $a = $this->simpleProduct(['regular_price' => '20']);

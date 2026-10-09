@@ -18,7 +18,8 @@ use WP_Post;
  *    wp_update_post (which runs before the meta is written), and core's
  *    revision in between is suppressed with wp_revisions_to_keep = 0.
  * 2. A baseline before the first change of an object with no revision.
- * 3. Terms: a `_wcpl_terms` revision meta snapshot and a change check.
+ * 3. Terms: a `_wcpl_terms` revision meta snapshot and a change check;
+ *    status and menu order: a `_wcpl_post` snapshot and the same check.
  * 4. Restore re-saves through WooCommerce CRUD before core's raw meta copy.
  */
 final class Revisions
@@ -26,6 +27,17 @@ final class Revisions
     public const POST_TYPES = ['product', 'product_variation'];
 
     public const TERMS_KEY = '_wcpl_terms';
+
+    /**
+     * Revision meta with the post row's status and menu order: core's
+     * revision fields cannot hold them (a revision's own post_status is
+     * `inherit`), so Publish/Draft, Enable/Disable and Move would take no
+     * revision and could not be undone (docs/revisions.md).
+     */
+    public const POST_KEY = '_wcpl_post';
+
+    /** The post row columns in the `_wcpl_post` snapshot. */
+    public const POST_SNAPSHOT = ['menu_order', 'post_status'];
 
     /** Meta revisioned on both products and variations: what the editor can change. */
     public const COMMON_KEYS = [
@@ -378,9 +390,27 @@ final class Revisions
     }
 
     /**
-     * What a revision holds: its revisioned meta and its terms.
+     * Status and menu order of a live object.
      *
-     * @return array{meta: array<string, string>, terms: array<string, array<int, int>>}
+     * @return array<string, string>
+     */
+    public static function currentPost(int $id): array
+    {
+        $post = get_post($id);
+
+        if (! $post instanceof WP_Post) {
+            return [];
+        }
+
+        return ['menu_order' => (string) $post->menu_order, 'post_status' => (string) $post->post_status];
+    }
+
+    /**
+     * What a revision holds: its revisioned meta, its terms and (when it
+     * has the snapshot; revisions taken before it existed do not) the
+     * status and menu order of the object.
+     *
+     * @return array{meta: array<string, string>, terms: array<string, array<int, int>>, post: array<string, string>}
      */
     public static function revisionSnapshot(int $revisionId, int $postId): array
     {
@@ -388,8 +418,11 @@ final class Revisions
         $terms = json_decode((string) ($all[self::TERMS_KEY][0] ?? ''), true);
         $terms = is_array($terms) ? $terms : [];
         ksort($terms);
+        $post = json_decode((string) ($all[self::POST_KEY][0] ?? ''), true);
+        $post = is_array($post) ? array_map('strval', array_intersect_key($post, array_flip(self::POST_SNAPSHOT))) : [];
+        ksort($post);
 
-        return ['meta' => self::pick($all, (string) get_post_type($postId)), 'terms' => $terms];
+        return ['meta' => self::pick($all, (string) get_post_type($postId)), 'terms' => $terms, 'post' => $post];
     }
 
     /**
@@ -411,6 +444,12 @@ final class Revisions
             add_metadata('post', $revisionId, self::TERMS_KEY, wp_slash((string) wp_json_encode($terms)));
         }
 
+        $post = self::currentPost($postId);
+
+        if ($post !== []) {
+            add_metadata('post', $revisionId, self::POST_KEY, wp_slash((string) wp_json_encode($post)));
+        }
+
         if (self::$baseline) {
             return;
         }
@@ -423,7 +462,8 @@ final class Revisions
     }
 
     /**
-     * `wp_save_post_revision_post_has_changed`, 20 (core's meta check is at 10).
+     * `wp_save_post_revision_post_has_changed`, 20 (core's meta check is
+     * at 10): the terms, the status or the menu order changed.
      *
      * @param  mixed  $changed
      */
@@ -433,7 +473,21 @@ final class Revisions
             return (bool) $changed;
         }
 
-        return self::revisionSnapshot($latest->ID, $post->ID)['terms'] !== self::currentTerms($post->ID, $post->post_type);
+        $snapshot = self::revisionSnapshot($latest->ID, $post->ID);
+
+        if ($snapshot['terms'] !== self::currentTerms($post->ID, $post->post_type)) {
+            return true;
+        }
+
+        $live = self::currentPost($post->ID);
+
+        foreach ($snapshot['post'] as $column => $value) {
+            if (($live[$column] ?? '') !== $value) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -629,21 +683,39 @@ final class Revisions
     {
         $latest = self::revisionIds($post->ID, 1)[0] ?? 0;
 
-        if ($latest <= 0 || self::outdated($latest, $post->ID)) {
+        if ($latest <= 0 || self::outdated($latest, $post->ID) || self::lacksPostSnapshot($latest, $post->ID)) {
             self::unbatched($post);
         }
     }
 
     /**
-     * Whether the live meta or terms differ from a revision. Post fields
+     * Whether the save changes the status or menu order while the latest
+     * revision, taken before `_wcpl_post` existed, does not hold them:
+     * the catch-up revision puts the state before the save down, so the
+     * save's revision differs from it and an undo has the old value.
+     */
+    private static function lacksPostSnapshot(int $revisionId, int $postId): bool
+    {
+        $fields = self::$pendingFields[$postId] ?? [];
+
+        if (! in_array('status', $fields, true) && ! in_array('menu_order', $fields, true)) {
+            return false;
+        }
+
+        return get_metadata('post', $revisionId, self::POST_KEY, true) === '';
+    }
+
+    /**
+     * Whether the live meta, terms, status or menu order differ from a
+     * revision. Core's revisioned post fields (title, content, excerpt)
      * are left out: core writes them with wp_update_post() right before
      * a classic or restore save, and revisions them itself otherwise.
      */
     public static function outdated(int $revisionId, int $postId): bool
     {
         $type = (string) get_post_type($postId);
-        $revision = self::revisionSnapshot($revisionId, $postId) + ['post' => []];
-        $live = ['meta' => self::currentMeta($postId, $type), 'terms' => self::currentTerms($postId, $type), 'post' => []];
+        $revision = self::revisionSnapshot($revisionId, $postId);
+        $live = ['meta' => self::currentMeta($postId, $type), 'terms' => self::currentTerms($postId, $type), 'post' => self::currentPost($postId)];
 
         return Restore::diffKeys($revision, $live) !== [];
     }

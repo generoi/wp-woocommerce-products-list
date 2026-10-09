@@ -23,6 +23,27 @@ export const ACTION_TIMEOUT = 10000;
  */
 export const STICKY_UNDO_PREFIXES: readonly string[] = [ 'wc-pl-trash-' ];
 
+/**
+ * Id prefix of a save outcome that is the only record on screen of what
+ * failed or was held back (a background save, its panel closed): one id per
+ * save, so a later save's notice does not replace it, and it is neither
+ * superseded by a newer Undo nor dropped by the cap (overflowingNotices).
+ */
+export const OUTCOME_NOTICE_PREFIX = 'wc-pl-outcome-';
+
+let outcomeSerial = 0;
+
+/** The id of a save's durable outcome notice: its batch id, or a fresh one when it has none. */
+export function outcomeNoticeId( batchId: string | undefined ): string {
+	outcomeSerial += 1;
+
+	return `${ OUTCOME_NOTICE_PREFIX }${ batchId || `local-${ outcomeSerial }` }`;
+}
+
+function isOutcome( notice: NoticeLike ): boolean {
+	return notice.id.startsWith( OUTCOME_NOTICE_PREFIX );
+}
+
 /** How long a plain snackbar stays, in ms (core's own snackbar timeout). */
 export const PLAIN_TIMEOUT = 6000;
 
@@ -60,13 +81,17 @@ export function snackbarTimeout( notice: NoticeLike ): number | null {
  * The ids of snackbars to drop: older Undo-style notices once a newer one
  * is shown (a stray click on an old Undo must not revert an earlier
  * campaign), then the oldest beyond the cap. The store lists notices
- * oldest first. Error notices with an action (Retry) are not superseded.
+ * oldest first. Notices that stay until dismissed are never dropped and do
+ * not count toward the cap: errors (they name what failed), notices asked
+ * to stay (`explicitDismiss`, e.g. "Reverting…") and save outcomes
+ * (OUTCOME_NOTICE_PREFIX). Errors and save outcomes are not superseded
+ * either; a sticky success Undo (Move to Trash) still is.
  */
 export function overflowingNotices< T extends NoticeLike >( notices: T[], max: number = MAX_SNACKBARS ): string[] {
-	const actionable = notices.filter( ( notice ) => hasActions( notice ) && notice.status !== 'error' );
+	const actionable = notices.filter( ( notice ) => hasActions( notice ) && notice.status !== 'error' && ! isOutcome( notice ) );
 	const superseded = new Set( actionable.slice( 0, -1 ).map( ( notice ) => notice.id ) );
-	const kept = notices.filter( ( notice ) => ! superseded.has( notice.id ) );
-	const overflow = kept.length > max ? kept.slice( 0, kept.length - max ).map( ( notice ) => notice.id ) : [];
+	const capped = notices.filter( ( notice ) => ! superseded.has( notice.id ) && notice.status !== 'error' && notice.explicitDismiss !== true && ! isOutcome( notice ) );
+	const overflow = capped.length > max ? capped.slice( 0, capped.length - max ).map( ( notice ) => notice.id ) : [];
 
 	return [ ...superseded, ...overflow ];
 }

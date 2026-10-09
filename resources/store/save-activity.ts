@@ -33,6 +33,14 @@ const jobs = new Map< number, Job >();
 const listeners = new Set< () => void >();
 let nextId = 1;
 let snapshot: SaveActivity | null = null;
+/**
+ * Bumped whenever the set of locked rows changes (a job starts, rows are
+ * written, a job ends), not on progress. Row actions are memoised per row
+ * object by DataViews, so the list rebuilds its actions on this: a row
+ * rendered while locked and never written (held back for a clash, re-read
+ * during the lock) gets its edit actions back when the save ends.
+ */
+let lockVersion = 0;
 
 /**
  * The update runs in this tab: leaving the page stops the requests not sent yet. While a save is in flight the
@@ -62,7 +70,11 @@ function guardLeaving( active: boolean ): void {
 	}
 }
 
-function emit(): void {
+function emit( locksChanged = false ): void {
+	if ( locksChanged ) {
+		lockVersion += 1;
+	}
+
 	let done = 0;
 	let total = 0;
 	let startedAt = Number.POSITIVE_INFINITY;
@@ -90,7 +102,7 @@ export function startSaveJob( pendingIds: Iterable< number >, kind: SaveJobKind 
 	const id = nextId++;
 
 	jobs.set( id, { kind, done: 0, total: 0, startedAt: Date.now(), pending: new Set( pendingIds ) } );
-	emit();
+	emit( true );
 
 	return id;
 }
@@ -157,13 +169,13 @@ export function markRowsSaved( id: number, rowIds: Iterable< number > ): void {
 	}
 
 	if ( changed ) {
-		emit();
+		emit( true );
 	}
 }
 
 export function finishSaveJob( id: number ): void {
 	if ( jobs.delete( id ) ) {
-		emit();
+		emit( true );
 	}
 }
 
@@ -189,6 +201,16 @@ export function isRowPending( rowId: number | undefined | null ): boolean {
 
 export function useSaveActivity(): SaveActivity | null {
 	return useSyncExternalStore( subscribe, () => snapshot, () => null );
+}
+
+/** The lock version (see `lockVersion`): changes only when rows are locked or released, for memo deps of row actions. */
+export function getLockVersion(): number {
+	return lockVersion;
+}
+
+/** Re-renders when rows are locked or released (not on progress). */
+export function useLockVersion(): number {
+	return useSyncExternalStore( subscribe, getLockVersion, getLockVersion );
 }
 
 /** Re-renders only when this row's pending state flips. */

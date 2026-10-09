@@ -146,4 +146,47 @@ describe( 'background bulk update', () => {
 			] )
 		);
 	} );
+	it( 'gives a background save\'s failure notice its own id, so a later save\'s notice does not replace it', async () => {
+		const rows = [ simple( 8 ), simple( 9 ) ];
+		let finishSave: () => void = () => {};
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+
+			return { items: ids.map( ( id ) => rows.find( ( row ) => row.id === id ) ?? simple( id ) ), total: ids.length, totalPages: 1 };
+		} );
+		saveEdits.mockImplementationOnce(
+			() =>
+				new Promise( ( resolve ) => {
+					finishSave = () =>
+						resolve( {
+							updated: [ simple( 8, { featured: true } ) ],
+							errors: [ { id: 9, code: 'fetch_error', message: 'You are probably offline.' } ],
+							batchId: 'b-bg-1',
+							unchanged: 0,
+							stockSkipped: 0,
+							saleSkipped: 0,
+							replacedSales: 0,
+						} );
+				} )
+		);
+
+		const view = render( <InlineEditor host={ hostFor( rows ) } /> );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		fireEvent.click( screen.getByLabelText( 'featured' ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Update 2 products' } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalled() );
+
+		// The panel is closed while the save runs in the background.
+		view.unmount();
+		finishSave();
+
+		await waitFor( () => expect( notify.error ).toHaveBeenCalled() );
+		const [ , options ] = notify.error.mock.calls[ 0 ] as [ string, { id: string; explicitDismiss?: boolean; actions?: Array< { label: string } > } ];
+
+		expect( options.id ).toBe( 'wc-pl-outcome-b-bg-1' );
+		expect( options.id ).not.toBe( 'wc-pl-saved' );
+		expect( options.explicitDismiss ).toBe( true );
+		expect( options.actions?.map( ( action ) => action.label ) ).toContain( 'Select the 1 failed' );
+	} );
 } );

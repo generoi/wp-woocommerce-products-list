@@ -40,6 +40,28 @@ describe( 'undoBatch', () => {
 		expect( revertBatch ).toHaveBeenCalledTimes( 2 );
 	} );
 
+	it( 'counts what was put back when one of several requests is lost, and refreshes the list and History', async () => {
+		const { invalidateProducts } = await import( '../../resources/store/products' );
+		const { invalidateLog } = await import( '../../resources/history/use-log' );
+
+		getRevertPlan.mockResolvedValueOnce( { chunk: 2, chunks: [ [ 1, 2 ], [ 3, 4 ], [ 5, 6 ] ], rows: 6, objects: 6, skipped: [], revertable: true } );
+		revertBatch.mockImplementation( async ( _batch: string, options: { ids: number[] } ) => {
+			if ( options.ids.includes( 3 ) ) {
+				throw new Error( 'Could not get a valid response from the server.' );
+			}
+
+			return { batch_id: 'revert-1', results: options.ids.map( ( id ) => ( { id, ok: true } ) ), items: [] };
+		} );
+
+		await undoBatch( 'batch-p' );
+
+		expect( revertBatch ).toHaveBeenCalledTimes( 3 );
+		expect( notify.error ).toHaveBeenCalledWith( expect.stringMatching( /^4 put back, 2 failed: Could not get a valid response from the server\. It may have been saved anyway/ ) );
+		expect( notify.success ).not.toHaveBeenCalled();
+		expect( invalidateProducts ).toHaveBeenCalled();
+		expect( invalidateLog ).toHaveBeenCalled();
+	} );
+
 	it( 'drops the progress notice and reports the error when the revert fails', async () => {
 		getRevertPlan.mockRejectedValueOnce( new Error( 'Gone' ) );
 

@@ -3,6 +3,7 @@
 namespace GeneroWP\ProductsList\History;
 
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Rest\Concurrency;
 use WP_REST_Request;
 
 /**
@@ -302,33 +303,96 @@ final class Batches
     }
 
     /**
+     * The term of a batch read from the database, past every cache: the
+     * requests of one batch run at the same time (three by default), and
+     * another one may have created it since this process looked.
+     *
+     * @return array{term_id: int, tt_id: int}|null
+     */
+    private static function stored(string $uuid): ?array
+    {
+        global $wpdb;
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT t.term_id, tt.term_taxonomy_id FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE tt.taxonomy = %s AND t.slug = %s ORDER BY t.term_id ASC LIMIT 1",
+            self::TAXONOMY,
+            $uuid
+        ));
+
+        if (! is_object($row)) {
+            return null;
+        }
+
+        return self::$terms[$uuid] = ['term_id' => (int) $row->term_id, 'tt_id' => (int) $row->term_taxonomy_id];
+    }
+
+    /**
+     * The named lock of one batch: its term is created, and its counters
+     * written, by one request at a time.
+     */
+    private static function lock(string $uuid): ?string
+    {
+        $name = Concurrency::lockName('b', md5($uuid));
+
+        // Best effort: when the lock cannot be had the work goes on; the
+        // insert below then falls back to the term the other request made.
+        return Concurrency::acquire($name, 5) ? $name : null;
+    }
+
+    private static function unlock(?string $name): void
+    {
+        if ($name !== null) {
+            Concurrency::release($name);
+        }
+    }
+
+    /**
+     * The batch's term, created on its first revision. Under the batch's
+     * lock and from the database: two requests of a batch arriving at
+     * once would otherwise both insert it, core would delete one of the
+     * two as a duplicate slug and the loser's revisions would go into no
+     * batch (an undo would then leave those rows as they are).
+     *
      * @param  array{uuid: string, source: string, reverts: string}  $context
      * @return array{term_id: int, tt_id: int}|null
      */
     private static function ensure(array $context): ?array
     {
-        $existing = self::term($context['uuid']);
+        $uuid = $context['uuid'];
 
-        if ($existing !== null) {
-            return $existing;
+        if (isset(self::$terms[$uuid])) {
+            return self::$terms[$uuid];
         }
 
-        $inserted = wp_insert_term($context['uuid'], self::TAXONOMY, ['slug' => $context['uuid']]);
+        $lock = self::lock($uuid);
 
-        if (is_wp_error($inserted)) {
-            return null;
+        try {
+            $existing = self::stored($uuid);
+
+            if ($existing !== null) {
+                return $existing;
+            }
+
+            $inserted = wp_insert_term($uuid, self::TAXONOMY, ['slug' => $uuid]);
+
+            if (is_wp_error($inserted)) {
+                // Inserted by another request after all (no lock to be had).
+                return self::stored($uuid);
+            }
+
+            $termId = (int) $inserted['term_id'];
+            add_term_meta($termId, 'source', $context['source'], true);
+            add_term_meta($termId, 'user', get_current_user_id(), true);
+            add_term_meta($termId, 'time', time(), true);
+
+            if ($context['reverts'] !== '') {
+                add_term_meta($termId, 'reverts', $context['reverts'], true);
+            }
+
+            return self::$terms[$uuid] = ['term_id' => $termId, 'tt_id' => (int) $inserted['term_taxonomy_id']];
+        } finally {
+            self::unlock($lock);
         }
-
-        $termId = (int) $inserted['term_id'];
-        add_term_meta($termId, 'source', $context['source'], true);
-        add_term_meta($termId, 'user', get_current_user_id(), true);
-        add_term_meta($termId, 'time', time(), true);
-
-        if ($context['reverts'] !== '') {
-            add_term_meta($termId, 'reverts', $context['reverts'], true);
-        }
-
-        return self::$terms[$context['uuid']] = ['term_id' => $termId, 'tt_id' => (int) $inserted['term_taxonomy_id']];
     }
 
     public static function assign(int $revisionId): void
@@ -381,30 +445,68 @@ final class Batches
             wp_update_term_count_now($ttIds, self::TAXONOMY);
         }
 
-        foreach (self::$assigned as $uuid => $count) {
-            $term = self::term((string) $uuid);
+        $uuids = array_unique(array_merge(array_map('strval', array_keys(self::$assigned)), array_map('strval', array_keys(self::$fields))));
 
-            if ($term !== null) {
-                update_term_meta($term['term_id'], 'revisions', (int) get_term_meta($term['term_id'], 'revisions', true) + $count);
-            }
-        }
-
-        self::$assigned = [];
-
-        foreach (self::$fields as $uuid => $fields) {
+        foreach ($uuids as $uuid) {
             $term = self::term($uuid);
 
             if ($term === null) {
                 continue;
             }
 
-            $existing = json_decode((string) get_term_meta($term['term_id'], 'fields', true), true);
-            $merged = array_values(array_unique(array_merge(is_array($existing) ? $existing : [], array_keys($fields))));
-            sort($merged);
-            update_term_meta($term['term_id'], 'fields', (string) wp_json_encode($merged));
+            // Read, add and write under the batch's lock, from the
+            // database: the other requests of the batch flush too.
+            $lock = self::lock($uuid);
+
+            try {
+                wp_cache_delete($term['term_id'], 'term_meta');
+
+                if (isset(self::$assigned[$uuid])) {
+                    self::writeMeta($term['term_id'], 'revisions', (string) (self::storedInt($term['term_id'], 'revisions') + self::$assigned[$uuid]));
+                }
+
+                if (isset(self::$fields[$uuid])) {
+                    $existing = json_decode((string) get_term_meta($term['term_id'], 'fields', true), true);
+                    $merged = array_values(array_unique(array_merge(is_array($existing) ? $existing : [], array_keys(self::$fields[$uuid]))));
+                    sort($merged);
+                    self::writeMeta($term['term_id'], 'fields', (string) wp_json_encode($merged));
+                }
+            } finally {
+                self::unlock($lock);
+            }
         }
 
+        self::$assigned = [];
         self::$fields = [];
+    }
+
+    /**
+     * A numeric term meta value as stored: the largest when an earlier
+     * version wrote it twice.
+     */
+    private static function storedInt(int $termId, string $key): int
+    {
+        $values = get_term_meta($termId, $key);
+
+        return is_array($values) && $values !== [] ? max(array_map('intval', $values)) : 0;
+    }
+
+    /**
+     * Write one term meta value, leaving a single row: the read-modify-write
+     * of an earlier version could add a key twice.
+     */
+    private static function writeMeta(int $termId, string $key, string $value): void
+    {
+        $values = get_term_meta($termId, $key);
+
+        if (is_array($values) && count($values) > 1) {
+            delete_term_meta($termId, $key);
+            add_term_meta($termId, $key, $value, true);
+
+            return;
+        }
+
+        update_term_meta($termId, $key, $value);
     }
 
     /**

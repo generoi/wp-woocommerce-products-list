@@ -552,6 +552,147 @@ class RevisionsSpikeTest extends RestTestCase
         $this->assertSame(3, (int) get_term($term['term_id'], Batches::TAXONOMY)->count);
     }
 
+    public function test_a_batch_term_another_request_created_meanwhile_is_used_not_lost(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'RT1'])->get_id();
+        $this->ready();
+        $uuid = wp_generate_uuid4();
+
+        // Another request of the batch inserts the term between this
+        // request's lookup and its insert.
+        $race = static function ($term, $taxonomy) use ($uuid, &$race) {
+            if ($taxonomy === Batches::TAXONOMY && $term === $uuid) {
+                remove_filter('pre_insert_term', $race);
+                wp_insert_term($uuid, Batches::TAXONOMY, ['slug' => $uuid]);
+            }
+
+            return $term;
+        };
+        add_filter('pre_insert_term', $race, 10, 2);
+
+        Batches::begin($uuid, 'bulk');
+        $product = wc_get_product($id);
+        $product->set_sale_price('100');
+        $product->save();
+        Batches::end();
+        $this->settle();
+
+        $this->assertSame($uuid, $this->batchOf($this->revisions($id)[0]), 'the revision is in the batch');
+        $this->assertCount(1, get_terms(['taxonomy' => Batches::TAXONOMY, 'slug' => $uuid, 'hide_empty' => false]));
+        $this->assertSame(1, Batches::recorded($uuid));
+        $this->assertSame(1, Restore::undoAll($uuid)['restored']);
+    }
+
+    public function test_batch_counters_add_to_what_other_requests_of_the_batch_wrote(): void
+    {
+        global $wpdb;
+
+        $a = $this->simpleProduct(['sku' => 'RC1'])->get_id();
+        $b = $this->simpleProduct(['sku' => 'RC2'])->get_id();
+        $this->ready();
+        $uuid = wp_generate_uuid4();
+
+        Batches::begin($uuid, 'bulk');
+        $product = wc_get_product($a);
+        $product->set_regular_price('150');
+        $product->save();
+        Batches::end();
+        $term = Batches::term($uuid);
+        $this->assertSame(1, Batches::recorded($uuid));
+
+        // Other requests of the batch flushed behind this process's cache,
+        // and an earlier version wrote the counter twice.
+        $wpdb->update($wpdb->termmeta, ['meta_value' => '5'], ['term_id' => $term['term_id'], 'meta_key' => 'revisions']);
+        $wpdb->insert($wpdb->termmeta, ['term_id' => $term['term_id'], 'meta_key' => 'revisions', 'meta_value' => '5']);
+        $wpdb->update($wpdb->termmeta, ['meta_value' => '["regular_price","weight"]'], ['term_id' => $term['term_id'], 'meta_key' => 'fields']);
+
+        Batches::begin($uuid, 'bulk');
+        $product = wc_get_product($b);
+        $product->set_sale_price('100');
+        $product->save();
+        Batches::end();
+
+        wp_cache_delete($term['term_id'], 'term_meta');
+        $this->assertSame(['6'], get_term_meta($term['term_id'], 'revisions'));
+        $this->assertSame(['regular_price', 'sale_price', 'weight'], Batches::meta($uuid)['fields']);
+    }
+
+    public function test_status_and_menu_order_changes_take_a_revision_and_undo(): void
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        [$v] = $parent->get_children();
+        $simple = $this->simpleProduct(['sku' => 'SM1'])->get_id();
+        $this->ready();
+
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [
+            ['id' => $v, 'status' => 'private'],
+        ]], ['X-WC-Products-List-Source' => 'action']));
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $simple, 'status' => 'draft', 'menu_order' => 7],
+        ]], ['X-WC-Products-List-Source' => 'bulk']));
+
+        $this->assertRevisionIsState($v, 2, $this->batchId());
+        $this->assertRevisionIsState($simple, 2, $this->batchId());
+        $this->assertBaseline($v, 'post:post_status', 'publish');
+        $this->assertContains('status', Batches::meta($this->batchId())['fields']);
+
+        $undo = Restore::undoAll($this->batchId());
+        $this->assertSame(2, $undo['restored'], wp_json_encode($undo));
+        $this->settle();
+        $this->assertSame('publish', get_post_status($v));
+        $this->assertSame('publish', get_post_status($simple));
+        $this->assertSame(0, (int) get_post($simple)->menu_order);
+        $this->assertDerived($v);
+    }
+
+    public function test_a_status_change_after_a_revision_without_the_post_snapshot_still_undoes(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'SM2'])->get_id();
+        $this->ready();
+        $product = wc_get_product($id);
+        $product->set_sale_price('100');
+        $product->save();
+        $this->settle();
+
+        // Revisions taken before `_wcpl_post` existed hold no status.
+        foreach ($this->revisions($id) as $revisionId) {
+            delete_metadata('post', $revisionId, Revisions::POST_KEY);
+        }
+
+        Batches::reset();
+        Batches::begin($batch = wp_generate_uuid4(), 'action');
+        $product = wc_get_product($id);
+        $product->set_status('draft');
+        $product->save();
+        Batches::end();
+        $this->settle();
+
+        $this->assertSame(1, count(Batches::revisions($batch)));
+        $this->assertSame(1, Restore::undoAll($batch)['restored']);
+        $this->settle();
+        $this->assertSame('publish', get_post_status($id));
+        $this->assertSame('100', get_post_meta($id, '_sale_price', true), 'an old revision without the snapshot leaves the status alone otherwise');
+    }
+
+    public function test_undo_skips_an_object_another_user_has_open_in_the_editor(): void
+    {
+        $id = $this->simpleProduct(['sku' => 'ED1'])->get_id();
+        $this->ready();
+        Batches::begin($batch = wp_generate_uuid4(), 'bulk');
+        $product = wc_get_product($id);
+        $product->set_sale_price('100');
+        $product->save();
+        Batches::end();
+        $this->settle();
+
+        $other = self::factory()->user->create(['role' => 'shop_manager']);
+        update_post_meta($id, '_edit_lock', time().':'.$other);
+
+        $result = Restore::undo($batch);
+        $this->assertSame([['id' => $id, 'reason' => 'editing']], $result['skipped']);
+        $this->assertSame('100', get_post_meta($id, '_sale_price', true));
+    }
+
     public function test_purge_deletes_revisions_and_batch_terms(): void
     {
         $id = $this->simpleProduct(['sku' => 'PU1'])->get_id();

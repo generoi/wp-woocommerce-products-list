@@ -24,6 +24,7 @@
  */
 import { Button, Notice, ProgressBar, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { CheckboxControl } from '../ui/checkbox-control';
+import { outcomeNoticeId } from '../ui/notices';
 import { createPortal, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
@@ -88,7 +89,12 @@ const IDLE_LOAD: VariationLoad = { status: 'idle', byParent: new Map(), count: 0
 
 const PANEL_ID = 'wc-pl-edit-panel';
 
-/** The snackbar after a save: one at a time, a new save replaces the previous one's Undo. */
+/**
+ * The snackbar after a plain save: one at a time, a new save replaces the
+ * previous one's Undo. A save that failed in part, or held rows back, with
+ * its panel closed gets its own id instead (outcomeNoticeId): that notice is
+ * all there is about its failed rows, and a later save must not replace it.
+ */
 export const SAVED_NOTICE_ID = 'wc-pl-saved';
 
 /**
@@ -1633,7 +1639,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				const partial = result.updated.length > 0 || tools.ran > 0;
 
 				notify.error( tools.errors.map( ( error ) => error.message ).join( ' ' ), {
-					id: SAVED_NOTICE_ID,
+					id: mountedRef.current ? SAVED_NOTICE_ID : outcomeNoticeId( result.batchId ),
 					actions: partial && canUndo() ? [ undoAction( result.batchId ) ] : undefined,
 				} );
 
@@ -1710,7 +1716,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					const heldIds = Array.from( staleIds );
 
 					notify.info( [ fieldsLine, toolsLine, heldLine ].filter( Boolean ).join( ' ' ), {
-						id: SAVED_NOTICE_ID,
+						id: outcomeNoticeId( result.batchId ),
 						explicitDismiss: true,
 						actions: [
 							...savedActions,
@@ -1799,7 +1805,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				// The editor lists who failed and why; the snackbar carries the counts and the Undo, and expires like any other.
 				notify.info( partialFailureMessage( result, names, false ), { id: SAVED_NOTICE_ID, actions: partialActions.length ? partialActions : undefined } );
 			} else {
-				notify.error( partialFailureMessage( result, names ), { id: SAVED_NOTICE_ID, actions: partialActions, explicitDismiss: true } );
+				notify.error( partialFailureMessage( result, names ), { id: outcomeNoticeId( result.batchId ), actions: partialActions, explicitDismiss: true } );
 			}
 
 			if ( mountedRef.current ) {

@@ -119,6 +119,18 @@ final class VariationsBatchController
             }
 
             $response = rest_do_request($nested);
+
+            // WooCommerce defers the parent's sync (`_price`, the price
+            // range, the lookup row) to the end of the PHP process; a
+            // request killed later would leave every parent of the
+            // request unsynced. Run the queued syncs now, per group, with
+            // WooCommerce's own runner (it drains the queue, so nothing
+            // is synced twice): a killed request leaves at most the
+            // parent it was writing, which its batch marker repairs.
+            if (class_exists(\WC_Post_Data::class)) {
+                \WC_Post_Data::do_deferred_product_sync();
+            }
+
             $data = $response->get_data();
             $indexes = array_keys($group);
 

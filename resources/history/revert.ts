@@ -17,6 +17,8 @@
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertCheck, RevertPlan } from '../api/client';
 import { checkRevert, closeBatch, getRevertPlan, newBatchId, revertBatch } from '../api/client';
+import { humanizeError } from '../edit/errors';
+import { outcomeUnknown, UNCERTAIN_CODE, uncertainMessage } from '../edit/save-runner';
 import { beginSaveJob, finishSaveJob, pendingAmong, updateSaveJob } from '../store/save-activity';
 
 export interface RevertOutcome {
@@ -138,7 +140,29 @@ export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 
 /** Chunks posted at once: the server takes at most 100 objects per call, and parallel chunks of one batch do not interfere (conflicts and `reverts` are per object). */
 export const REVERT_PARALLEL = 3;
 
-/** Post the revert in chunks, REVERT_PARALLEL at a time; `plan.chunks` or the given ids cut to the plan's chunk size. Results keep the chunk order. */
+/**
+ * The results of a revert chunk whose request failed as a whole: one failed
+ * result per object, so the chunks that did answer still count ("N put
+ * back, M failed"). No answer, or a server error, may still have been
+ * stored: those say so (UNCERTAIN_CODE), like a save's (save-runner.ts).
+ */
+export function failedChunkResults( ids: number[], error: unknown ): ActionResult[] {
+	const rawCode = typeof ( error as { code?: unknown } | null )?.code === 'string' ? ( error as { code: string } ).code : undefined;
+	const raw = error instanceof Error ? error.message : String( error ?? '' );
+	const message = humanizeError( rawCode, raw );
+	const unknown = outcomeUnknown( error );
+
+	return ids.map( ( id ) => ( {
+		id,
+		ok: false,
+		code: unknown ? UNCERTAIN_CODE : rawCode ?? 'request_failed',
+		message: unknown ? uncertainMessage( message ) : message,
+	} ) );
+}
+
+/** Post the revert in chunks, REVERT_PARALLEL at a time; `plan.chunks` or the given ids cut to the plan's chunk size. Results keep the chunk order.
+ * A chunk whose request fails comes back as failed results (failedChunkResults) and the other chunks still run;
+ * it throws only when no chunk got an answer, so nothing was put back for sure. */
 export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk' | 'chunks' >, options: RunRevertOptions = {}, post: typeof revertBatch = revertBatch ): Promise< RevertOutcome > {
 	const revertBatchId = options.revertBatchId ?? newBatchId();
 	const chunks = ( options.ids ? chunk( options.ids, plan.chunk || 100 ) : plan.chunks ).filter( ( ids ) => ids.length );
@@ -159,6 +183,8 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 	const job = total ? beginSaveJob( objectIds.map( ( id ) => ( { id, parent_id: 0 } ) ), 'revert' ) : undefined;
 	let done = 0;
 	let next = 0;
+	let answered = false;
+	let firstError: unknown = null;
 
 	options.onProgress?.( 0, total );
 
@@ -170,9 +196,16 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 		while ( next < chunks.length ) {
 			const index = next++;
 			const ids = chunks[ index ] as number[];
-			const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ], batchId: revertBatchId, ...( planned ? { planned } : {} ) } );
+			try {
+				const response = await post( batchId, { ids, revertBatchId, force: options.force, relative: options.relative, fields: [ 'id' ], batchId: revertBatchId, ...( planned ? { planned } : {} ) } );
 
-			perChunk[ index ] = response.results ?? [];
+				perChunk[ index ] = response.results ?? [];
+				answered = true;
+			} catch ( error ) {
+				firstError ??= error;
+				perChunk[ index ] = failedChunkResults( ids, error );
+			}
+
 			done += ids.length;
 			options.onProgress?.( done, total );
 
@@ -189,6 +222,11 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 
 		if ( failure ) {
 			throw failure.reason;
+		}
+
+		// Every request failed: nothing was put back for sure, the caller reports the error as it is.
+		if ( ! answered && firstError ) {
+			throw firstError;
 		}
 	} finally {
 		if ( planned ) {
