@@ -127,7 +127,7 @@ describe( 'ShownValues with fields that share paths', () => {
 		expect( writeItem( later.baseRow( row( 5, { stock_status: 'instock', stock_quantity: 8, manage_stock: true } ), realById ), { stock_quantity: 4 } )._wcpl_expect ).toEqual( { stock_quantity: 3 } );
 	} );
 
-	it( 'settles each meta key from the first snapshot that carries it, and expects nothing for a key none showed', () => {
+	it( 'settles meta_data from the first snapshot that carries it: a key that list lacks was shown empty', () => {
 		const metaField = ( id: string ) => field( id, { rest: { fields: [ 'meta_data' ], applies: { product: true, variation: true } } } );
 		const metaById = new Map( [ metaField( 'note_a' ), metaField( 'note_b' ) ].map( ( entry ) => [ entry.id, entry ] ) );
 		const shown = new ShownValues();
@@ -137,7 +137,35 @@ describe( 'ShownValues with fields that share paths', () => {
 		const current = row( 2, { meta_data: [ { key: '_a', value: 'theirs' }, { key: '_b', value: 'b2' }, { key: '_c', value: 'c-new' } ] } );
 		const payload = { meta_data: [ { key: '_a', value: 'x' }, { key: '_b', value: 'y' }, { key: '_c', value: 'z' } ] };
 
-		expect( writeItem( shown.baseRow( current, metaById ), payload )._wcpl_expect ).toEqual( { 'meta_data._a': 'mine', 'meta_data._b': 'b1' } );
+		// _b and _c were not in the first list the form showed: expected empty, so the values set since are refused.
+		expect( writeItem( shown.baseRow( current, metaById ), payload )._wcpl_expect ).toEqual( { 'meta_data._a': 'mine', 'meta_data._b': null, 'meta_data._c': null } );
+	} );
+
+	it( 'never takes a meta key the first loaded list lacked from a later snapshot (field shown empty, then set by someone else)', () => {
+		const metaField = ( id: string ) => field( id, { rest: { fields: [ 'meta_data' ], applies: { product: true, variation: true } } } );
+		const metaById = new Map( [ metaField( 'note_a' ), metaField( 'note_b' ) ].map( ( entry ) => [ entry.id, entry ] ) );
+		const shown = new ShownValues();
+
+		// note_b changed first while _b showed empty; another user then set _b, which a load merged in;
+		// note_a changed after that, so its snapshot carries _b = 'theirs'.
+		shown.record( [ 'note_b' ], [ row( 2, { meta_data: [ { key: '_a', value: 'a0' } ] } ) ] );
+		shown.record( [ 'note_a' ], [ row( 2, { meta_data: [ { key: '_a', value: 'a0' }, { key: '_b', value: 'theirs' } ] } ) ] );
+		const current = row( 2, { meta_data: [ { key: '_a', value: 'a0' }, { key: '_b', value: 'theirs' } ] } );
+
+		expect( writeItem( shown.baseRow( current, metaById ), { meta_data: [ { key: '_a', value: 'x' }, { key: '_b', value: 'mine' } ] } )._wcpl_expect ).toEqual( {
+			'meta_data._a': 'a0',
+			'meta_data._b': null,
+		} );
+	} );
+
+	it( 'expects a meta key empty when its one field was changed while the key was absent', () => {
+		const note = field( 'note_b', { rest: { fields: [ 'meta_data' ], applies: { product: true, variation: true } } } );
+		const shown = new ShownValues();
+
+		shown.record( [ 'note_b' ], [ row( 2, { meta_data: [ { key: '_a', value: 'a0' } ] } ) ] );
+		const current = row( 2, { meta_data: [ { key: '_a', value: 'a0' }, { key: '_b', value: 'theirs' } ] } );
+
+		expect( writeItem( shown.baseRow( current, new Map( [ [ note.id, note ] ] ) ), { meta_data: [ { key: '_b', value: 'mine' } ] } )._wcpl_expect ).toEqual( { 'meta_data._b': null } );
 	} );
 } );
 

@@ -126,6 +126,32 @@ class ConcurrencyTest extends RestTestCase
         $this->assertNotContains(Concurrency::EXPECT_KEY, array_column($this->rows(), 'field'));
     }
 
+    public function test_a_meta_key_expected_empty_saves_when_still_missing_and_is_refused_once_someone_set_it(): void
+    {
+        $product = $this->simpleProduct(['regular_price' => '15']);
+        $id = $product->get_id();
+
+        // The editor showed `_wcpl_note` empty (the row's meta_data list lacked it) and expects it so.
+        $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, [
+            'meta_data' => [['key' => '_wcpl_note', 'value' => 'first']],
+            Concurrency::EXPECT_KEY => ['meta_data._wcpl_note' => null],
+        ]));
+        $this->assertSame('first', get_post_meta($id, '_wcpl_note', true));
+
+        // Someone else set `_wcpl_other` after this editor showed it empty.
+        update_post_meta($id, '_wcpl_other', 'theirs');
+        clean_post_cache($id);
+
+        $response = $this->request('PUT', '/wc/v3/products/'.$id, [
+            'meta_data' => [['key' => '_wcpl_other', 'value' => 'mine']],
+            Concurrency::EXPECT_KEY => ['meta_data._wcpl_other' => null],
+        ]);
+
+        $this->assertStatus(409, $response);
+        $this->assertSame(['meta_data._wcpl_other'], $this->data($response)['data']['fields']);
+        $this->assertSame('theirs', get_post_meta($id, '_wcpl_other', true));
+    }
+
     public function test_a_batch_refuses_only_the_item_that_changed(): void
     {
         $a = $this->simpleProduct(['regular_price' => '15']);

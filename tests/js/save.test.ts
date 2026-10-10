@@ -303,7 +303,8 @@ describe( 'runSave', () => {
 			id: 1,
 			categories: [ { id: 4 } ],
 			meta_data: [ { key: 'color', value: 'blue' }, { key: 'unknown', value: 'x' } ],
-			_wcpl_expect: { categories: [ { id: 3 } ], 'meta_data.color': 'red' },
+			// A key the loaded list lacks was shown empty: expected empty, so a value set meanwhile is refused.
+			_wcpl_expect: { categories: [ { id: 3 } ], 'meta_data.color': 'red', 'meta_data.unknown': null },
 		} );
 
 		// inventory_delta is applied to the stock as stored: an order meanwhile is not a conflict.

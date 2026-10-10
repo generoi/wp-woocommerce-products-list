@@ -16,7 +16,7 @@
  * markup is edited as its HTML.
  */
 import { Button } from '@wordpress/components';
-import { memo, useEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { KeyboardEvent } from 'react';
 import type { ProductField, ProductListItem, Settings } from '../types';
@@ -39,7 +39,12 @@ type Listener = ( count: number ) => void;
 /** Edits by product id, then by registry field id (`i18n:se.name`). */
 export class TranslationStore {
 	private edits = new Map< number, Map< string, string > >();
-	/** The stored value each edit was typed over, as the grid loaded it: the save's expected value (`_wcpl_expect`). */
+	/**
+	 * The stored value each edit was typed over, as the grid showed it when the
+	 * first character was typed: the save's expected value (`_wcpl_expect`).
+	 * Kept until the edit is taken out, never replaced by a value a later load
+	 * brought (the input keeps the typed text and never showed that one).
+	 */
 	private originals = new Map< number, Map< string, string > >();
 	private listeners = new Set< Listener >();
 
@@ -47,18 +52,29 @@ export class TranslationStore {
 		return this.edits.get( id )?.get( fieldId );
 	}
 
-	/** Record a value; `original` equal to it takes the edit out again. */
-	set( id: number, fieldId: string, value: string, original: string ): void {
+	/** The stored value an edit was typed over (undefined: the field is not edited). */
+	originalOf( id: number, fieldId: string ): string | undefined {
+		return this.originals.get( id )?.get( fieldId );
+	}
+
+	/**
+	 * Record a value typed over `stored` (the value the row holds now). The
+	 * first stored value of an edit is kept as its base; a value equal to that
+	 * base (typed back to what was shown) or to the stored one (nothing to
+	 * write) takes the edit out again.
+	 */
+	set( id: number, fieldId: string, value: string, stored: string ): void {
 		const before = this.count();
 		const row = this.edits.get( id ) ?? new Map< string, string >();
 		const bases = this.originals.get( id ) ?? new Map< string, string >();
+		const base = bases.get( fieldId ) ?? stored;
 
-		if ( value === original ) {
+		if ( value === base || value === stored ) {
 			row.delete( fieldId );
 			bases.delete( fieldId );
 		} else {
 			row.set( fieldId, value );
-			bases.set( fieldId, original );
+			bases.set( fieldId, base );
 		}
 
 		if ( row.size ) {
@@ -247,7 +263,37 @@ interface RowProps {
 	defaultLabel: string;
 }
 
+/** The text a cell shows for a stored value. */
+function cellText( name: GridField, stored: string ): string {
+	return name === 'short_description' ? htmlToGridText( stored ) : decode( stored );
+}
+
+/** Put a stored value's text in an untouched (uncontrolled) cell. */
+function showText( input: HTMLInputElement | HTMLTextAreaElement, text: string ): void {
+	if ( input.value !== text ) {
+		input.value = text;
+	}
+}
+
 const GridRow = memo( function GridRow( { item, tabId, lang, gridFields, store, disabled, defaultLabel }: RowProps ) {
+	const inputs = useRef< Partial< Record< GridField, HTMLInputElement | HTMLTextAreaElement | null > > >( {} );
+
+	// The inputs are uncontrolled: a reload (the grid unfolded again) that brings another stored value
+	// must show it in every cell the user has not typed in, so the value an edit is typed over (its
+	// expected value) is always one the cell showed.
+	useLayoutEffect( () => {
+		for ( const name of GRID_FIELDS ) {
+			const field = gridFields[ name ];
+			const input = inputs.current[ name ];
+
+			if ( ! field || ! input || store.get( item.id, field.id ) !== undefined ) {
+				continue;
+			}
+
+			showText( input, cellText( name, stringOf( readFieldValue( field, item ) ) ) );
+		}
+	} );
+
 	const cell = ( name: GridField ) => {
 		const field = gridFields[ name ];
 
@@ -257,8 +303,11 @@ const GridRow = memo( function GridRow( { item, tabId, lang, gridFields, store, 
 
 		const stored = stringOf( readFieldValue( field, item ) );
 		const isHtml = name === 'short_description';
-		const shown = isHtml ? htmlToGridText( stored ) : decode( stored );
+		const shown = cellText( name, stored );
 		const edited = store.get( item.id, field.id );
+		const base = store.originalOf( item.id, field.id );
+		// Saved meanwhile (another tab or user) over the value this edit was typed over: Update refuses it (409).
+		const changedSince = edited !== undefined && base !== undefined && base !== stored;
 		const reference = shownText( item, field, `i18n.${ lang }.${ name }` );
 		const referenceText = isHtml ? htmlToGridText( reference ) : decode( reference );
 		const onChange = ( value: string ) => {
@@ -270,6 +319,9 @@ const GridRow = memo( function GridRow( { item, tabId, lang, gridFields, store, 
 			className: 'wc-pl-translate__input',
 			'data-grid-col': name,
 			'aria-label': `${ field.label ?? name }: ${ itemLabel( item ) }`,
+			ref: ( element: HTMLInputElement | HTMLTextAreaElement | null ) => {
+				inputs.current[ name ] = element;
+			},
 			defaultValue: edited !== undefined ? ( isHtml ? htmlToGridText( edited ) : edited ) : shown,
 			placeholder: referenceText.slice( 0, 200 ),
 			disabled,
@@ -282,6 +334,15 @@ const GridRow = memo( function GridRow( { item, tabId, lang, gridFields, store, 
 				) : (
 					<input type="text" { ...common } onChange={ ( event ) => onChange( event.currentTarget.value ) } />
 				) }
+				{ changedSince ? (
+					<span className="wc-pl-translate__reference wc-pl-translate__changed" role="status">
+						{ sprintf(
+							/* translators: %s: the translation saved meanwhile */
+							__( 'Changed by someone else since you started typing, now: %s. Update will not write over it.', 'wp-woocommerce-products-list' ),
+							cellText( name, stored ).slice( 0, 120 ) || __( '(empty)', 'wp-woocommerce-products-list' )
+						) }
+					</span>
+				) : null }
 				{ stored === '' && referenceText ? (
 					<span className="wc-pl-translate__reference" title={ referenceText }>
 						{ defaultLabel }: { referenceText.length > 120 ? `${ referenceText.slice( 0, 120 ) }…` : referenceText }

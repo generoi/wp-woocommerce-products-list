@@ -146,15 +146,17 @@ export class ShownValues {
 	 * path is settled by the field changed first whose snapshot carries it:
 	 * the oldest value the form showed for it, never one a later snapshot
 	 * took from a load the user had not seen when they typed. `meta_data` is
-	 * settled per meta key the same way; a key no snapshot carries is left
-	 * out (nothing the form showed, so nothing is expected), not taken from
-	 * the current row. The result does not depend on object identity.
+	 * settled as a whole from the first snapshot that carries the list: wc/v3
+	 * lists every meta key of the object, so a key missing from that list was
+	 * shown empty, and a later snapshot (a load after the first keystroke)
+	 * never fills it in; the save then expects it empty (expect.ts), so a
+	 * value someone set meanwhile is refused, not overwritten. The result
+	 * does not depend on object identity.
 	 */
 	baseRow( item: ProductListItem, byId: ReadonlyMap< string, ProductField > ): ProductListItem {
 		const settled = new Map< string, unknown >();
-		const metaByKey = new Map< string, unknown[] >();
 		let metaPath = false;
-		let metaCarried = false;
+		let meta: unknown[] | null = null;
 		let any = false;
 
 		// Map order is record order: the field changed first comes first.
@@ -171,9 +173,9 @@ export class ShownValues {
 				if ( path === META_PATH ) {
 					metaPath = true;
 
-					if ( Array.isArray( shown[ META_PATH ] ) ) {
-						metaCarried = true;
-						settleMeta( metaByKey, shown[ META_PATH ] as unknown[] );
+					// The first list carried is what the form showed for every key (a key it lacks was shown empty).
+					if ( meta === null && Array.isArray( shown[ META_PATH ] ) ) {
+						meta = shown[ META_PATH ] as unknown[];
 					}
 
 					continue;
@@ -198,7 +200,7 @@ export class ShownValues {
 		}
 
 		if ( metaPath ) {
-			row = writePath( row, META_PATH, metaCarried ? Array.from( metaByKey.values() ).flat() : ABSENT );
+			row = writePath( row, META_PATH, meta ?? ABSENT );
 		}
 
 		return row as ProductListItem;
@@ -206,25 +208,6 @@ export class ShownValues {
 }
 
 const META_PATH = 'meta_data';
-
-/** Add the meta keys a snapshot carries that no earlier snapshot did (every entry of the key, as listed). */
-function settleMeta( byKey: Map< string, unknown[] >, list: unknown[] ): void {
-	const here = new Map< string, unknown[] >();
-
-	for ( const entry of list ) {
-		const key = isPlainObject( entry ) ? entry.key : undefined;
-
-		if ( typeof key !== 'string' || byKey.has( key ) ) {
-			continue;
-		}
-
-		here.set( key, [ ...( here.get( key ) ?? [] ), entry ] );
-	}
-
-	for ( const [ key, entries ] of here ) {
-		byKey.set( key, entries );
-	}
-}
 
 /** A field whose value now differs from the one the form showed first. */
 export interface ChangedField {

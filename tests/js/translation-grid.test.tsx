@@ -4,7 +4,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { gridTextToHtml, htmlToGridText, isPlainParagraphs, TranslationGrid, TranslationStore } from '../../resources/edit/translation-grid';
+import { gridTextToHtml, htmlToGridText, isPlainParagraphs, TranslationGrid, TranslationStore, translationWriteItem } from '../../resources/edit/translation-grid';
 import { ServerPreview, serverPreviewLines, serverPreviewPath, useServerPreview } from '../../resources/edit/server-preview';
 import type { ServerPreviewResponse } from '../../resources/edit/server-preview';
 import type { DeclarativeAction, ProductField, ProductListItem } from '../../resources/types';
@@ -62,6 +62,25 @@ describe( 'translation grid text', () => {
 		store.clear( [ 1 ] );
 		expect( store.count() ).toBe( 0 );
 	} );
+
+	it( 'keeps the value the first keystroke was typed over as the expected value, whatever a later load stored', () => {
+		const store = new TranslationStore();
+
+		store.set( 1, 'i18n:se.name', 'A x', 'A' );
+		// The grid reloaded meanwhile: the row now stores B, the input still shows the user's text.
+		store.set( 1, 'i18n:se.name', 'A xs', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'A' } );
+		expect( store.originalOf( 1, 'i18n:se.name' ) ).toBe( 'A' );
+
+		// Typed back to what was shown: taken out (nothing of the user's to write), and the base with it.
+		store.set( 1, 'i18n:se.name', 'A', 'B' );
+		expect( store.count() ).toBe( 0 );
+		store.set( 1, 'i18n:se.name', 'B y', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'B' } );
+		// Typed to the value stored now: nothing to write either.
+		store.set( 1, 'i18n:se.name', 'C', 'C' );
+		expect( store.count() ).toBe( 0 );
+	} );
 } );
 
 describe( 'TranslationGrid', () => {
@@ -108,6 +127,62 @@ describe( 'TranslationGrid', () => {
 		fireEvent.change( names[ 1 ]!, { target: { value: 'Skor' } } );
 		expect( store.entries() ).toEqual( [ [ 2, { 'i18n:se.name': 'Skor' } ] ] );
 		await waitFor( () => expect( screen.getByText( /1 product changed/ ) ).toBeTruthy() );
+	} );
+
+	it( 'expects the value the input showed after the grid is folded, saved over by someone else and unfolded again', async () => {
+		const fields = [ i18nField( 'se', 'name' ), i18nField( 'se', 'short_description' ) ];
+		let stored = { d: 'Svensk F', e: 'Svensk E' };
+		const load = vi.fn( async () => ( { items: [ product( 1, 'D', { name: stored.d } ), product( 2, 'E', { name: stored.e } ) ], missing: [], parentStamps: new Map() } ) );
+		const store = new TranslationStore();
+		const items = [ product( 1, 'D' ), product( 2, 'E' ) ];
+
+		render(
+			<TranslationGrid
+				tabId="i18n:se"
+				tabLabel="Svenska"
+				items={ items }
+				fields={ fields }
+				settings={ { languages: { default: 'fi', others: [ 'se' ], labels: { fi: 'Suomi', se: 'Svenska' } } } }
+				store={ store }
+				load={ load as never }
+			/>
+		);
+
+		const details = document.querySelector( 'details' ) as HTMLDetailsElement;
+		const toggle = async ( open: boolean ) => {
+			details.open = open;
+			await act( async () => {
+				fireEvent( details, new Event( 'toggle' ) );
+			} );
+		};
+		const names = () => Array.from( document.querySelectorAll< HTMLInputElement >( 'input[data-grid-col="name"]' ) );
+
+		await toggle( true );
+		await waitFor( () => expect( names()[ 0 ]!.value ).toBe( 'Svensk F' ) );
+		fireEvent.change( names()[ 0 ]!, { target: { value: 'Svensk F grid' } } );
+
+		// Folded; another user saves both names; unfolded again: the rows reload.
+		await toggle( false );
+		stored = { d: 'Svensk G', e: 'Svensk H' };
+		await toggle( true );
+		await waitFor( () => expect( load ).toHaveBeenCalledTimes( 2 ) );
+
+		// The edited cell keeps the user's text and says what is stored now; the untouched one shows the new value.
+		await waitFor( () => expect( names()[ 1 ]!.value ).toBe( 'Svensk H' ) );
+		expect( names()[ 0 ]!.value ).toBe( 'Svensk F grid' );
+		expect( screen.getByText( /Changed by someone else since you started typing, now: Svensk G/ ) ).toBeTruthy();
+
+		fireEvent.change( names()[ 0 ]!, { target: { value: 'Svensk F grids' } } );
+		fireEvent.change( names()[ 1 ]!, { target: { value: 'Svensk H2' } } );
+
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'Svensk F' } );
+		// The registry's i18n fields set their value at the read path (`i18n.se.name.value`).
+		const withSetValue = fields.map( ( field ) => ( { ...field, setValue: ( { value }: { value: unknown } ) => ( { i18n: { se: { [ field.id.split( '.' )[ 1 ]! ]: { value } } } } ) } ) ) as unknown as ProductField[];
+		const write = ( id: number ) => translationWriteItem( items[ id - 1 ]!, Object.fromEntries( store.entries() )[ id ]!, store.originalsOf( id ), withSetValue, {} as never );
+
+		// Expected: what each input showed when typing began, never the reloaded value D's input did not show.
+		expect( write( 1 )._wcpl_expect ).toEqual( { 'i18n.se.name': 'Svensk F' } );
+		expect( write( 2 )._wcpl_expect ).toEqual( { 'i18n.se.name': 'Svensk H' } );
 	} );
 } );
 

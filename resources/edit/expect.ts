@@ -11,7 +11,8 @@
  * - term lists by id (`categories`, `tags`, `brands`);
  * - `dimensions` as `{length, width, height}` strings (the order and form
  *   `Recorder::read()` serialises);
- * - single-valued `meta_data.{key}`;
+ * - single-valued `meta_data.{key}`, and `null` for a key the row's
+ *   `meta_data` list lacks (shown empty: a value set meanwhile is refused);
  * - translations and market prices `i18n.{lang}.{field}` (gds-woo-i18n: the
  *   row carries the stored meta `_i18n_{field}_{lang}` as
  *   `i18n.{lang}.{field}.value`, which the server's default reader reads).
@@ -165,7 +166,12 @@ function metaValue( row: Record< string, unknown >, key: string ): Scalar | unde
 
 	const entries = ( row.meta_data as unknown[] ).filter( ( entry ): entry is { key: string; value: unknown } => typeof entry === 'object' && entry !== null && ( entry as { key?: unknown } ).key === key );
 
-	// Absent from a row that lists its meta: the list may only carry some keys, so nothing is known.
+	// Absent from a row that lists its meta: wc/v3 lists every key, so the form showed it empty and the
+	// save expects it empty (the server reads a missing meta as null, which matches), never "no check".
+	if ( entries.length === 0 ) {
+		return null;
+	}
+
 	if ( entries.length !== 1 ) {
 		return undefined;
 	}

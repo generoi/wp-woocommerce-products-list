@@ -43,6 +43,17 @@ describe( 'expectedValues: core flags and texts', () => {
 	} );
 } );
 
+describe( 'expectedValues: meta_data', () => {
+	it( 'sends a single loaded value, null for a key the loaded list lacks (shown empty), nothing when the row has no list', () => {
+		const payload = { meta_data: [ { key: '_a', value: 'x' }, { key: '_b', value: 'y' }, { key: '_c', value: 'z' } ] };
+		const item = row( { meta_data: [ { key: '_a', value: 'a0' }, { key: '_c', value: 'c1' }, { key: '_c', value: 'c2' } ] } );
+
+		// _c holds two values: no single stored form to compare.
+		expect( expectedValues( item, payload ) ).toEqual( { 'meta_data._a': 'a0', 'meta_data._b': null } );
+		expect( expectedValues( row( {} ), payload ) ).toBeNull();
+	} );
+} );
+
 describe( 'expectedValues: names', () => {
 	it( 'sends a product\'s loaded name', () => {
 		expect( expectedValues( row( { name: 'Pelsi' } ), { name: 'Pelsi 2' } ) ).toEqual( { name: 'Pelsi' } );
