@@ -34,7 +34,7 @@ import { batchProducts, closeBatch, getVariations, logSkipped, newBatchId, toRow
 import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
-import { deletionsNamedByEditor, patchItems, removeItems } from '../store/products';
+import { deletionsNamedByEditor, patchItems, removeItems, subscribeDeleted } from '../store/products';
 import { getCurrentRows, getCurrentRowsSnapshot, subscribeCurrentRows } from '../store/rows';
 import { beginSaveJob, finishSaveJob } from '../store/save-activity';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
@@ -711,8 +711,27 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		};
 	}, [] );
 
-	const excludedIds = useMemo( () => new Set( [ ...excluded.missing, ...excluded.trashed ].map( ( row ) => row.id ) ), [ excluded ] );
+	// Parents the list found deleted and removed (named by its own notice) while a bulk edit holds its rows: no longer counted.
+	const [ leftList, setLeftList ] = useState< ReadonlySet< number > >( () => new Set() );
+
+	useEffect( () => {
+		if ( ! bulk ) {
+			return;
+		}
+
+		return subscribeDeleted( ( ids ) => setLeftList( ( current ) => new Set( [ ...current, ...ids ] ) ) );
+	}, [ bulk ] );
+
+	const excludedIds = useMemo( () => new Set( [ ...excluded.missing, ...excluded.trashed ].map( ( row ) => row.id ).concat( Array.from( leftList ) ) ), [ excluded, leftList ] );
 	const items = useMemo( () => selectedRows.filter( ( row ) => ! excludedIds.has( row.id ) ).map( ( row ) => hydrated.get( row.id ) ?? row ), [ selectedRows, excludedIds, hydrated ] );
+	// For the async settle of a save (settleParents): the rows and the exclusions as they are when it ends.
+	const selectedRowsRef = useRef( selectedRows );
+	const excludedIdsRef = useRef( excludedIds );
+
+	useEffect( () => {
+		selectedRowsRef.current = selectedRows;
+		excludedIdsRef.current = excludedIds;
+	} );
 
 	// Rows without their current values are fetched: all of them when the
 	// editor opens (the open tab's fields), a newly ticked row on its own
@@ -1805,6 +1824,21 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	};
 
 	/**
+	 * Rows a bulk edit names as deleted (`missing`) while it keeps other rows leave the list now, not when the editor
+	 * closes: their rows showed stale prices meanwhile, and the list kept counting them. Kept until then when no
+	 * other row stays (`leaving`: every row the editor is leaving out now): an emptied selection would close the
+	 * editor, and its notice with it.
+	 */
+	const leaveListNow = ( missing: number[], leaving: ReadonlySet< number > ) => {
+		if ( ! bulk || ! missing.length || ! selectedRowsRef.current.some( ( row ) => ! leaving.has( row.id ) && ! excludedIdsRef.current.has( row.id ) ) ) {
+			return;
+		}
+
+		missing.forEach( ( id ) => pendingRemovalRef.current.delete( id ) );
+		removeItems( missing );
+	};
+
+	/**
 	 * Parents a save found deleted under it (their variations were): once their deletion is over they are named and
 	 * left out like any row deleted meanwhile, or, still there, loaded again (then nothing of them is half-deleted).
 	 */
@@ -1819,6 +1853,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const trashedSet = new Set( settled?.trashed ?? [] );
 
 		[ ...missingSet, ...trashedSet ].forEach( ( id ) => pendingRemovalRef.current.add( id ) );
+
+		leaveListNow( Array.from( missingSet ), new Set( [ ...missingSet, ...trashedSet ] ) );
 
 		if ( missingSet.size || trashedSet.size ) {
 			setExcluded( ( current ) => {
@@ -2063,6 +2099,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 			if ( dropped.size ) {
 				dropped.forEach( ( id ) => pendingRemovalRef.current.add( id ) );
+				// Deleted for good: out of the list now in a bulk edit that keeps other rows (see settleParents).
+				leaveListNow( changed.missing, dropped );
 
 				if ( mountedRef.current ) {
 					const trashedSet = new Set( changed.trashed );

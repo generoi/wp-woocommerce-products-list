@@ -34,6 +34,7 @@ import { dispatch, select } from '@wordpress/data';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
 import type { KeyboardEvent, PointerEvent, RefObject } from 'react';
 import { __, _n, sprintf } from '@wordpress/i18n';
+import { decodeEntities } from '@wordpress/html-entities';
 import { close as closeIcon } from '@wordpress/icons';
 import { store as preferencesStore } from '@wordpress/preferences';
 import { ROW_ID_PREFIX } from '../hierarchy/chevron';
@@ -92,7 +93,8 @@ export function editorRegionLabel( host: Pick< EditorHost, 'session' | 'items' >
 function nameOfFirst( items: EditorHost[ 'items' ] ): string {
 	const row = items[ 0 ];
 
-	return ( row as { name?: string } | undefined )?.name || ( row ? `#${ row.id }` : '' );
+	// The stored title may hold entities ("Tom &amp; Jerry"): the name is read out as the heading shows it.
+	return decodeEntities( ( row as { name?: string } | undefined )?.name || '' ) || ( row ? `#${ row.id }` : '' );
 }
 
 let sessionCounter = 0;

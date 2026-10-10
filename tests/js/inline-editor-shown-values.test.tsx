@@ -24,7 +24,7 @@ let landLoad: ( rows: ProductListItem[] ) => void = () => {};
 
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: vi.fn() } ) );
+vi.mock( '../../resources/store/products', () => ( { subscribeDeleted: () => () => {}, patchItems: vi.fn(), removeItems: vi.fn() } ) );
 vi.mock( '../../resources/api/client', () => ( { logSkipped: vi.fn( async () => undefined ) } ) );
 vi.mock( '../../resources/edit/save', () => ( { saveEdits: ( ...args: unknown[] ) => saveEdits( ...args ) } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn() } ) );

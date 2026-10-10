@@ -84,6 +84,28 @@ class ActionsTest extends RestTestCase
     }
 
     /**
+     * An Undo of a Trash on a product restored another way meanwhile has
+     * nothing to do: answered as not trashed, logged as a skipped no-op,
+     * not as a failure (History said "1 of 1 failed").
+     */
+    public function test_restoring_a_product_not_in_the_trash_is_logged_as_unchanged_not_failed(): void
+    {
+        $product = $this->simpleProduct();
+
+        $data = $this->act('restore', [$product->get_id()]);
+        $this->assertFalse($data['results'][0]['ok']);
+        $this->assertSame('wc_products_list_not_trashed', $data['results'][0]['code']);
+        $this->assertSame('publish', get_post_status($product->get_id()));
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows);
+        $this->assertSame(['restore', 'skipped'], [$rows[0]['action'], $rows[0]['status']]);
+        $context = json_decode((string) $rows[0]['context'], true);
+        $this->assertSame('unchanged', $context['reason'] ?? null);
+        $this->assertSame('wc_products_list_not_trashed', $context['code'] ?? null);
+    }
+
+    /**
      * A product trashed without a slug (a never-published draft, a fresh
      * copy) must not come back as `__trashed`; one with a slug keeps it.
      */

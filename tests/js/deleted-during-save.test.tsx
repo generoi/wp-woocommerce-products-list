@@ -5,11 +5,11 @@
  * read for the product as it is now: it names the product as deleted once it is gone, and says nothing about its
  * fields being "changed by someone else".
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorHost } from '../../resources/edit/editor-context';
 import type { ProductListItem } from '../../resources/types';
-import { coreFields, editSettings, variable, variation } from './edit-fixtures';
+import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
 
 vi.setConfig( { testTimeout: 20000 } );
 
@@ -19,7 +19,15 @@ const saveEdits = vi.fn();
 
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: vi.fn(), invalidateProducts: vi.fn(), deletionsNamedByEditor: vi.fn() } ) );
+const deletedListeners = vi.hoisted( () => new Set< ( ids: number[] ) => void >() );
+
+vi.mock( '../../resources/store/products', () => ( {
+	subscribeDeleted: ( listener: ( ids: number[] ) => void ) => {
+		deletedListeners.add( listener );
+
+		return () => deletedListeners.delete( listener );
+	},
+	patchItems: vi.fn(), removeItems: vi.fn(), invalidateProducts: vi.fn(), deletionsNamedByEditor: vi.fn() } ) );
 vi.mock( '../../resources/api/client', () => ( {
 	logSkipped: vi.fn( async () => undefined ),
 	getVariations: vi.fn(),
@@ -32,6 +40,8 @@ vi.mock( '../../resources/edit/save', () => ( { saveEdits: ( ...args: unknown[] 
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn() } ) );
 
 const { InlineEditor } = await import( '../../resources/edit/inline-editor' );
+const store = await import( '../../resources/store/products' );
+const removeItems = store.removeItems as unknown as ReturnType< typeof vi.fn >;
 const client = await import( '../../resources/api/client' );
 const getVariations = client.getVariations as unknown as ReturnType< typeof vi.fn >;
 const listProducts = client.listProducts as unknown as ReturnType< typeof vi.fn >;
@@ -106,6 +116,57 @@ describe( 'a variable product deleted while a bulk save writes its variations', 
 		expect( ( await screen.findAllByText( /1 of the selected items no longer exists and was left out: Koel B/, undefined, { timeout: 8000 } ) ).length ).toBeGreaterThan( 0 );
 		expect( screen.getByRole( 'heading', { name: 'Bulk edit 1 item' } ) ).toBeInTheDocument();
 		expect( screen.queryByText( /changed by someone else/ ) ).not.toBeInTheDocument();
+		// The deleted parent leaves the list while the editor stays open (its row showed stale prices until Close).
+		expect( removeItems ).toHaveBeenCalledWith( [ 22 ] );
+	} );
+
+	it( 'stops counting a parent the list found deleted and removed after the save', async () => {
+		const rows = [ simple( 31, { name: 'Koel C' } ), simple( 32, { name: 'Koel D' } ), simple( 33, { name: 'Koel E' } ) ];
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+			const items = rows.filter( ( row ) => ids.includes( row.id ) );
+
+			return { items, total: items.length, totalPages: 1 };
+		} );
+		saveEdits.mockImplementation( async () => ( { updated: rows.map( ( row ) => ( { ...row, regular_price: '21' } ) ), errors: [], batchId: 'b-ok', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } ) );
+
+		render( <InlineEditor host={ hostFor( rows ) } /> );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 3 items' } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '21' } } );
+		fireEvent.click( await screen.findByRole( 'button', { name: /^Update/ } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+
+		// The list's refresh of the saved rows found 33 deleted, removed it and named it in its own notice.
+		act( () => deletedListeners.forEach( ( listener ) => listener( [ 33 ] ) ) );
+
+		expect( await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } ) ).toBeInTheDocument();
+		// The list named it; the editor does not name it again.
+		expect( document.querySelector( 'form.wc-pl-edit' )?.textContent ).not.toMatch( /no longer exist/ );
+	} );
+} );
+
+describe( 'a product deleted before the bulk save writes it', () => {
+	it( 'leaves the list at once, while the editor stays open with the other rows', async () => {
+		const rows = [ simple( 41, { name: 'Koel F' } ), simple( 42, { name: 'Koel G' } ) ];
+		let gone = false;
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+			const items = rows.filter( ( row ) => ids.includes( row.id ) && ! ( gone && row.id === 42 ) );
+
+			return { items, total: items.length, totalPages: 1 };
+		} );
+		saveEdits.mockImplementation( async () => ( { updated: [ { ...rows[ 0 ], regular_price: '21' } ], errors: [], batchId: 'b-pre', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } ) );
+
+		render( <InlineEditor host={ hostFor( rows ) } /> );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '21' } } );
+		gone = true;
+		fireEvent.click( await screen.findByRole( 'button', { name: /^Update/ } ) );
+
+		expect( ( await screen.findAllByText( /1 of the selected items no longer exists and was left out: Koel G/ ) ).length ).toBeGreaterThan( 0 );
+		expect( removeItems ).toHaveBeenCalledWith( [ 42 ] );
 	} );
 } );
 

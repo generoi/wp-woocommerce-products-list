@@ -122,12 +122,16 @@ class VariationsBatchTest extends RestTestCase
         $this->assertStatus(200, $response);
         $this->assertSame('woocommerce_rest_product_variation_invalid_id', $this->data($response)['update'][1]['error']['code']);
 
-        $errors = array_values(array_filter($this->rows(), static fn (array $row): bool => $row['status'] === 'error'));
-        $this->assertCount(1, $errors);
-        $this->assertSame($a39, (int) $errors[0]['object_id']);
-        $this->assertSame($a->get_id(), (int) $errors[0]['parent_id']);
-        $this->assertSame('sale_price', $errors[0]['field']);
-        $this->assertSame('5', $errors[0]['new_value']);
+        // Logged once, as left out (deleted), not as a failure: the editor
+        // does not post it again, so History counts it once.
+        $rows = array_values(array_filter($this->rows(), static fn (array $row): bool => (int) $row['object_id'] === $a39));
+        $this->assertCount(1, $rows);
+        $this->assertSame('skipped', $rows[0]['status']);
+        $this->assertSame('deleted', json_decode((string) $rows[0]['context'], true)['reason'] ?? null);
+        $this->assertSame($a->get_id(), (int) $rows[0]['parent_id']);
+        $this->assertSame('sale_price', $rows[0]['field']);
+        $this->assertSame('5', $rows[0]['new_value']);
+        $this->assertSame([], array_values(array_filter($this->rows(), static fn (array $row): bool => $row['status'] === 'error')));
     }
 
     public function test_limits_and_permissions(): void

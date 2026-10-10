@@ -398,6 +398,21 @@ final class ActionsController
         }
 
         if (is_wp_error($data)) {
+            $errorData = $data->get_error_data();
+
+            // Nothing to do (a restore of a product that is not in the Trash):
+            // answered as refused, so the app can say so, but logged as a
+            // `skipped` no-op, not as a failure History would count.
+            if (is_array($errorData) && ($errorData['skip_reason'] ?? null) === 'unchanged' && ! $early->written()) {
+                $code = (string) $data->get_error_code();
+
+                return [
+                    ['id' => $id, 'ok' => false, 'code' => $code, 'message' => $data->get_error_message()],
+                    [array_merge($base, ['field' => '', 'old_value' => null, 'new_value' => null, 'status' => Logger::STATUS_SKIPPED, 'message' => LogController::skipMessage('unchanged'), 'context' => ['reason' => 'unchanged'] + $base['context'] + ['code' => $code]])],
+                    null,
+                ];
+            }
+
             // A change the handler made before failing keeps its early row.
             return $fail((string) $data->get_error_code(), $data->get_error_message());
         }

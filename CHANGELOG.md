@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.9 - 2026-10-11
+
+Fixes for the errors of the closeout verification on 0.3.8.
+
+- A variation (or product) deleted meanwhile is logged once, as left out ("deleted meanwhile"), not also as a failure: the server logs wc/v3's "Invalid variation ID." for an id that no longer exists as `skipped` (reason `deleted`), and the editor no longer posts it again. History no longer counts such rows twice ("80 of 760 failed, 80 skipped").
+- Bulk edit: products the editor names as deleted meanwhile leave the list at once instead of when the editor closes, and a product the list finds deleted and removes is no longer counted in the editor's header ("Bulk edit N items", "Every product in the list (N)").
+- The list's total and page count follow rows removed from another page of the same list: removing deleted products of page 2 lowers the total of page 1 too, and a removed row the list never loaded makes the page on screen load again (was "16 of 18 products" and an empty page 2 for 16 products).
+- An Undo of a Trash on a product already restored another way logs a skipped no-op ("already had the value") instead of an error: History no longer says "1 of 1 failed".
+- The quick edit panel's accessible name shows a title stored with "&amp;" as "&".
+
 ## 0.3.8 - 2026-10-10
 
 Fixes for two errors of the closeout verification on 0.3.7.

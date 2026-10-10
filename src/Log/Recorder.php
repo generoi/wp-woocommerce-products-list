@@ -110,6 +110,20 @@ final class Recorder
         'wc_products_list_editing' => 'editing',
     ];
 
+    /**
+     * Error codes wc/v3 (and the plugin's variations batch) answer for an
+     * item that no longer exists: deleted after the editor loaded it. It is
+     * logged as left out (`deleted`), not as a failure; the editor does not
+     * post it again (isServerLoggedItemError in resources/edit/errors.ts).
+     */
+    public const GONE_CODES = [
+        'woocommerce_rest_product_invalid_id',
+        'woocommerce_rest_variation_invalid_id',
+        'woocommerce_rest_product_variation_invalid_id',
+        'woocommerce_rest_invalid_id',
+        'rest_post_invalid_id',
+    ];
+
     /** @var array<int, Pending> keyed by spl_object_id of the request */
     private static array $pending = [];
 
@@ -493,7 +507,7 @@ final class Recorder
         $context += ['code' => $error['code'] ?? '', 'fields' => $paths];
         // Refused by the concurrency checks: nothing was attempted on a
         // changed, locked or trashed row; the item is left out, not failed.
-        $reason = self::SKIP_REASONS[$error['code'] ?? ''] ?? null;
+        $reason = self::SKIP_REASONS[$error['code'] ?? ''] ?? (self::isGone($error['code'] ?? '', $objectId) ? 'deleted' : null);
 
         if ($reason !== null) {
             $context['reason'] = $reason;
@@ -524,6 +538,16 @@ final class Recorder
         }
 
         return $rows;
+    }
+
+    /**
+     * Whether an item was refused because it no longer exists: a gone code
+     * for an id with no post (an id of the wrong type, a product sent as a
+     * variation, is refused with the same code and stays a failure).
+     */
+    private static function isGone(string $code, int $objectId): bool
+    {
+        return in_array($code, self::GONE_CODES, true) && $objectId > 0 && get_post($objectId) === null;
     }
 
     /**

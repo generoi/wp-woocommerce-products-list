@@ -17,7 +17,7 @@ const settings = editSettings();
 
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() } } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: vi.fn() } ) );
+vi.mock( '../../resources/store/products', () => ( { subscribeDeleted: () => () => {}, patchItems: vi.fn(), removeItems: vi.fn() } ) );
 vi.mock( '../../resources/api/client', () => ( {
 	logSkipped: vi.fn( async () => undefined ),
 	getVariations: vi.fn( async () => ( { items: [], total: 0, totalPages: 1 } ) ),

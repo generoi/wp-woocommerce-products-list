@@ -125,7 +125,7 @@ describe( 'rows that no longer exist', () => {
 		const saved = await runSave( deps, [ simple( 1, { featured: false } ), simple( 2, { featured: false } ), simple( 3, { featured: false } ) ], { featured: true }, fields, settings, { applyToVariations: false, source: 'bulk' } );
 
 		expect( saved.updated.map( ( row ) => row.id ) ).toEqual( [ 1, 2 ] );
-		expect( saved.errors ).toEqual( [ { id: 3, code: 'woocommerce_rest_product_invalid_id', message: expect.stringMatching( /no longer exists/ ) } ] );
+		expect( saved.errors ).toEqual( [ { id: 3, code: 'woocommerce_rest_product_invalid_id', message: expect.stringMatching( /no longer exists/ ), logged: true } ] );
 		expect( saved.errors.filter( ( error ) => isGoneCode( error.code ) ).map( ( error ) => error.id ) ).toEqual( [ 3 ] );
 	} );
 } );

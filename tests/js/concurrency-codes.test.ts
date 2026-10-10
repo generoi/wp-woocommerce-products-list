@@ -4,7 +4,7 @@
  * mean the row is gone.
  */
 import { describe, expect, it } from 'vitest';
-import { actionResultMessage, humanizeError, isGoneCode, isServerLoggedCode } from '../../resources/edit/errors';
+import { actionResultMessage, humanizeError, isGoneCode, isServerLoggedCode, isServerLoggedItemError } from '../../resources/edit/errors';
 import { summarize } from '../../resources/actions/context';
 import { skipReasonLabel } from '../../resources/history/batch-scope';
 
@@ -15,9 +15,13 @@ describe( 'wc_products_list_deleted', () => {
 		expect( isGoneCode( 'wc_products_list_deleted' ) ).toBe( true );
 	} );
 
-	it( 'leaves a plain wc/v3 invalid id to the client log', () => {
+	it( 'takes a wc/v3 invalid id of a batch answer as logged by the server (once, as deleted), not posted again', () => {
 		expect( isServerLoggedCode( 'woocommerce_rest_product_invalid_id' ) ).toBe( false );
 		expect( isGoneCode( 'woocommerce_rest_product_invalid_id' ) ).toBe( true );
+		expect( isServerLoggedItemError( 'woocommerce_rest_product_variation_invalid_id', { status: 404 } ) ).toBe( true );
+		expect( isServerLoggedItemError( 'woocommerce_rest_product_invalid_id', undefined ) ).toBe( true );
+		// A row of a request that failed as a whole was never answered by the server: the client logs it.
+		expect( isServerLoggedItemError( 'woocommerce_rest_product_invalid_id', { wcpl_request_failed: true } ) ).toBe( false );
 	} );
 } );
 

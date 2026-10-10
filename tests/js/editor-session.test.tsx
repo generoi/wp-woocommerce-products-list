@@ -60,6 +60,12 @@ describe( 'editorRegionLabel', () => {
 		expect( editorRegionLabel( { session: { mode: 'quick', id: 3, origin: null }, items: [ row ] } ) ).toBe( 'Quick edit: Blue boots' );
 		expect( editorRegionLabel( { session: { mode: 'bulk', origin: null }, items: [ row ] } ) ).toBe( 'Bulk edit: 1 item' );
 	} );
+
+	it( 'reads a stored title with entities as the heading shows it ("&", not "&amp;")', () => {
+		const row = normalizeProduct( { id: 4, name: 'QA Tom &amp; Jerry' } );
+
+		expect( editorRegionLabel( { session: { mode: 'quick', id: 4, origin: null }, items: [ row ] } ) ).toBe( 'Quick edit: QA Tom & Jerry' );
+	} );
 } );
 
 describe( 'focusOriginForRow', () => {

@@ -277,3 +277,52 @@ describe( 'removeItems', () => {
 		await vi.waitFor( () => expect( listProducts ).toHaveBeenCalledWith( expect.objectContaining( { include: '10', _fields: PARENT_DERIVED_FIELDS.join( ',' ) } ) ) );
 	} );
 } );
+
+describe( 'removeItems across the pages of one query', () => {
+	setup();
+
+	it( 'lowers the total and the page count of every page of the query, also the page without the removed rows', async () => {
+		const key = ( page: number, search = '' ) => `${ PRODUCTS_PREFIX }${ JSON.stringify( { page, per_page: 20, search } ) }`;
+		const rows = ( from: number, count: number ) => Array.from( { length: count }, ( _, index ) => parent( from + index ) );
+
+		// 22 products, 20 per page: page 1 holds 1..20, page 2 holds 21 and 22. Another search holds 21 too.
+		await cache.fetch< ListResult< ProductListItem > >( key( 1 ), async () => ( { items: rows( 1, 20 ), total: 22, totalPages: 2 } ) );
+		await cache.fetch< ListResult< ProductListItem > >( key( 2 ), async () => ( { items: rows( 21, 2 ), total: 22, totalPages: 2 } ) );
+		await cache.fetch< ListResult< ProductListItem > >( key( 1, 'x' ), async () => ( { items: rows( 30, 3 ), total: 3, totalPages: 1 } ) );
+
+		// Four parents on page 1 and the two of page 2 were deleted.
+		removeItems( [ 3, 4, 5, 6, 21, 22 ] );
+
+		const first = cache.get< ListResult< ProductListItem > >( key( 1 ) )?.data;
+		const second = cache.get< ListResult< ProductListItem > >( key( 2 ) )?.data;
+
+		expect( first?.items ).toHaveLength( 16 );
+		expect( first ).toMatchObject( { total: 16, totalPages: 1 } );
+		expect( second ).toMatchObject( { items: [], total: 16, totalPages: 1 } );
+		// A query that held none of the rows keeps its total.
+		expect( cache.get< ListResult< ProductListItem > >( key( 1, 'x' ) )?.data ).toMatchObject( { total: 3, totalPages: 1 } );
+	} );
+} );
+
+describe( 'removeItems of rows no cached page holds', () => {
+	setup();
+
+	it( 'loads the pages on screen again (their total counted rows of pages not loaded yet)', async () => {
+		const key = `${ PRODUCTS_PREFIX }${ JSON.stringify( { page: 1, per_page: 20 } ) }`;
+
+		await cache.fetch< ListResult< ProductListItem > >( key, async () => ( { items: [ parent( 1 ), parent( 2 ) ], total: 22, totalPages: 2 } ) );
+		const invalidate = vi.spyOn( cache, 'invalidate' );
+
+		// Two products of page 2, never loaded, were found deleted by the editor.
+		removeItems( [ 21, 22 ] );
+		expect( invalidate ).toHaveBeenCalledWith( PRODUCTS_PREFIX );
+
+		// Nobody watched the page: the invalidation dropped it. Loaded again, a row it holds is patched in place: no reload.
+		expect( cache.get( key ) ).toBeUndefined();
+		await cache.fetch< ListResult< ProductListItem > >( key, async () => ( { items: [ parent( 1 ), parent( 2 ) ], total: 20, totalPages: 1 } ) );
+		invalidate.mockClear();
+		removeItems( [ 2 ] );
+		expect( invalidate ).not.toHaveBeenCalledWith( PRODUCTS_PREFIX );
+		invalidate.mockRestore();
+	} );
+} );

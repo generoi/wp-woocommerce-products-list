@@ -376,7 +376,8 @@ describe( 'runSave', () => {
 		} );
 		const result = await runSave( d, [ simple( 1, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
 
-		expect( result.errors ).toEqual( [ { id: 1, code: 'woocommerce_rest_product_invalid_id', message: expect.stringMatching( /no longer exists/ ) } ] );
+		// The server logged the gone row itself (as left out, deleted): it is not posted to the log again.
+		expect( result.errors ).toEqual( [ { id: 1, code: 'woocommerce_rest_product_invalid_id', message: expect.stringMatching( /no longer exists/ ), logged: true } ] );
 	} );
 
 	it( 'does not optimistically patch object-shaped keys (extension row data differs from its write shape)', async () => {

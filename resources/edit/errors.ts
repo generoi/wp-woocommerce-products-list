@@ -38,16 +38,16 @@ export function isServerLoggedCode( code: string | undefined ): boolean {
  * batch answer (Recorder::errorsFromResponse): every item error except a
  * permission refusal (Recorder::isRefusal) and except the errors the client
  * makes for the rows of a request that failed as a whole
- * (`wcpl_request_failed`, REQUEST_FAILED_KEY in api/client.ts), and a
- * row that no longer exists. Such a row
- * is not posted to /log/skipped again: History would show it twice.
+ * (`wcpl_request_failed`, REQUEST_FAILED_KEY in api/client.ts). A row
+ * wc/v3 no longer finds is logged by the server too, as `deleted` (left
+ * out, Recorder::GONE_CODES). Such a row is not posted to /log/skipped
+ * again: History would show it twice.
  */
 export function isServerLoggedItemError( code: string | undefined, data: unknown ): boolean {
 	const record = typeof data === 'object' && data !== null ? ( data as Record< string, unknown > ) : {};
 
-	// A row wc/v3 no longer finds is still recorded by the client, as `deleted` (left out), not as a failure.
 	// The concurrency refusals are told apart by their code (isServerLoggedCode).
-	if ( record.wcpl_request_failed === true || isGoneCode( code ) || isServerLoggedCode( code ) ) {
+	if ( record.wcpl_request_failed === true || isServerLoggedCode( code ) ) {
 		return false;
 	}
 

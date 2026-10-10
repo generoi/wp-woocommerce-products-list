@@ -252,6 +252,41 @@ export function subscribeRemoved( listener: RemovedListener ): () => void {
 	};
 }
 
+/** The query of a cached products page without its page number: the pages that share one total. */
+function queryOfPage( key: string ): string {
+	try {
+		const { page: _page, ...query } = JSON.parse( key.slice( PRODUCTS_PREFIX.length ) ) as Record< string, unknown >;
+
+		return JSON.stringify( query );
+	} catch {
+		return key;
+	}
+}
+
+/** The page size of a cached products page, 0 when the key names none. */
+function perPageOf( key: string ): number {
+	try {
+		return Number( ( JSON.parse( key.slice( PRODUCTS_PREFIX.length ) ) as Record< string, unknown > ).per_page ) || 0;
+	} catch {
+		return 0;
+	}
+}
+
+/** The ones of `ids` that are loaded or cached variations. */
+function variationIdsIn( ids: ReadonlySet< number > ): number[] {
+	const found = new Set< number >();
+
+	for ( const [ , state ] of getChildrenState() ) {
+		state.items.forEach( ( item ) => ids.has( item.id ) && found.add( item.id ) );
+	}
+
+	for ( const key of cache.keys( VARIATIONS_PREFIX ) ) {
+		( cache.get< ListResult< ProductListItem > >( key )?.data?.items ?? [] ).forEach( ( item ) => ids.has( item.id ) && found.add( item.id ) );
+	}
+
+	return Array.from( found );
+}
+
 /** Parent id → how many of `ids` are its loaded or cached variations. */
 function removedVariationsByParent( ids: ReadonlySet< number > ): Map< number, number > {
 	const found = new Map< number, Set< number > >();
@@ -297,7 +332,49 @@ export function removeItems( ids: number[] ): void {
 	const set = new Set( ids );
 	const parents = removedVariationsByParent( set );
 
-	for ( const key of [ ...cache.keys( PRODUCTS_PREFIX ), ...cache.keys( VARIATIONS_PREFIX ) ] ) {
+	// The pages of one query (its filters, any page) share its total: a row removed from one page lowers the total,
+	// and the page count, of every cached page of that query, also of the page on screen when the row was on another
+	// one (deleted off-page parents left "16 of 18 products" and an empty page 2).
+	const removedByQuery = new Map< string, Set< number > >();
+
+	for ( const key of cache.keys( PRODUCTS_PREFIX ) ) {
+		const found = ( cache.get< ListResult< ProductListItem > >( key )?.data?.items ?? [] ).filter( ( item ) => set.has( item.id ) );
+
+		if ( found.length ) {
+			const query = queryOfPage( key );
+			const removed = removedByQuery.get( query ) ?? new Set< number >();
+
+			found.forEach( ( item ) => removed.add( item.id ) );
+			removedByQuery.set( query, removed );
+		}
+	}
+
+	for ( const key of cache.keys( PRODUCTS_PREFIX ) ) {
+		const removed = removedByQuery.get( queryOfPage( key ) )?.size ?? 0;
+
+		if ( ! removed ) {
+			continue;
+		}
+
+		const perPage = perPageOf( key );
+
+		cache.patch< ListResult< ProductListItem > >( key, ( data ) => {
+			const items = data.items.filter( ( item ) => ! set.has( item.id ) );
+			const total = Math.max( 0, data.total - removed );
+
+			return { ...data, items, total, totalPages: perPage ? Math.max( 1, Math.ceil( total / perPage ) ) : data.totalPages };
+		} );
+	}
+
+	// Rows no cached page holds (a product on a page not loaded yet, found deleted by an editor): which totals they
+	// counted in is unknown, so the pages on screen load again and the others are dropped.
+	const known = new Set< number >( [ ...Array.from( removedByQuery.values() ).flatMap( ( removed ) => Array.from( removed ) ), ...variationIdsIn( set ) ] );
+
+	if ( ids.some( ( id ) => ! known.has( id ) ) ) {
+		cache.invalidate( PRODUCTS_PREFIX );
+	}
+
+	for ( const key of cache.keys( VARIATIONS_PREFIX ) ) {
 		cache.patch< ListResult< ProductListItem > >( key, ( data ) => {
 			const items = data.items.filter( ( item ) => ! set.has( item.id ) );
 
@@ -440,6 +517,22 @@ export async function refreshParentsOf( rows: ProductListItem[], fetchList: type
 	return refreshParentIds( rows.map( parentIdOf ).filter( ( id ): id is number => typeof id === 'number' ), fetchList );
 }
 
+type DeletedListener = ( ids: number[] ) => void;
+
+const deletedListeners = new Set< DeletedListener >();
+
+/**
+ * Called with the parents the list found deleted for good and removed (refreshParentIds): an open bulk editor stops
+ * counting them.
+ */
+export function subscribeDeleted( listener: DeletedListener ): () => void {
+	deletedListeners.add( listener );
+
+	return () => {
+		deletedListeners.delete( listener );
+	};
+}
+
 /** Parents an open editor names itself as deleted meanwhile (its own notice): the list removes them without naming them again. */
 const namedByEditor = new Set< number >();
 
@@ -558,6 +651,10 @@ export async function refreshParentIds( ids: number[], fetchList: typeof listPro
 
 		goneShown.forEach( ( id ) => namedByEditor.delete( id ) );
 		removeItems( goneShown );
+
+		for ( const listener of Array.from( deletedListeners ) ) {
+			listener( goneShown );
+		}
 
 		if ( names.length ) {
 			notify.info(

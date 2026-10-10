@@ -36,7 +36,8 @@ final class Restore implements Action
     public function run(WC_Product $product, array $args, WP_REST_Request $request): array|WP_Error
     {
         if ($product->get_status() !== 'trash') {
-            return new WP_Error('wc_products_list_not_trashed', __('The product is not in the trash.', 'wp-woocommerce-products-list'));
+            // Restored another way already: nothing to undo, logged as a no-op (skipped, unchanged), not a failure.
+            return new WP_Error('wc_products_list_not_trashed', __('The product is not in the trash.', 'wp-woocommerce-products-list'), ['skip_reason' => 'unchanged']);
         }
 
         $previous = (string) get_post_meta($product->get_id(), '_wp_trash_meta_status', true);

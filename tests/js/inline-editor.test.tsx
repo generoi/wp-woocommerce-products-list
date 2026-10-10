@@ -24,7 +24,7 @@ const removeItems = vi.fn();
 
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: ( ids: number[] ) => removeItems( ids ) } ) );
+vi.mock( '../../resources/store/products', () => ( { subscribeDeleted: () => () => {}, patchItems: vi.fn(), removeItems: ( ids: number[] ) => removeItems( ids ) } ) );
 const logSkipped = vi.fn( async () => undefined );
 vi.mock( '../../resources/api/client', () => ( {
 	logSkipped: ( ...args: unknown[] ) => logSkipped( ...( args as [] ) ),
