@@ -626,7 +626,8 @@ export function previewPrices( def: DeclarativeAction, data: Record< string, unk
 		const regular = read( regularField, item );
 		const sale = read( saleField, item );
 
-		if ( ! regular || ( wanted.includes( 'sale_price' ) && ! sale ) ) {
+		// Without the sale price the server checks the new regular price against, nothing is previewed (not guessed as "no sale").
+		if ( ! regular || ( ( wanted.includes( 'sale_price' ) || saleField ) && ! sale ) ) {
 			unloaded += 1;
 			continue;
 		}

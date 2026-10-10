@@ -4,7 +4,7 @@ import { ACTIONS } from '../../resources/extensions/hooks';
 import type { ActionResponse } from '../../resources/api/client';
 import { closeBatch, logSkipped, runAction } from '../../resources/api/client';
 import { isRowPending } from '../../resources/store/save-activity';
-import { declarativeSummary, runDeclarativeAction } from '../../resources/actions/index';
+import { ActionRowsError, declarativeSummary, runDeclarativeAction } from '../../resources/actions/index';
 import { notify } from '../../resources/actions/notices';
 import { undoBatch } from '../../resources/edit/undo';
 import { invalidateProducts, patchItems } from '../../resources/store/products';
@@ -128,6 +128,21 @@ describe( 'runDeclarativeAction', () => {
 		await expect( runDeclarativeAction( 'i18n_clear', 'Clear translations', [ 1, 2 ], {}, [ 'id' ], { inlineErrors: true } ) ).rejects.toThrow( '1 updated, 1 failed: The product no longer exists.' );
 		expect( notify.error ).not.toHaveBeenCalled();
 		expect( notify.success ).toHaveBeenCalledWith( 'Clear translations: 1 item updated.', expect.objectContaining( { actions: [ expect.objectContaining( { label: 'Undo' } ) ] } ) );
+	} );
+
+	it( 'with inline errors: the rejection carries every refused row, not only the first', async () => {
+		vi.mocked( runAction ).mockResolvedValueOnce(
+			response( [
+				{ id: 1, ok: false, code: 'gds_woo_i18n_sale_not_below_regular', message: 'The sale price 1799 would not be below the regular price 1619.19 SEK.' },
+				{ id: 2, ok: false, code: 'gds_woo_i18n_sale_not_below_regular', message: 'The sale price 880 would not be below the regular price 809.55 SEK.' },
+			] )
+		);
+
+		const error = await runDeclarativeAction( 'i18n_prices', 'Adjust market prices', [ 1, 2 ], {}, [ 'id' ], { inlineErrors: true } ).catch( ( reason: unknown ) => reason );
+
+		expect( error ).toBeInstanceOf( ActionRowsError );
+		expect( ( error as ActionRowsError ).message ).toBe( 'The sale price 1799 would not be below the regular price 1619.19 SEK.' );
+		expect( ( error as ActionRowsError ).failures.map( ( failure ) => failure.id ) ).toEqual( [ 1, 2 ] );
 	} );
 } );
 

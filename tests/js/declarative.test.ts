@@ -288,6 +288,17 @@ describe( 'fieldFromDeclarative', () => {
 		expect( container.textContent ).toBe( '' );
 	} );
 
+	it( 'shows a default name stored with "&amp;" (saved by a shop manager, kses) as "&", like the Name column', () => {
+		const field = fieldFromDeclarative( makeField( { referenceLabel: 'Suomi' } as Partial< DeclarativeFieldInput > ), settings );
+		const Render = field.render as ( props: { item: ProductListItem; field: NormalizedField< ProductListItem > } ) => JSX.Element;
+		const item = product( { i18n: { se: { name: { value: '', source: 'Tom &amp; Jerry 2' } } } } );
+		const { container } = render( createElement( Render, { item, field: normalized( field ) } ) );
+
+		expect( container.querySelector( '.wc-products-list-field--reference' )?.textContent ).toBe( 'Tom & Jerry 2' );
+		// Display only: the row keeps the stored text.
+		expect( field.reference?.( item ) ).toBe( 'Tom &amp; Jerry 2' );
+	} );
+
 	it( 'marks a variation name built from an untranslated attribute value, linking to the term, with the row\'s own label', () => {
 		const field = fieldFromDeclarative( makeField( { referenceLabel: 'Suomi' } as Partial< DeclarativeFieldInput > ), settings );
 		const Render = field.render as ( props: { item: ProductListItem; field: NormalizedField< ProductListItem > } ) => JSX.Element;

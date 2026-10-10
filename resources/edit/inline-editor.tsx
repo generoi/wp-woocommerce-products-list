@@ -40,11 +40,11 @@ import { beginSaveJob, finishSaveJob } from '../store/save-activity';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import { rowFields } from '../actions/context';
-import { runDeclarativeAction } from '../actions/index';
+import { ActionRowsError, runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, settleDeletions, tabFetchFields } from './hydrate';
+import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, marketPriceFetchFields, rootKeysOf, settleDeletions, tabFetchFields } from './hydrate';
 import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown-values';
 import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
@@ -1092,11 +1092,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const keys = new Set( variationFetchFields( fieldsWithToggle, sellableIds ) );
 
 		// On a language tab the market prices load too, so "Adjust market prices" previews the variations it reaches.
-		if ( tab.id.includes( ':' ) ) {
-			for ( const price of [ 'regular_price', 'sale_price' ] ) {
-				allFields.find( ( field ) => field.id === `${ tab.id }.${ price }` )?.rest?.fields.forEach( ( key ) => keys.add( key ) );
-			}
-		}
+		marketPriceFetchFields( allFields, tab.id ).forEach( ( key ) => keys.add( key ) );
 
 		return Array.from( keys ).sort().join( ',' );
 	}, [ visibleFields, fieldsWithToggle, tab.id, allFields ] );
@@ -1666,10 +1662,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				reachedVariations ||= Boolean( parentVariations?.length ) && ids.some( ( id ) => parentVariations!.some( ( variation ) => variation.id === id ) );
 				stageTool( entry.key, null );
 			} catch ( reason ) {
-				errors.push( {
-					id: 0,
-					message: `${ entry.def.label } (${ entry.tabLabel }): ${ reason instanceof Error ? reason.message : __( 'The action failed.', 'wp-woocommerce-products-list' ) }`,
-				} );
+				const tool = `${ entry.def.label } (${ entry.tabLabel })`;
+
+				if ( reason instanceof ActionRowsError && reason.failures.length > 0 ) {
+					// Every refused row, by name: not only the first one.
+					reason.failures.forEach( ( failure ) => errors.push( { id: failure.id, message: `${ tool }: ${ failure.message }` } ) );
+				} else {
+					errors.push( {
+						id: 0,
+						message: `${ tool }: ${ reason instanceof Error ? reason.message : __( 'The action failed.', 'wp-woocommerce-products-list' ) }`,
+					} );
+				}
 			}
 		}
 
@@ -2109,7 +2112,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				failed = true;
 
 				// The rows a tool or a grid translation was refused on: every selected row (a retry after a refused translation has no failed field rows to name them from).
-				const toolNames = new Map< number, string >( [ ...items.map( ( item ): [ number, string ] => [ item.id, nameOf( item ) ] ), ...names ] );
+				// The variations a price tool reached through their selected parents are named too.
+				const toolNames = new Map< number, string >( [ ...( parentVariations ?? [] ).map( ( item ): [ number, string ] => [ item.id, itemLabel( item ) ] ), ...items.map( ( item ): [ number, string ] => [ item.id, nameOf( item ) ] ), ...names ] );
 
 				if ( mountedRef.current ) {
 					// The field edits are saved: what is left is the tools that failed (Update retries them).
@@ -2140,7 +2144,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				...( holdBack ? stale.map( ( item ): SkippedItem => ( { id: item.id, reason: 'conflict', fields: editKeys, message: __( 'Saved by someone else meanwhile; not updated.', 'wp-woocommerce-products-list' ) } ) ) : [] ),
 				// The rows that did not save are recorded too: the batch in History then says which rows of the campaign are missing.
 				// (Conflicts, locks and the Trash are refused and logged by the server itself.)
-				...result.errors.filter( ( error ) => error.id > 0 && ! isServerLoggedCode( error.code ) ).map( ( error ): SkippedItem => ( { id: error.id, reason: isGoneCode( error.code ) ? 'deleted' : 'failed', fields: editKeys, message: error.message } ) ),
+				// An item error of a batch answer (a taken SKU) the server logged as an `error` row already.
+				...result.errors.filter( ( error ) => error.id > 0 && ! isServerLoggedCode( error.code ) && ! error.logged ).map( ( error ): SkippedItem => ( { id: error.id, reason: isGoneCode( error.code ) ? 'deleted' : 'failed', fields: editKeys, message: error.message } ) ),
 			];
 
 			if ( leftOut.length ) {

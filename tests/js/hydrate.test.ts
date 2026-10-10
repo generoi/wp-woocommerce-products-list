@@ -3,7 +3,7 @@ import { carriesViewText, editFetchFields, hydrateItems, hydrateSelection, readC
 import type { HydrateDeps } from '../../resources/edit/hydrate';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { createCoreFields } from '../../resources/fields/registry';
-import { editSettings, simple, variation as variationRow } from './edit-fixtures';
+import { editSettings, field, simple, variation as variationRow } from './edit-fixtures';
 
 const fields: ProductField[] = createCoreFields( editSettings() );
 const product = ( props: { id: number } & Record< string, unknown > ) => simple( props.id, props );
@@ -172,6 +172,22 @@ describe( 'per-tab field lists', () => {
 		// The core registry has no language fields of its own; the i18n integration adds them.
 		expect( se ).toEqual( [] );
 		expect( tabFetchFields( fields, items, 'quick', { id: 'general', label: 'General' } ) ).toContain( 'regular_price' );
+	} );
+} );
+
+describe( 'a language tab in bulk edit', () => {
+	it( 'loads the market prices with the tab, although they are no bulk field, so the price tool sees the sale price', () => {
+		// gds-woo-i18n: market prices are `bulk: false` (changed with "Adjust market prices"), the name is a bulk field.
+		const i18n = [
+			field( 'i18n:se.name', { edit: { group: 'i18n:se', bulk: 'default' }, rest: { fields: [ 'i18n.se.name' ], applies: { product: true, variation: true } } } ),
+			field( 'i18n:se.regular_price', { edit: { group: 'i18n:se', bulk: false }, rest: { fields: [ 'i18n.se.regular_price' ], applies: { product: true, variation: true } } } ),
+			field( 'i18n:se.sale_price', { edit: { group: 'i18n:se', bulk: false }, rest: { fields: [ 'i18n.se.sale_price' ], applies: { product: true, variation: true } } } ),
+		];
+		const items = [ product( { id: 1 } ), product( { id: 2 } ) ];
+		const tab = { id: 'i18n:se', label: 'Svenska' };
+
+		expect( tabFetchFields( [ ...fields, ...i18n ], items, 'bulk', tab ) ).toEqual( expect.arrayContaining( [ 'id', 'i18n.se.regular_price', 'i18n.se.sale_price' ] ) );
+		expect( tabFetchFields( [ ...fields, ...i18n ], items, 'bulk', { id: 'general', label: 'General' } ) ).not.toContain( 'i18n.se.sale_price' );
 	} );
 } );
 

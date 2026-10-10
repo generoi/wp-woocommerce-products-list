@@ -236,7 +236,8 @@ export interface BatchUpdate {
 export interface BatchResult {
 	updated: ProductListItem[];
 	/** `data` is the error's data where it says more: a `wc_products_list_conflict` carries `{fields, current, expected}` (docs/contracts.md §3.6). */
-	errors: Array< { id: number; message: string; code?: string; data?: Record< string, unknown > } >;
+	/** `logged`: the server logged the row's error itself (an item error of a batch answer); it is not posted to /log/skipped again. */
+	errors: Array< { id: number; message: string; code?: string; data?: Record< string, unknown >; logged?: boolean } >;
 	batchId: string;
 }
 

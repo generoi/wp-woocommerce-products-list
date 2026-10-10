@@ -27,6 +27,7 @@ vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: vi.fn( () => 'batch-shared' ),
 	runAction: vi.fn(),
 	closeBatch: vi.fn( async () => undefined ),
+	isRequestFailure: vi.fn( () => false ),
 } ) );
 vi.mock( '../../resources/edit/save', () => ( { saveEdits: ( ...args: unknown[] ) => saveEdits( ...args ) } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn() } ) );
@@ -453,6 +454,42 @@ describe( 'language tools with Update', () => {
 			expect( closeBatch.mock.invocationCallOrder[ 0 ]! ).toBeLessThan( notify.success.mock.invocationCallOrder[ 0 ]! );
 			expect( String( notify.success.mock.calls[ 0 ]?.[ 0 ] ) ).toContain( '1 language change applied.' );
 			expect( host.close ).toHaveBeenCalled();
+		} finally {
+			settings.actions = previous;
+		}
+	} );
+
+	it( 'names every row a staged tool was refused on, not only the first', async () => {
+		const previous = settings.actions;
+
+		settings.actions = [ transform ] as unknown as typeof settings.actions;
+
+		try {
+			const rows = [ simple( 1, { name: 'QA S1' } ), simple( 2, { name: 'QA S2' } ) ];
+
+			answerLists( rows );
+			runAction.mockResolvedValue( {
+				batch_id: 'batch-shared',
+				results: [
+					{ id: 1, ok: false, code: 'gds_woo_i18n_sale_not_below_regular', message: 'The sale price 1799 would not be below the regular price 1619.19 SEK.' },
+					{ id: 2, ok: false, code: 'gds_woo_i18n_sale_not_below_regular', message: 'The sale price 880 would not be below the regular price 809.55 SEK.' },
+				],
+				items: [],
+			} );
+
+			render( <InlineEditor host={ hostFor( rows, fieldsWithTab, { initialTab: 'i18n:se' } ) } /> );
+			await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+			fireEvent.change( await screen.findByLabelText( 'Text' ), { target: { value: 'NEW ' } } );
+			fireEvent.click( screen.getByRole( 'button', { name: /add to Update/ } ) );
+			fireEvent.click( await screen.findByRole( 'button', { name: 'Apply 1 language change' } ) );
+
+			const list = ( await screen.findByText( '2 problems' ) ).closest( '.wc-pl-edit__errors' ) as HTMLElement;
+			const lines = Array.from( list.querySelectorAll( 'li' ) ).map( ( item ) => item.textContent );
+
+			expect( lines ).toEqual( [
+				'QA S1: Edit translated text (SE): The sale price 1799 would not be below the regular price 1619.19 SEK.',
+				'QA S2: Edit translated text (SE): The sale price 880 would not be below the regular price 809.55 SEK.',
+			] );
 		} finally {
 			settings.actions = previous;
 		}

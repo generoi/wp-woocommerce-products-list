@@ -183,6 +183,17 @@ describe( 'market price tool', () => {
 		expect( preview?.lines.map( ( line ) => line.id ) ).toEqual( [ 8 ] );
 	} );
 
+	it( 'does not take a sale price that is not loaded for "no sale" (bulk edit: the list carries only the regular price column)', () => {
+		const items = [
+			// The list's "Svenska: Regular price" column, no sale price loaded: the server checks against the stored 880 kr.
+			simple( 9, { i18n: { se: { regular_price: { value: '899.50', source: '' } } } } ),
+			simple( 10, { i18n: { se: { regular_price: { value: '899.50', source: '' }, sale_price: { value: '880', source: '' } } } } ),
+		];
+		const preview = previewPrices( pricesAction(), { fields: [ 'regular' ], operation: 'decrease_percent', amount: '10', rounding: 'none' }, 'i18n:se', items, fields, settings );
+
+		expect( preview ).toMatchObject( { changes: 0, invalid: 1, unloaded: 1 } );
+	} );
+
 	it( 'reaches the variations of selected variable parents only as a price tool', () => {
 		const parent = variable( 10 );
 		const reached = [ variation( 11, 10 ), variation( 12, 10 ) ];

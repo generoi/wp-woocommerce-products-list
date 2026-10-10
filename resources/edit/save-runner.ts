@@ -20,7 +20,7 @@ import { isBatchItemError } from '../types';
 import type { FetchVariations } from './apply-to-variations';
 import { resolveSaveTargets, resolveSaveTargetsWith } from './apply-to-variations';
 import type { SaveTarget } from './apply-to-variations';
-import { humanizeError, isConflictCode } from './errors';
+import { humanizeError, isConflictCode, isServerLoggedItemError } from './errors';
 import { writeItem } from './expect';
 import { isVariation, parentIdOf } from './field-value';
 import { buildPayload, hasPayload, STOCK_DELTA_KEY } from './payload';
@@ -632,6 +632,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 					message: humanizeError( failed.error.code, failed.error.message ),
 					code: failed.error.code,
 					...( conflict ? { data: failed.error.data as Record< string, unknown > } : {} ),
+					...( isServerLoggedItemError( failed.error.code, failed.error.data ) ? { logged: true } : {} ),
 				} );
 
 				if ( original ) {

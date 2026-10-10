@@ -398,13 +398,25 @@ describe( 'runSave', () => {
 		const result = await runSave( d, [ simple( 1, { status: 'publish' } ), simple( 2, { status: 'publish' } ) ], { status: 'draft' }, fields, settings, { applyToVariations: false, source: 'bulk' } );
 
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 1 ] );
-		expect( result.errors ).toEqual( [ { id: 2, message: 'Nope', code: 'woocommerce_rest_invalid' } ] );
+		// The server logged the item's error row itself (Recorder): the editor does not post it again.
+		expect( result.errors ).toEqual( [ { id: 2, message: 'Nope', code: 'woocommerce_rest_invalid', logged: true } ] );
 
 		const patches = ( d.patchItems as ReturnType< typeof vi.fn > ).mock.calls.map( ( call ) => call[ 0 ] );
 
 		// The saved row and the failed row's snapshot land in one patch.
 		expect( patches.at( -1 ) ).toContainEqual( { id: 2, status: 'publish' } );
 		expect( patches.at( -1 ) ).toHaveLength( 2 );
+	} );
+
+	it( 'marks a refused duplicate SKU as logged by the server, so History gets one error row, not two', async () => {
+		const message = 'The SKU "S-3" is already used by "Other" (#3).';
+		const d = deps( {
+			concurrency: 1,
+			batchProducts: vi.fn( async ( update: Update[] ) => ( { update: update.map( ( row ) => ( { id: row.id, error: { code: 'product_invalid_sku', message, data: { status: 400 } } } ) ) } ) ),
+		} );
+		const result = await runSave( d, [ simple( 4, { sku: 'S-4' } ) ], { sku: 'S-3' }, coreFields(), settings, { applyToVariations: false, source: 'quick' } );
+
+		expect( result.errors ).toEqual( [ { id: 4, message, code: 'product_invalid_sku', logged: true } ] );
 	} );
 
 	it( 'a failed request fails every row of that chunk and continues with the next', async () => {

@@ -130,12 +130,13 @@ export function editFetchFields( fields: ProductField[], items: ProductListItem[
 /** The `_fields` of one tab (with `id`), for the load on its first visit; empty when the tab has no fields of its own. */
 export function tabFetchFields( fields: ProductField[], items: ProductListItem[], mode: 'quick' | 'bulk', tab: QuickEditTab ): string[] {
 	const own = fieldsOfTab( visibleEditFields( fields, items, { mode, applyToVariations: true } ), tab );
+	const market = marketPriceFetchFields( fields, tab.id );
 
-	if ( own.length === 0 ) {
+	if ( own.length === 0 && market.length === 0 ) {
 		return [];
 	}
 
-	const keys = new Set< string >( [ 'id' ] );
+	const keys = new Set< string >( [ 'id', ...market ] );
 
 	for ( const field of own ) {
 		for ( const key of field.rest?.fields ?? [] ) {
@@ -144,6 +145,26 @@ export function tabFetchFields( fields: ProductField[], items: ProductListItem[]
 	}
 
 	return Array.from( keys ).sort();
+}
+
+/**
+ * A language tab's market prices (`{tab}.regular_price`, `{tab}.sale_price`):
+ * loaded with the tab even where they are no form field (bulk edit), so
+ * "Adjust market prices" previews from the prices the server checks, the
+ * sale price included (a regular price lowered to the sale is refused).
+ */
+export function marketPriceFetchFields( fields: ProductField[], tabId: string ): string[] {
+	if ( ! tabId.includes( ':' ) ) {
+		return [];
+	}
+
+	const keys = new Set< string >();
+
+	for ( const price of [ 'regular_price', 'sale_price' ] ) {
+		fields.find( ( field ) => field.id === `${ tabId }.${ price }` )?.rest?.fields.forEach( ( key ) => keys.add( key ) );
+	}
+
+	return Array.from( keys );
 }
 
 export interface HydrateDeps {

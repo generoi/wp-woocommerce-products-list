@@ -145,6 +145,21 @@ function rowNames( ids: ReadonlyArray< number > ): Map< number, string > {
 	return names;
 }
 
+/**
+ * The rejection of an inline-errors run where rows were refused: the
+ * message names the first failure (a tool's own line), `failures` has
+ * every refused row, so the editor's problem list names each of them.
+ */
+export class ActionRowsError extends Error {
+	readonly failures: ReadonlyArray< { id: number; message: string; code?: string } >;
+
+	constructor( message: string, failures: ReadonlyArray< { id: number; message: string; code?: string } > ) {
+		super( message );
+		this.name = 'ActionRowsError';
+		this.failures = failures;
+	}
+}
+
 export async function runDeclarativeAction( action: string, label: string, ids: number[], args: Record< string, unknown >, fields: string[], options: RunDeclarativeOptions = {} ): Promise< ActionResponse > {
 	let response: ActionResponse;
 	// A run of its own (not part of the editor's Update, which plans and closes its batch itself) that takes several
@@ -218,7 +233,7 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 			notifyDeclarativeSuccess( response, label );
 		}
 
-		throw new Error(
+		throw new ActionRowsError(
 			ok.length
 				? sprintf(
 						/* translators: 1: items updated, 2: items that failed, 3: the first failure's message */
@@ -227,7 +242,8 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 						failed.length,
 						failed[ 0 ]?.message ?? ''
 				  )
-				: failed[ 0 ]?.message || __( 'The action failed.', 'wp-woocommerce-products-list' )
+				: failed[ 0 ]?.message || __( 'The action failed.', 'wp-woocommerce-products-list' ),
+			failed
 		);
 	}
 

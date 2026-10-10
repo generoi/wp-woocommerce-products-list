@@ -6,6 +6,7 @@
  */
 import { createElement, memo, useState } from '@wordpress/element';
 import { doAction } from '@wordpress/hooks';
+import { decodeEntities } from '@wordpress/html-entities';
 import { __, sprintf } from '@wordpress/i18n';
 import { DataForm } from '../dataviews';
 import { ACTIONS } from './hooks';
@@ -443,7 +444,8 @@ export function fieldFromDeclarative( input: DeclarativeField, settings: Setting
 				className: 'wc-products-list-field wc-products-list-field--reference',
 				title: notes.label ?? def.referenceLabel ?? undefined,
 			},
-			displayValue( fallback, def, currency, settings ),
+			// The default-language text as stored: a name saved by a user without unfiltered_html holds "&amp;" (kses). Shown decoded, as the Name column shows it.
+			def.type === 'text' ? decodeEntities( displayValue( fallback, def, currency, settings ) ) : displayValue( fallback, def, currency, settings ),
 			marker ? ' ' : null,
 			marker
 		);

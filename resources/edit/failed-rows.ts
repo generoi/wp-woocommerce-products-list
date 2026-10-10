@@ -28,6 +28,8 @@ export interface FailedRow {
 	code?: string;
 	/** The row's name, for the notice ("Pelsi Black: …"); else the caller's `names`, else `#id`. */
 	name?: string;
+	/** The server logged the row's error itself (an item error of a batch answer): not posted again. */
+	logged?: boolean;
 }
 
 export interface FailureNoticeAction {
@@ -136,7 +138,7 @@ export function failedSkips( failed: ReadonlyArray< FailedRow >, fields?: string
 	const items: SkippedItem[] = [];
 
 	for ( const failure of failed ) {
-		if ( failure.id <= 0 || seen.has( failure.id ) || isServerLoggedCode( failure.code ) ) {
+		if ( failure.id <= 0 || seen.has( failure.id ) || isServerLoggedCode( failure.code ) || failure.logged ) {
 			continue;
 		}
 

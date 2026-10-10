@@ -173,6 +173,25 @@ describe( 'SKU errors', () => {
 	} );
 } );
 
+describe( 'a refused duplicate SKU in History', () => {
+	it( 'posts no second "failed" row for an error the server logged itself', async () => {
+		const client = await import( '../../resources/api/client' );
+		const logSkipped = client.logSkipped as unknown as ReturnType< typeof vi.fn >;
+		const fields = coreFields().filter( ( entry ) => [ 'name', 'sku' ].includes( entry.id ) );
+		const message = 'The SKU "X1" is already used by "Other" (#206).';
+
+		logSkipped.mockClear();
+		saveEdits.mockResolvedValueOnce( { updated: [], errors: [ { id: 1, code: 'product_invalid_sku', message, logged: true } ], batchId: 'b1', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+
+		render( <InlineEditor host={ hostFor( [ simple( 1, { name: 'Row 1', sku: 'S-1' } ) ], fields ) } /> );
+		fireEvent.change( await screen.findByLabelText( 'sku' ), { target: { value: 'X1' } } );
+		fireEvent.click( screen.getByRole( 'button', { name: /^Update/ } ) );
+		await screen.findAllByText( message );
+
+		expect( logSkipped ).not.toHaveBeenCalled();
+	} );
+} );
+
 describe( 'keyboard', () => {
 	it( '"Update & next" announces and shows its shortcut', async () => {
 		const fields = coreFields().filter( ( entry ) => entry.id === 'name' );

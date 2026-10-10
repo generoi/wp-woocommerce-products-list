@@ -33,6 +33,33 @@ export function isServerLoggedCode( code: string | undefined ): boolean {
 	return code !== undefined && SERVER_LOGGED_CODES.has( code );
 }
 
+/**
+ * Whether the server logged an `error` row itself for an item error of a
+ * batch answer (Recorder::errorsFromResponse): every item error except a
+ * permission refusal (Recorder::isRefusal) and except the errors the client
+ * makes for the rows of a request that failed as a whole
+ * (`wcpl_request_failed`, REQUEST_FAILED_KEY in api/client.ts), and a
+ * row that no longer exists. Such a row
+ * is not posted to /log/skipped again: History would show it twice.
+ */
+export function isServerLoggedItemError( code: string | undefined, data: unknown ): boolean {
+	const record = typeof data === 'object' && data !== null ? ( data as Record< string, unknown > ) : {};
+
+	// A row wc/v3 no longer finds is still recorded by the client, as `deleted` (left out), not as a failure.
+	// The concurrency refusals are told apart by their code (isServerLoggedCode).
+	if ( record.wcpl_request_failed === true || isGoneCode( code ) || isServerLoggedCode( code ) ) {
+		return false;
+	}
+
+	if ( code !== undefined && /^(rest_forbidden|rest_cannot_|rest_not_logged_in|woocommerce_rest_cannot_|woocommerce_rest_authentication_)/.test( code ) ) {
+		return false;
+	}
+
+	const status = Number( record.status ?? 0 );
+
+	return status !== 401 && status !== 403;
+}
+
 /** Whether a row was refused because it changed meanwhile (reload it, then apply again). */
 export function isConflictCode( code: string | undefined ): boolean {
 	return code === 'wc_products_list_conflict';

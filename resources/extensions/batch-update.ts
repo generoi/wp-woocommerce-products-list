@@ -21,7 +21,7 @@ import { doAction } from '@wordpress/hooks';
 import { __ } from '@wordpress/i18n';
 import { batchProducts, batchVariationsAcross, closeBatch, logSkipped, newBatchId, toRow } from '../api/client';
 import type { BatchOptions, WriteSource } from '../api/client';
-import { lockedMessage } from '../edit/errors';
+import { isServerLoggedItemError, lockedMessage } from '../edit/errors';
 import { EXPECT_KEY, expectedValues } from '../edit/expect';
 import { recordFailedRows } from '../edit/failed-rows';
 import { findCachedRow, patchItems } from '../store/products';
@@ -96,7 +96,7 @@ export async function runBatchUpdate( update: BatchUpdate, options: BatchUpdateO
 			if ( isBatchItemError( row ) ) {
 				const data = typeof row.error.data === 'object' && row.error.data !== null ? ( row.error.data as Record< string, unknown > ) : undefined;
 
-				result.errors.push( { id: row.id, message: row.error.message, code: row.error.code, ...( data ? { data } : {} ) } );
+				result.errors.push( { id: row.id, message: row.error.message, code: row.error.code, ...( data ? { data } : {} ), ...( isServerLoggedItemError( row.error.code, row.error.data ) ? { logged: true } : {} ) } );
 			} else {
 				result.updated.push( row );
 			}
