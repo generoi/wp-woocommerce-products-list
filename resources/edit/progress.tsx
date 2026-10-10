@@ -5,6 +5,7 @@
 import { ProgressBar, Notice } from '@wordpress/components';
 import { useEffect, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
+import { getCurrentRows } from '../store/rows';
 import type { ProductListItem } from '../types';
 import { itemLabel } from './item-label';
 
@@ -121,7 +122,10 @@ export function EditErrors( { errors, items, names: knownNames, fieldLabels, tit
 
 	const names = new Map< number, string >( knownNames ?? [] );
 
-	items.forEach( ( item ) => names.set( item.id, itemLabel( item ) ) );
+	// A variation whose parent is off this page is named by that parent when the editor holds it.
+	const rows = [ ...items, ...getCurrentRows() ];
+
+	items.forEach( ( item ) => names.set( item.id, itemLabel( item, rows ) ) );
 	const shown = errors.slice( 0, 50 );
 
 	return (

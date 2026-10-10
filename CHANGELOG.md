@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.10 - 2026-10-11
+
+Fixes for the three errors left after the third closeout verification on 0.3.9.
+
+- Bulk edit down to one variable product (the others removed from Selected items) names the bulk control in the market price note, "Also apply to the variations", not quick edit's "Set the price of all its variations".
+- The bulk editor's problem list names a variation by its parent ("Parent – Mint, 17") also when the parent is on another page of the list.
+- History's Revert batch preview no longer shows a "Changed since" example for an item an earlier revert (an Undo) already put back.
+
 ## 0.3.9 - 2026-10-11
 
 Fixes for the errors of the closeout verification on 0.3.8.

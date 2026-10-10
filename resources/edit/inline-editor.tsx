@@ -2049,7 +2049,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		setWarnings( [] );
 		setProgress( { done: 0, total: 0 } );
 
-		const names = new Map( targetsForValidation.map( ( item ) => [ item.id, nameOf( item ) ] ) );
+		// A variation reached through a parent off this page is named by that parent too: the editor's own rows know it.
+		const knownRows = [ ...items, ...getCurrentRows() ];
+		const names = new Map( targetsForValidation.map( ( item ) => [ item.id, itemLabel( item, knownRows ) ] ) );
 		let failed = false;
 		// The list's indicator, row locks and leave-page guard start with the re-checks, not with the first write (finished below on every path).
 		let saveJob: number | undefined;
@@ -3401,6 +3403,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						applyToVariations={ applyToVariations }
 						parentVariations={ parentVariations }
 						defaultOpen={ bulk }
+						bulk={ bulk }
 						// The tools run with Update, in its batch: one save model, one Undo.
 						stage={ stageTool }
 						staged={ staged }

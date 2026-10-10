@@ -802,6 +802,8 @@ export interface LanguageToolsProps {
 	parentVariations?: readonly ProductListItem[];
 	/** Kept by the editor: what was typed into each tab's tools, so a tool shows it again when its tab is revisited. */
 	drafts?: ToolDrafts;
+	/** Bulk edit (its price control is "Also apply to the variations"), not quick edit. */
+	bulk?: boolean;
 }
 
 /** A tool's typed settings by `<tab id>:<action id>`, and whether they are unsaved. */
@@ -814,11 +816,11 @@ function sameData( a: Record< string, unknown >, b: Record< string, unknown > ):
 type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultOpen' | 'drafts' > & { draft?: { get(): { data: Record< string, unknown >; ranWith: Record< string, unknown > } | undefined; set( data: Record< string, unknown >, ranWith: Record< string, unknown > ): void } } & { def: DeclarativeAction; lang: string; tabId: string; onDirty( id: string, dirty: boolean ): void };
 
 /** Why a fields list offers nothing for the selection: prices on variable parents, or names and SEO on variations. */
-function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined ): string {
+function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined, bulk = items.length > 1 ): string {
 	if ( isSellableTool( def ) && items.some( isVariableParent ) ) {
 		if ( ! applyToVariations ) {
-			// Name the control the editor shows: quick edit (one product) has "Set the price of all its variations", bulk edit "Also apply to the variations".
-			return items.length > 1
+			// Name the control the editor shows: quick edit has "Set the price of all its variations", bulk edit (even down to one item) "Also apply to the variations".
+			return bulk
 				? __( 'Variable products have no prices of their own. Tick "Also apply to the variations" in Prices to change their variations\' prices.', 'wp-woocommerce-products-list' )
 				: __( 'This variable product has no prices of its own. Tick "Set the price of all its variations" in Prices to change its variations\' prices.', 'wp-woocommerce-products-list' );
 		}
@@ -835,7 +837,7 @@ function nothingAppliesText( def: DeclarativeAction, items: readonly ProductList
 	return __( 'None of these fields exists on the selected items (variations have no name or SEO fields of their own).', 'wp-woocommerce-products-list' );
 }
 
-function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged, applyToVariations, parentVariations, draft }: ToolProps ) {
+function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged, applyToVariations, parentVariations, draft, bulk }: ToolProps ) {
 	const defaults = useMemo( () => defaultsOf( def, lang ), [ def, lang ] );
 	// This tool's runs added to the Update in this language, in the order added.
 	const stagedEntries = useMemo( () => Array.from( staged?.values() ?? [] ).filter( ( entry ) => entry.tabId === tabId && entry.def.id === def.id ), [ staged, tabId, def.id ] );
@@ -1056,7 +1058,7 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 									/>
 								) ) }
 								{ options.length === 0 && inapplicable > 0 ? (
-									<p className="wc-pl-language-tools__description">{ nothingAppliesText( def, items, applyToVariations, parentVariations ) }</p>
+									<p className="wc-pl-language-tools__description">{ nothingAppliesText( def, items, applyToVariations, parentVariations, bulk ) }</p>
 								) : inapplicable > 0 ? (
 									<p className="wc-pl-language-tools__description">
 										{ sprintf(

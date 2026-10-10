@@ -187,7 +187,8 @@ export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 
 	for ( const response of responses.filter( Boolean ) ) {
 		summary.changed += response.changed ?? 0;
 		summary.alreadyReverted += response.already_reverted ?? 0;
-		summary.example ??= response.items.find( ( item ) => ! item.already_reverted?.length ) ?? response.items[ 0 ] ?? null;
+		// Only an item someone else changed is an example of "changed since": one an earlier revert put back is counted apart.
+		summary.example ??= response.items.find( ( item ) => ! item.already_reverted?.length ) ?? null;
 		summary.changedIds.push( ...response.items.map( ( item ) => item.id ) );
 	}
 

@@ -232,6 +232,13 @@ describe( 'market price tool in bulk edit', () => {
 		expect( screen.getByText( /Variable products have no prices of their own\. Tick "Also apply to the variations" in Prices/ ) ).toBeInTheDocument();
 		expect( screen.queryByText( /Set the price of all its variations/ ) ).toBeNull();
 	} );
+
+	it( 'names the bulk control when bulk edit is down to one variable product', () => {
+		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ variable( 10 ) ] } settings={ settings } run={ vi.fn( async () => undefined ) } onDone={ vi.fn() } bulk /> );
+
+		expect( screen.getByText( /Tick "Also apply to the variations" in Prices/ ) ).toBeInTheDocument();
+		expect( screen.queryByText( /Set the price of all its variations/ ) ).toBeNull();
+	} );
 } );
 
 describe( 'template preview', () => {

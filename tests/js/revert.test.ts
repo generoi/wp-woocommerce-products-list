@@ -270,6 +270,18 @@ describe( 'checkRevertPlan', () => {
 		await checkRevertPlan( 'b', { chunks: [ [ 1, 2 ] ] }, fn );
 		expect( fn.mock.calls[ 0 ]?.[ 1 ]?.ids ).toBeUndefined();
 	} );
+
+	it( 'gives no "changed since" example when every item was put back by an earlier revert', async () => {
+		const fn = vi.fn( async () => ( {
+			changed: 2,
+			already_reverted: 2,
+			items: [ { id: 5, ok: false, fields: [ 'regular_price' ], already_reverted: [ 'regular_price' ] }, { id: 6, ok: false, fields: [ 'regular_price' ], already_reverted: [ 'regular_price' ] } ],
+		} ) as never );
+		const summary = await checkRevertPlan( 'b', { chunks: [ [ 5, 6 ] ] }, fn );
+
+		expect( summary.alreadyReverted ).toBe( 2 );
+		expect( summary.example ).toBeNull();
+	} );
 } );
 
 describe( 'checkRevertPlan', () => {
