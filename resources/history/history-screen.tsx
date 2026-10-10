@@ -28,7 +28,7 @@ import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { actionLabel, createLogFields, formatLogValue, logObjectName, logQueryFromView } from './log-fields';
 import { describeBatchScope, isRevertableRow, itemsLeftToRevert, nothingToRevert, scopeFromPlan } from './batch-scope';
-import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from './revert';
+import { checkRevertPlan, describeConflict, relativeConflicts, revertNotice, runRevert } from './revert';
 import type { RevertCheckSummary, RevertOutcome } from './revert';
 import { batchQueryFromView, createBatchFields } from './batch-fields';
 import { invalidateLog, useLog, useLogBatches } from './use-log';
@@ -252,26 +252,11 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 		invalidateProducts( { counts: true } );
 		invalidateLog();
 
-		if ( result.ok && ! result.failed.length ) {
-			notify.success(
-				sprintf(
-					/* translators: %d: number of items reverted */
-					_n( '%d item reverted.', '%d items reverted.', result.ok, 'wp-woocommerce-products-list' ),
-					result.ok
-				)
-			);
-		}
+		// Also when it wrote nothing (an Undo put the items back while this confirm was open): say so, never close silently.
+		const notice = revertNotice( result );
 
-		if ( result.failed.length ) {
-			notify.error(
-				sprintf(
-					/* translators: 1: items reverted, 2: items that failed, 3: the first failure's message */
-					__( '%1$d reverted, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
-					result.ok,
-					result.failed.length,
-					result.failed[ 0 ]?.message ?? __( 'Some items could not be reverted.', 'wp-woocommerce-products-list' )
-				)
-			);
+		if ( notice ) {
+			notify[ notice.status ]( notice.message );
 		}
 
 		onActionPerformed?.( items );

@@ -952,13 +952,30 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const tab = useMemo< QuickEditTab >( () => tabs.find( ( entry ) => entry.id === tabId ) ?? tabs[ 0 ] ?? { id: GENERAL_TAB_ID, label: __( 'General', 'wp-woocommerce-products-list' ) }, [ tabs, tabId ] );
 	// The labels inside the form ("Stock status"; "Name" on the Svenska tab): what a control is found by.
 	const controlLabels = useMemo( () => Object.fromEntries( editFields.map( ( field ) => [ field.id, formLabelOf( field, settings ) ] ) ), [ editFields, settings ] );
+	/** The variations a price tool reaches when "Apply price and sale fields to all variations" is ticked. */
+	const parentVariations = useMemo(
+		() => ( applyToVariations && variations.status === 'loaded' ? Array.from( variations.byParent.values() ).flat() : undefined ),
+		[ applyToVariations, variations ]
+	);
+
 	// What was typed on General for the texts a language tab shows as its "Default:" (a quick edit's name, say).
 	const editedDefaultsKey = bulk || tab.id === GENERAL_TAB_ID ? '{}' : JSON.stringify( Object.fromEntries( Object.entries( state.edits ).filter( ( [ id, value ] ) => tabOf( editFieldsById.get( id ) ?? ( { id } as ProductField ) ) === GENERAL_TAB_ID && typeof value === 'string' ) ) );
 	const formFields = useMemo(
-		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels, sellableOps, editedDefaults: JSON.parse( editedDefaultsKey ) as Record< string, unknown > } ),
+		() => toFormFields( visibleFields, {
+				bulk,
+				items,
+				base: state.data,
+				mixed: state.mixed,
+				settings,
+				pending: pendingFieldIds,
+				labels: controlLabels,
+				sellableOps,
+				editedDefaults: JSON.parse( editedDefaultsKey ) as Record< string, unknown >,
+				variationRows: parentVariations,
+			} ),
 		// state.data changes on every keystroke; the placeholders only need the merged base, which state.mixed tracks.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels, sellableOps, editedDefaultsKey ]
+		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels, sellableOps, editedDefaultsKey, parentVariations ]
 	);
 
 	// A tab visited for the first time loads its fields; the rows merge in object by object.
@@ -1354,12 +1371,6 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					now
 			  );
 	};
-
-	/** The variations a price tool reaches when "Apply price and sale fields to all variations" is ticked. */
-	const parentVariations = useMemo(
-		() => ( applyToVariations && variations.status === 'loaded' ? Array.from( variations.byParent.values() ).flat() : undefined ),
-		[ applyToVariations, variations ]
-	);
 
 	const variationsReady = ! applyToVariations || variableParents.length === 0 || variations.status === 'loaded';
 

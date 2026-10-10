@@ -5,7 +5,7 @@ import { mergeItems, MIXED_VALUE } from '../../resources/edit/merge';
 import { validateFormData } from '../../resources/edit/validity';
 import { effectiveEdits } from '../../resources/edit/use-edit-state';
 import type { ProductField, ProductListItem } from '../../resources/types';
-import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
+import { coreFields, editSettings, field, simple, variable, variation } from './edit-fixtures';
 
 const settings = editSettings();
 
@@ -187,6 +187,32 @@ describe( 'variation tax class', () => {
 
 	it( 'names parent "Same as parent" in the conflict text', () => {
 		expect( describeConflictValues( { fields: [ 'tax_class' ], current: { tax_class: 'reduced-rate' }, expected: { tax_class: 'parent' } } ) ).toBe( 'tax_class reduced-rate (was Same as parent when loaded)' );
+	} );
+} );
+
+describe( 'market price reference of a variable product', () => {
+	// gds-woo-i18n's SEK prices: a variable product has none of its own, its variations carry the converted default.
+	const sek = { code: 'SEK', symbol: 'kr', decimals: 2 };
+	const fields = coreFields().map( ( f ) => ( f.id === 'i18n:se.regular_price' || f.id === 'i18n:se.sale_price' ? { ...f, currency: sek } : f ) );
+	const sekPrice = ( source: string ) => ( { i18n: { se: { regular_price: { value: '', source }, sale_price: { value: '', source: '' } } } } );
+	const parent = variable( 10, sekPrice( '' ) );
+	const variations = [ variation( 11, 10, sekPrice( '2045' ) ), variation( 12, 10, sekPrice( '2045' ) ) ];
+
+	function quickEdit( variationRows?: ProductListItem[] ) {
+		const merged = mergeItems( [ parent ], fields, { applyToVariations: true } );
+
+		return toFormFields( fields, { bulk: false, items: [ parent ], base: merged.data, mixed: merged.mixed, settings, sellableOps: true, variationRows } ).find( ( f ) => f.id === 'i18n:se.regular_price' )!;
+	}
+
+	it( '"Set the price of all its variations" shows the variations\' default price', () => {
+		expect( quickEdit( variations ).Edit ).toBeTypeOf( 'function' );
+		// The bulk numeric control takes the reference as its help; the description is the plain field's.
+		expect( quickEdit( variations ).description ).toBe( 'Default: 2 045,00 kr' );
+		expect( quickEdit().description ).toBeUndefined();
+	} );
+
+	it( 'says Mixed when the variations convert to different prices', () => {
+		expect( quickEdit( [ variations[ 0 ]!, variation( 13, 10, sekPrice( '1395' ) ) ] ).description ).toBe( 'Default: Mixed' );
 	} );
 } );
 

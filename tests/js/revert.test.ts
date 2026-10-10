@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
-import { checkRevertPlan, describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
+import { checkRevertPlan, describeConflict, relativeConflicts, revertNotice, runRevert, splitResults } from '../../resources/history/revert';
 import { formatLogValue } from '../../resources/history/log-fields';
 import { editSettings } from './edit-fixtures';
 import { describeBatchScope, isRevertableRow, itemsLeftToRevert, nothingToRevert, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
@@ -85,6 +85,25 @@ describe( 'runRevert', () => {
 
 	it( 'counts skipped entries apart from failures', () => {
 		expect( splitResults( [ { id: 1, ok: false, code: 'skipped' }, { id: 2, ok: true } ] ) ).toEqual( { ok: 1, conflicts: [], failed: [], skipped: 1 } );
+	} );
+} );
+
+describe( 'revertNotice', () => {
+	it( 'says nothing was reverted, and why, when an Undo put every item back while the confirm was open', () => {
+		const message = 'Regular price was already put back by an earlier revert of this batch and was left as it is.';
+		const result = splitResults( [
+			{ id: 1, ok: false, code: 'skipped', message },
+			{ id: 2, ok: false, code: 'skipped', message },
+		] );
+
+		expect( revertNotice( result ) ).toEqual( { status: 'info', message: `Nothing was reverted: 2 items were left as they are. ${ message }` } );
+	} );
+
+	it( 'keeps the success and failure snackbars, and leaves conflicts to the dialog', () => {
+		expect( revertNotice( splitResults( [ { id: 1, ok: true }, { id: 2, ok: false, code: 'skipped', message: 'x' } ] ) ) ).toEqual( { status: 'success', message: '1 item reverted.' } );
+		expect( revertNotice( splitResults( [ { id: 1, ok: true }, { id: 2, ok: false, code: 'error', message: 'Boom' } ] ) ) ).toEqual( { status: 'error', message: '1 reverted, 1 failed: Boom' } );
+		expect( revertNotice( splitResults( [ { id: 1, ok: false, code: 'conflict', message: 'c' } ] ) ) ).toBeNull();
+		expect( revertNotice( splitResults( [] ) )?.status ).toBe( 'info' );
 	} );
 } );
 

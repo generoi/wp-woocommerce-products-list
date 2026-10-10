@@ -31,8 +31,10 @@ export interface RevertOutcome {
 	conflicts: ActionResult[];
 	/** Objects that could not be written. */
 	failed: ActionResult[];
-	/** Entries the server reports as skipped (trash, delete, duplicate rows). */
+	/** Entries the server reports as skipped (trash, delete, duplicate rows, items an earlier revert already put back). */
 	skipped: number;
+	/** The first skipped entry's message ("Price was already put back by an earlier revert of this batch…"). */
+	skippedMessage?: string;
 }
 
 export interface RunRevertOptions {
@@ -83,8 +85,8 @@ function chunk< T >( list: T[], size: number ): T[][] {
 	return out;
 }
 
-export function splitResults( results: ActionResult[] ): Pick< RevertOutcome, 'ok' | 'conflicts' | 'failed' | 'skipped' > {
-	const outcome = { ok: 0, conflicts: [] as ActionResult[], failed: [] as ActionResult[], skipped: 0 };
+export function splitResults( results: ActionResult[] ): Pick< RevertOutcome, 'ok' | 'conflicts' | 'failed' | 'skipped' | 'skippedMessage' > {
+	const outcome: Pick< RevertOutcome, 'ok' | 'conflicts' | 'failed' | 'skipped' | 'skippedMessage' > = { ok: 0, conflicts: [], failed: [], skipped: 0 };
 
 	for ( const result of results ) {
 		if ( result.ok ) {
@@ -93,12 +95,60 @@ export function splitResults( results: ActionResult[] ): Pick< RevertOutcome, 'o
 			outcome.conflicts.push( result );
 		} else if ( result.code === 'skipped' ) {
 			outcome.skipped += 1;
+			outcome.skippedMessage ??= result.message ? decodeEntities( result.message ) : undefined;
 		} else {
 			outcome.failed.push( result );
 		}
 	}
 
 	return outcome;
+}
+
+/**
+ * The snackbar a finished revert leaves: how many items it put back, what failed, or (it wrote nothing, say because an
+ * Undo put the items back while the confirm was open) that nothing was reverted and why. Null while conflicts are left
+ * to decide on.
+ */
+export function revertNotice( result: Pick< RevertOutcome, 'ok' | 'conflicts' | 'failed' | 'skipped' | 'skippedMessage' > ): { status: 'success' | 'error' | 'info'; message: string } | null {
+	if ( result.failed.length ) {
+		return {
+			status: 'error',
+			message: sprintf(
+				/* translators: 1: items reverted, 2: items that failed, 3: the first failure's message */
+				__( '%1$d reverted, %2$d failed: %3$s', 'wp-woocommerce-products-list' ),
+				result.ok,
+				result.failed.length,
+				result.failed[ 0 ]?.message ?? __( 'Some items could not be reverted.', 'wp-woocommerce-products-list' )
+			),
+		};
+	}
+
+	if ( result.ok ) {
+		return {
+			status: 'success',
+			message: sprintf(
+				/* translators: %d: number of items reverted */
+				_n( '%d item reverted.', '%d items reverted.', result.ok, 'wp-woocommerce-products-list' ),
+				result.ok
+			),
+		};
+	}
+
+	if ( result.conflicts.length ) {
+		return null;
+	}
+
+	if ( result.skipped ) {
+		const left = sprintf(
+			/* translators: %d: number of items the revert left as they are */
+			_n( 'Nothing was reverted: %d item was left as it is.', 'Nothing was reverted: %d items were left as they are.', result.skipped, 'wp-woocommerce-products-list' ),
+			result.skipped
+		);
+
+		return { status: 'info', message: result.skippedMessage ? `${ left } ${ result.skippedMessage }` : left };
+	}
+
+	return { status: 'info', message: __( 'Nothing was reverted: no item had anything left to put back.', 'wp-woocommerce-products-list' ) };
 }
 
 export interface RevertCheckSummary {

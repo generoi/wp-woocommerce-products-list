@@ -57,6 +57,12 @@ export interface FormFieldOptions {
 	sellableOps?: boolean;
 	/** General-tab values with an unsaved edit (`name`): a language field's "Default:" hint shows what was typed, not the saved text. */
 	editedDefaults?: Record< string, unknown >;
+	/**
+	 * The loaded variations of the selected variable products, when the price fields apply to them ("Set the price of
+	 * all its variations", "Also apply to the variations"): a price field's "Default:" comes from them, since a
+	 * variable product has no price of its own.
+	 */
+	variationRows?: ProductListItem[];
 }
 
 /**
@@ -163,18 +169,20 @@ function integerMessage( value: unknown, signed = false ): string | null {
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
-	const { bulk, items, base, mixed, settings, pending, labels, sellableOps = false, editedDefaults = {} } = options;
+	const { bulk, items, base, mixed, settings, pending, labels, sellableOps = false, editedDefaults = {}, variationRows } = options;
 	const ids = new Set( fields.map( ( field ) => field.id ) );
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
 	const onlyVariableParents = rows.length > 0 && rows.every( isVariableParent );
 	const someVariableParents = rows.some( isVariableParent );
 	const noRowManagesStock = rows.length > 0 && ! rows.some( managesStock );
+	// The rows a sellable field's reference is read from: the variable products stand for their variations.
+	const sellableRows = variationRows && someVariableParents ? [ ...rows.filter( ( item ) => ! isVariableParent( item ) ), ...variationRows ] : null;
 
 	return fields.map( ( field ) => {
 		const state = mixed[ field.id ];
 		const isMixed = state?.isMixed === true;
-		const reference = mergeReference( items, field );
+		const reference = mergeReference( sellableRows && isSellableField( field ) ? sellableRows : items, field );
 		const kind = bulk || ( sellableOps && isSellableField( field ) ) ? numericKindOf( field ) : null;
 		const scheduleId = scheduleIdFor( field.id );
 		const leaf = leafOf( field.id );

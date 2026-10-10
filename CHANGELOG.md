@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.8 - 2026-10-10
+
+Fixes for two errors of the closeout verification on 0.3.7.
+
+- A History "Revert batch" that puts nothing back (an Undo restored the items while the confirm was open) no longer closes silently: a notice says "Nothing was reverted: N items were left as they are." with the server's reason.
+- Quick edit of a variable product with "Set the price of all its variations" ticked shows the "Default: …" hint on a language's market price fields (Prices (SEK)), taken from its variations' converted prices ("Mixed" when they differ), as simple products and variations already did.
+
 ## 0.3.7 - 2026-10-10
 
 Fixes for the side issues of the closeout verification on 0.3.6.
