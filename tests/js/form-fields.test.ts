@@ -251,3 +251,15 @@ describe( 'a negative menu order', () => {
 		expect( validateBulkNumericEdits( [ item ], { menu_order: -2 }, [ menuOrder, stock ], settings ) ).toEqual( [] );
 	} );
 } );
+
+describe( 'quick edit Name with entities', () => {
+	it( 'shows a title stored with "&amp;" (saved by a shop manager) as "&", and keeps the stored value as the form value', () => {
+		const name = coreFields().find( ( f ) => f.id === 'name' )!;
+		const item = simple( 1, { name: 'Socks &amp; laces' } );
+		const { data, get } = formFor( [ name ], [ item ], false );
+		const form = get( 'name' );
+
+		expect( form.getValue!( { item: data } as never ) ).toBe( 'Socks & laces' );
+		expect( ( data as Record< string, unknown > ).name ).toBe( 'Socks &amp; laces' );
+	} );
+} );

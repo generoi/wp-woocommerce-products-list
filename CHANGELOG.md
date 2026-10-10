@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 - 2026-10-10
+
+- Quick edit shows a product name stored with "&amp;" (saved by a user without unfiltered_html, such as a shop manager) as "&", like the product screen. The stored value stays the form value and the expected value until the user types, so nothing changes for saves or clash checks.
+
 ## 0.3.2 - 2026-10-10
 
 Fixes for the leftovers of the final editor QA pass on 0.3.1.

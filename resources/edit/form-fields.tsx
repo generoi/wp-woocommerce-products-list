@@ -394,6 +394,17 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			// Quick edit validates what the classic editor would reject, and says so next to the field.
 			if ( leaf === 'name' && field.id === leaf ) {
 				formField.isValid = { ...formField.isValid, required: true };
+
+				// WordPress stores a title saved by a user without unfiltered_html (a shop manager) with "&" as "&amp;", and
+				// wc/v3 returns it so in the edit context. Show the text the way the product screen does; the stored value
+				// stays the form's value (and the save's expected value) until the user types.
+				const read = formField.getValue;
+
+				formField.getValue = ( args ) => {
+					const value = read ? read( args ) : ( args.item as Record< string, unknown > )[ field.id ];
+
+					return typeof value === 'string' ? decodeEntities( value ) : value;
+				};
 			}
 
 			if ( numericKindOf( field ) === 'integer' ) {
