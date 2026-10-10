@@ -460,7 +460,10 @@ export function planTargets( targets: SaveTarget[], fields: ProductField[], sett
 		}
 
 		if ( hasSale( target.item ) && hasSaleEdit( own ) ) {
-			plan.replacedSales += 1;
+			// Only a new sale price replaces the sale: unticking "Schedule sale" or moving its dates keeps the row's sale price.
+			if ( own.sale_price !== undefined ) {
+				plan.replacedSales += 1;
+			}
 
 			if ( saleIsActive( target.item, now ) ) {
 				plan.endedRunningSales = ( plan.endedRunningSales ?? 0 ) + 1;

@@ -409,6 +409,8 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 
 	// Each row once, however many lines reach it; parents an edit skips are not counted.
 	const rows = new Set( lines.flatMap( ( line ) => line.rowIds ) ).size;
+	// A line that reaches no row (a sale price change on rows that are all skipped) changes no field.
+	const changing = lines.filter( ( line ) => line.count > 0 ).length;
 
 	return (
 		<div className="wc-pl-edit__summary-box" aria-live="polite">
@@ -418,8 +420,8 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 					__( '%1$s will change on %2$s:', 'wp-woocommerce-products-list' ),
 					sprintf(
 						/* translators: %d: number of fields */
-						_n( '%d field', '%d fields', lines.length, 'wp-woocommerce-products-list' ),
-						lines.length
+						_n( '%d field', '%d fields', changing, 'wp-woocommerce-products-list' ),
+						changing
 					),
 					sprintf(
 						/* translators: %d: number of rows */

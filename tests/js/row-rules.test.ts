@@ -119,6 +119,14 @@ describe( 'existing sales', () => {
 		expect( skip.skippedItems.map( ( entry ) => [ entry.id, entry.reason ] ) ).toEqual( [ [ 11, 'has_sale' ], [ 12, 'has_sale' ] ] );
 		expect( skip.replacedSales ).toBe( 0 );
 	} );
+
+	it( 'a date-only edit (Schedule sale unticked) keeps the sale price, so no sale is counted as replaced', () => {
+		const dated = variation( 21, 1, { regular_price: '90', sale_price: '79.5', on_sale: true, date_on_sale_from: '2026-10-10T12:00:00', date_on_sale_to: '2099-10-15T18:00:00' } );
+		const plan = planSave( [ dated ], { schedule_sale: false }, fields, settings, { applyToVariations: false } );
+
+		expect( plan.writes ).toHaveLength( 1 );
+		expect( plan.replacedSales ).toBe( 0 );
+	} );
 } );
 
 describe( 'schedule sale without dates', () => {

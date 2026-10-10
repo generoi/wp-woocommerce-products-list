@@ -69,7 +69,7 @@ describe( 'successMessage', () => {
 		expect( successMessage( result( { updated: rows, unchanged: 10 } ) ) ).toBe( '90 items updated, 10 unchanged.' );
 		expect( successMessage( result( { updated: rows.slice( 0, 31 ), stockSkipped: 3 } ) ) ).toBe( '31 items updated, 3 skipped (no stock management).' );
 		expect( successMessage( result( { updated: rows, replacedSales: 73 } ) ) ).toBe( '90 items updated, 73 existing sales replaced.' );
-		expect( successMessage( result( { updated: rows.slice( 0, 1 ), saleSkipped: 2 } ) ) ).toBe( '1 item updated, 2 skipped (already on sale).' );
+		expect( successMessage( result( { updated: rows.slice( 0, 1 ), saleSkipped: 2 } ) ) ).toBe( '1 item updated, 2 skipped (already have a sale).' );
 		expect( successMessage( result( { unchanged: 100 } ) ) ).toBe( 'Nothing changed: 100 unchanged.' );
 		expect( successMessage( result( { stockSkipped: 100 } ) ) ).toBe( 'Nothing changed: 100 skipped (no stock management).' );
 		expect( successMessage( result( {} ) ) ).toBe( 'Nothing to change.' );

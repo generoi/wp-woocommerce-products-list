@@ -544,7 +544,11 @@ final class Rows
                     MIN(CASE WHEN {$selling} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS sale_from_ts,
                     MAX(CASE WHEN {$selling} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS sale_to_ts,
                     MIN(CASE WHEN {$scheduled} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS scheduled_from_ts,
-                    MAX(CASE WHEN {$scheduled} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS scheduled_to_ts
+                    MAX(CASE WHEN {$scheduled} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS scheduled_to_ts,
+                    SUM(CASE WHEN {$selling} AND COALESCE(f.meta_value, '') = '' THEN 1 ELSE 0 END) AS sale_open_from,
+                    SUM(CASE WHEN {$selling} AND COALESCE(t.meta_value, '') = '' THEN 1 ELSE 0 END) AS sale_open_to,
+                    SUM(CASE WHEN {$scheduled} AND COALESCE(f.meta_value, '') = '' THEN 1 ELSE 0 END) AS scheduled_open_from,
+                    SUM(CASE WHEN {$scheduled} AND COALESCE(t.meta_value, '') = '' THEN 1 ELSE 0 END) AS scheduled_open_to
                 FROM {$wpdb->posts} v
                 INNER JOIN {$wpdb->wc_product_meta_lookup} l ON l.product_id = v.ID
                 LEFT JOIN {$wpdb->postmeta} s ON s.post_id = v.ID AND s.meta_key = '_sale_price'
@@ -570,8 +574,10 @@ final class Rows
                     'sale_summary' => [
                         'on_sale' => (int) $row['on_sale'],
                         'scheduled' => (int) $row['scheduled'],
-                        'from' => self::siteTime($row[$window.'_from_ts']),
-                        'to' => self::siteTime($row[$window.'_to_ts']),
+                        // A variation of the line without a start or an end date leaves that side of the window open:
+                        // "Oct 10 – 15" for 8 variations of which 7 have no end would be read as all ending on the 15th.
+                        'from' => (int) $row[$window.'_open_from'] > 0 ? null : self::siteTime($row[$window.'_from_ts']),
+                        'to' => (int) $row[$window.'_open_to'] > 0 ? null : self::siteTime($row[$window.'_to_ts']),
                     ],
                 ];
             }

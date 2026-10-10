@@ -24,7 +24,7 @@ export function skipReasonLabel( reason: string ): string {
 		case 'no_stock_management':
 			return __( 'stock not managed', 'wp-woocommerce-products-list' );
 		case 'has_sale':
-			return __( 'already on sale', 'wp-woocommerce-products-list' );
+			return __( 'already had a sale', 'wp-woocommerce-products-list' );
 		case 'no_sale_price':
 			return __( 'no sale price', 'wp-woocommerce-products-list' );
 		case 'below_zero':

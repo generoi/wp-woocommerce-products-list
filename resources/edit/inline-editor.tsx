@@ -301,7 +301,7 @@ export function successMessage( result: SaveResult, skipped: StatusSkips = { tra
 
 	if ( result.saleSkipped > 0 ) {
 		/* translators: %d: number of rows */
-		extras.push( sprintf( _n( '%d skipped (already on sale)', '%d skipped (already on sale)', result.saleSkipped, 'wp-woocommerce-products-list' ), result.saleSkipped ) );
+		extras.push( sprintf( _n( '%d skipped (already has a sale)', '%d skipped (already have a sale)', result.saleSkipped, 'wp-woocommerce-products-list' ), result.saleSkipped ) );
 	}
 
 	if ( ( result.notLowerSkipped ?? 0 ) > 0 ) {
