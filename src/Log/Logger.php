@@ -207,37 +207,87 @@ final class Logger
 
         $now = current_time('mysql', true);
         $userId = get_current_user_id();
-        $batchId = null;
         $source = self::source();
 
         foreach ($rows as $row) {
-            $status = in_array($row['status'] ?? 'ok', [self::STATUS_ERROR, self::STATUS_SKIPPED], true) ? (string) $row['status'] : self::STATUS_OK;
-            $context = $row['context'] ?? null;
-
-            $full = [
-                'batch_id' => substr((string) ($row['batch_id'] ?? ($batchId ??= self::batchId())), 0, 64),
-                'created_at' => (string) ($row['created_at'] ?? $now),
-                'user_id' => (int) ($row['user_id'] ?? $userId),
-                'source' => self::normaliseSource($row['source'] ?? $source),
-                'action' => substr((string) ($row['action'] ?? 'update'), 0, 40),
-                'object_type' => in_array((string) ($row['object_type'] ?? ''), self::OBJECT_TYPES, true) ? (string) $row['object_type'] : 'product',
-                'object_id' => (int) ($row['object_id'] ?? 0),
-                'parent_id' => (int) ($row['parent_id'] ?? 0),
-                'field' => substr((string) ($row['field'] ?? ''), 0, 100),
-                'old_value' => isset($row['old_value']) ? (string) $row['old_value'] : null,
-                'new_value' => isset($row['new_value']) ? (string) $row['new_value'] : null,
-                'status' => $status,
-                'message' => (string) ($row['message'] ?? ''),
-                'context' => is_array($context) ? (string) wp_json_encode($context) : (is_string($context) ? $context : null),
-                'reverts' => substr((string) ($row['reverts'] ?? self::$reverts), 0, 64),
-            ];
-
+            $full = self::complete($row, $now, $userId, $source);
             self::$buffer[] = $full;
 
-            if ($status === 'error') {
+            if ($full['status'] === self::STATUS_ERROR) {
                 self::wcLog($full);
             }
         }
+    }
+
+    /**
+     * Write one row at once, bypassing the buffer, and return its id (0
+     * when the INSERT failed). For a row that must exist the moment its
+     * change does: a row action logs a trash, restore, status change or
+     * delete from the change's own hook, so a request killed right after
+     * leaves no change without its row. `wc_products_list/logged` fires
+     * when the row is finalised with `replace()`, not here.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    public static function writeNow(array $row): int
+    {
+        global $wpdb;
+
+        self::insert([self::complete($row, current_time('mysql', true), get_current_user_id(), self::source())]);
+
+        return (int) $wpdb->insert_id;
+    }
+
+    /**
+     * Overwrite a row written by `writeNow()` with its final values (same
+     * defaults as `log()`), and fire `wc_products_list/logged` for it.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    public static function replace(int $id, array $row): void
+    {
+        global $wpdb;
+
+        $full = self::complete($row, current_time('mysql', true), get_current_user_id(), self::source());
+        $columns = array_intersect_key($full, array_flip(['field', 'old_value', 'new_value', 'status', 'message', 'context']));
+        $wpdb->update(Table::name(), $columns, ['id' => $id]);
+
+        if ($full['status'] === self::STATUS_ERROR) {
+            self::wcLog($full);
+        }
+
+        /** This action is documented in src/Log/Logger.php (flush). */
+        do_action(self::ACTION_LOGGED, [$full], $full['batch_id']);
+    }
+
+    /**
+     * A partial row completed with the request defaults.
+     *
+     * @param  array<string, mixed>  $row
+     * @return Row
+     */
+    private static function complete(array $row, string $now, int $userId, string $source): array
+    {
+        $status = in_array($row['status'] ?? 'ok', [self::STATUS_ERROR, self::STATUS_SKIPPED], true) ? (string) $row['status'] : self::STATUS_OK;
+        $context = $row['context'] ?? null;
+
+        return [
+            'batch_id' => substr((string) ($row['batch_id'] ?? self::batchId()), 0, 64),
+            'created_at' => (string) ($row['created_at'] ?? $now),
+            'user_id' => (int) ($row['user_id'] ?? $userId),
+            'source' => self::normaliseSource($row['source'] ?? $source),
+            'action' => substr((string) ($row['action'] ?? 'update'), 0, 40),
+            'object_type' => in_array((string) ($row['object_type'] ?? ''), self::OBJECT_TYPES, true) ? (string) $row['object_type'] : 'product',
+            'object_id' => (int) ($row['object_id'] ?? 0),
+            'parent_id' => (int) ($row['parent_id'] ?? 0),
+            'field' => substr((string) ($row['field'] ?? ''), 0, 100),
+            'old_value' => isset($row['old_value']) ? (string) $row['old_value'] : null,
+            'new_value' => isset($row['new_value']) ? (string) $row['new_value'] : null,
+            'status' => $status,
+            'message' => (string) ($row['message'] ?? ''),
+            'context' => is_array($context) ? (string) wp_json_encode($context) : (is_string($context) ? $context : null),
+            'reverts' => substr((string) ($row['reverts'] ?? self::$reverts), 0, 64),
+        ];
     }
 
     /**

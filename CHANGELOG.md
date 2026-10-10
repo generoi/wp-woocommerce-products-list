@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Attribute-term translations are clash-checked and logged (audit round 8): gds-woo-i18n's term route (`PUT /gds-woo-i18n/v1/terms/{id}`) and the term edit screen take a per-term lock (`Concurrency::lockName('t', id)`), compare the loaded value (`expect`) with the stored one and refuse a clash with 409 `wc_products_list_conflict` naming the term, the field and its value now; every change and refusal is a History row. The log accepts `object_type` `term` (`Logger::OBJECT_TYPES`), action `translate_term` and source `i18n`; term rows are never reverted and never match a product's `object_id` filter (`GET /log` takes `object_type`). History names them "Translate attribute term" / "(attribute term)". docs/contracts.md §3.6.
+- Row actions log a trash, restore, publish, draft or delete from the change's own hook (`Rest\EarlyRow`: first `transition_post_status` / `deleted_post` of the id, priority `PHP_INT_MIN`, `Logger::writeNow()`), and overwrite that row with the handler's row once it returns (`Logger::replace()`). A request killed during core's and WooCommerce's after-hooks (`trashed_post`, lookup tables, revisions, unlock) no longer leaves the change without its History row; only the time inside `wp_update_post()` / `wp_delete_post()` before those hooks remains (audit round 9).
+- gds-woo-i18n (site repo): the term edit screen no longer refuses a save because another user changed a language this user did not touch; a language posted as it was loaded is not part of the write, and a refusal logs every change it refused.
 
 ## 0.2.1 - 2026-10-10
 

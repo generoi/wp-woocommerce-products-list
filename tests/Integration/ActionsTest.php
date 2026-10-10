@@ -655,6 +655,91 @@ class ActionsTest extends RestTestCase
         $this->assertCount(3, $this->rows());
     }
 
+    /**
+     * The row of a trash, delete or status change is in the table when
+     * the change's own hooks run, not only once the handler returns: a
+     * request killed during core's and WooCommerce's after-hooks
+     * (`trashed_post`, `deleted_post`, `transition_post_status`) leaves
+     * no change without its row. Each id still ends with one row.
+     */
+    public function test_a_status_change_or_delete_is_logged_before_its_after_hooks_run(): void
+    {
+        global $wpdb;
+
+        $table = Table::name();
+        $seen = [];
+        $look = function (string $hook, int $id) use (&$seen, $wpdb, $table): void {
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            $seen[$hook][$id] = $wpdb->get_row($wpdb->prepare("SELECT field, old_value, new_value, status FROM {$table} WHERE batch_id = %s AND object_id = %d ORDER BY id DESC LIMIT 1", $this->batchId(), $id), ARRAY_A);
+        };
+        $trashed = static function (int $id) use ($look): void {
+            $look('trashed_post', $id);
+        };
+        $deleted = static function (int $id) use ($look): void {
+            $look('deleted_post', $id);
+        };
+        $transition = static function (string $new, string $old, \WP_Post $post) use ($look): void {
+            if ($new !== $old && $post->post_type === 'product') {
+                $look("transition:{$new}", $post->ID);
+            }
+        };
+        add_action('trashed_post', $trashed);
+        add_action('deleted_post', $deleted);
+        add_action('transition_post_status', $transition, 10, 3);
+
+        $product = $this->simpleProduct();
+        $draft = $this->simpleProduct(['status' => 'draft']);
+        $id = $product->get_id();
+
+        $this->act('trash', [$id]);
+        $this->assertSame(['field' => 'status', 'old_value' => 'publish', 'new_value' => 'trash', 'status' => 'ok'], $seen['trashed_post'][$id]);
+
+        $this->act('delete', [$id]);
+        $this->assertSame(['field' => 'status', 'old_value' => 'trash', 'new_value' => null, 'status' => 'ok'], $seen['deleted_post'][$id] ?? null, 'the delete row');
+
+        $this->act('publish', [$draft->get_id()]);
+        $this->assertSame('publish', $seen['transition:publish'][$draft->get_id()]['new_value']);
+
+        // One row per id and change, as before.
+        $rows = $this->rows();
+        $this->assertSame([[$id, 'trash', 'publish', 'trash'], [$id, 'delete', 'trash', null], [$draft->get_id(), 'publish', 'draft', 'publish']], array_map(static fn (array $row): array => [(int) $row['object_id'], $row['action'], $row['old_value'], $row['new_value']], $rows));
+        $this->assertSame(['ok', 'ok', 'ok'], array_column($rows, 'status'));
+    }
+
+    /**
+     * A restore that a site filter sends to another status is corrected by
+     * the handler (two transitions): the early row ends as the handler's
+     * row, where the product really ended. A handler that dies after the
+     * change keeps the change's row next to its error row.
+     */
+    public function test_the_early_row_ends_as_the_handlers_row(): void
+    {
+        $product = $this->simpleProduct();
+        $id = $product->get_id();
+        $this->act('trash', [$id]);
+
+        $pending = static fn (): string => 'pending';
+        add_filter('wp_untrash_post_status', $pending, 99);
+        $this->act('restore', [$id]);
+        remove_filter('wp_untrash_post_status', $pending, 99);
+
+        $this->assertSame('publish', get_post_status($id));
+        $rows = $this->rows();
+        $this->assertSame([['trash', 'publish', 'trash'], ['restore', 'trash', 'publish']], array_map(static fn (array $row): array => [$row['action'], $row['old_value'], $row['new_value']], $rows));
+
+        $die = static function (): void {
+            throw new \RuntimeException('died after the trash');
+        };
+        add_action('trashed_post', $die);
+        $data = $this->act('trash', [$id]);
+        remove_action('trashed_post', $die);
+
+        $this->assertSame('trash', get_post_status($id));
+        $this->assertFalse($data['results'][0]['ok']);
+        $rows = array_slice($this->rows(), 2);
+        $this->assertSame([['status', 'publish', 'trash', 'ok'], ['', null, null, 'error']], array_map(static fn (array $row): array => [$row['field'], $row['old_value'], $row['new_value'], $row['status']], $rows));
+    }
+
     public function test_variation_actions_leave_no_marker_behind(): void
     {
         $parent = $this->variableProduct(['38', '39']);

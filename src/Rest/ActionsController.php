@@ -25,7 +25,10 @@ use WP_REST_Response;
  * cache without a reload. Each id's rows are written as soon as it is
  * done, and each variable parent is synced as soon as its last variation
  * in the request is (listed on the batch marker until then), so a request
- * killed part-way loses neither (docs/contracts.md §3.6).
+ * killed part-way loses neither (docs/contracts.md §3.6). A status change
+ * (trash, restore, publish, draft) or a delete is logged from its own
+ * hook (`EarlyRow`): the row is in the table before WordPress and
+ * WooCommerce run the rest of their hooks for it.
  */
 final class ActionsController
 {
@@ -381,13 +384,21 @@ final class ActionsController
             return $fail('forbidden', __('You are not allowed to do this to this product.', 'wp-woocommerce-products-list'));
         }
 
+        // The row of a status change or delete is written by the change's
+        // own hook, before the rest of the save runs (§3.6).
+        $early = new EarlyRow($id, $product->get_status(), $base);
+        $early->watch();
+
         try {
             $data = $action->run($product, $args, $request);
         } catch (Throwable $e) {
             return $fail('exception', $e->getMessage());
+        } finally {
+            $early->unwatch();
         }
 
         if (is_wp_error($data)) {
+            // A change the handler made before failing keeps its early row.
             return $fail((string) $data->get_error_code(), $data->get_error_message());
         }
 
@@ -413,7 +424,13 @@ final class ActionsController
             ];
         }
 
-        if ($rows === []) {
+        // The early row becomes the handler's own row of the field (a
+        // restore whose status a site filter changed is corrected twice;
+        // the row says where it ended). Without one, the early row stays:
+        // the change happened.
+        $rows = $early->finalise($rows);
+
+        if ($rows === [] && ! $early->written()) {
             // Nothing to change (it already had the value): a `skipped` row,
             // so History counts it apart from the changes and a revert of
             // the batch leaves it out without calling it a failure.
@@ -424,7 +441,7 @@ final class ActionsController
         // How many fields the handler changed on this id: the app's notice
         // says "2 items updated, 1 unchanged" and offers Undo only when
         // something was written (a no-op logs a row without a field).
-        $result = ['id' => $id, 'ok' => true, 'changed' => count($changes)];
+        $result = ['id' => $id, 'ok' => true, 'changed' => max(count($changes), $early->written() ? 1 : 0)];
 
         if ($data !== []) {
             $result['data'] = $data;

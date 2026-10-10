@@ -134,6 +134,7 @@ Further reading:
 
 - Speed under concurrency: with several editors saving at once the list request and 100-row saves exceeded the budgets in an earlier audit round. A foreground tab was measured in 0.2.1 (a 1,731-row background save: long tasks p50 65 ms, max 102 ms, 2.2 s of long tasks over 35 s), but CI timing gates are still missing.
 - An editor tab the user leaves open holds core's post lock and blocks their own list saves and row actions (other than Duplicate) for that product until it is closed. If that lock expires (heartbeat stopped after an hour idle, laptop asleep), a later Update in the old editor tab overwrites a list save without a log row.
+- A row action killed by the server (php-fpm timeout, OOM, SIGKILL) inside `wp_update_post()` between its UPDATE and `transition_post_status`, or inside `wp_delete_post()` between its DELETE and `deleted_post`, leaves that one change without a History row; `featured` and `duplicate` are logged only once their handler returns.
 - A description with a shortcode is loaded raw for editing; only a client that still sends the rendered form as the expected value can get a false conflict.
 - `both` / `revisions` History modes are a proof of concept: about 2x save time and +200-330 MB of postmeta per full-catalogue campaign; `revisions` has no History screen (undo is CLI only).
 - No row virtualisation: Expand all on a 100-per-page view expands as many parents as fit in about 600 rows, and rendering that takes several seconds; selecting or collapsing at that size blocks the tab noticeably.
