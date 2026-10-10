@@ -31,6 +31,13 @@ export const SCHEDULE_SALE_FIELD_ID = 'schedule_sale';
  */
 export const STOCK_DELTA_KEY = 'inventory_delta';
 
+/**
+ * The core sale date keys. WooCommerce's products and variations
+ * controllers only read them when `isset()`, so a JSON `null` is skipped and
+ * the stored date stays; an empty string is what clears them.
+ */
+const CORE_SALE_DATE_KEYS: ReadonlySet< string > = new Set( [ 'date_on_sale_from', 'date_on_sale_to' ] );
+
 const ZONED_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /**
@@ -89,8 +96,11 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 				const from = byId.get( `${ prefix }date_on_sale_from` );
 				const to = byId.get( `${ prefix }date_on_sale_to` );
 
-				payload = mergeFragments( payload, from?.rest?.write ? from.rest.write( null, item ) : { [ `${ prefix }date_on_sale_from` ]: null } );
-				payload = mergeFragments( payload, to?.rest?.write ? to.rest.write( null, item ) : { [ `${ prefix }date_on_sale_to` ]: null } );
+				// A core key clears with '' (WooCommerce skips a null one); other prefixes keep null.
+				const cleared = prefix === '' ? '' : null;
+
+				payload = mergeFragments( payload, from?.rest?.write ? from.rest.write( null, item ) : { [ `${ prefix }date_on_sale_from` ]: cleared } );
+				payload = mergeFragments( payload, to?.rest?.write ? to.rest.write( null, item ) : { [ `${ prefix }date_on_sale_to` ]: cleared } );
 			}
 
 			continue;
@@ -116,6 +126,11 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 
 		if ( numericKindOf( field ) === 'integer' && typeof next === 'string' ) {
 			next = next === '' ? null : Number( next );
+		}
+
+		// A cleared core sale date goes as '' (WooCommerce skips a null one and keeps the stored date).
+		if ( next === null && ! field.rest?.write && CORE_SALE_DATE_KEYS.has( id ) ) {
+			next = '';
 		}
 
 		const delta = stockDeltaOf( field, item, own[ id ], next );

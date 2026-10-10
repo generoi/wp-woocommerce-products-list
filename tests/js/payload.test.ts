@@ -29,12 +29,14 @@ describe( 'buildPayload', () => {
 		expect( toSiteDateTime( '2026-06-30T21:00:00.000Z', 'date' ) ).toBe( '2026-07-01' );
 	} );
 
-	it( 'leaves site-local dates alone, clears with null and skips an unchanged date', () => {
+	it( 'leaves site-local dates alone, clears with an empty string (WooCommerce skips null) and skips an unchanged date', () => {
 		const item = simple( 1, { date_on_sale_from: '2026-11-01T00:00:00', date_on_sale_to: null } );
 
 		expect( buildPayload( item, { date_on_sale_from: '2026-10-31T22:00:00.000Z' }, fields, settings ) ).toEqual( {} );
 		expect( buildPayload( item, { date_on_sale_from: '2026-11-02T00:00:00' }, fields, settings ) ).toEqual( { date_on_sale_from: '2026-11-02T00:00:00' } );
-		expect( buildPayload( item, { date_on_sale_from: '' }, fields, settings ) ).toEqual( { date_on_sale_from: null } );
+		expect( buildPayload( item, { date_on_sale_from: '' }, fields, settings ) ).toEqual( { date_on_sale_from: '' } );
+		// Clearing a date that is already empty sends nothing.
+		expect( buildPayload( item, { date_on_sale_to: '' }, fields, settings ) ).toEqual( {} );
 		expect( toSiteDateTime( null ) ).toBeNull();
 		expect( toSiteDateTime( 'not a date' ) ).toBe( 'not a date' );
 	} );
@@ -113,7 +115,7 @@ describe( 'buildPayload', () => {
 	it( 'turning the sale schedule off clears both dates; on sends only the dates given', () => {
 		const item = simple( 1, { date_on_sale_from: '2026-10-01T00:00:00', date_on_sale_to: '2026-10-31T00:00:00' } );
 
-		expect( buildPayload( item, { schedule_sale: false }, fields, settings ) ).toEqual( { date_on_sale_from: null, date_on_sale_to: null } );
+		expect( buildPayload( item, { schedule_sale: false }, fields, settings ) ).toEqual( { date_on_sale_from: '', date_on_sale_to: '' } );
 		expect( buildPayload( item, { schedule_sale: true }, fields, settings ) ).toEqual( {} );
 		expect( buildPayload( item, { schedule_sale: true, date_on_sale_to: '2026-11-30T00:00:00' }, fields, settings ) ).toEqual( { date_on_sale_to: '2026-11-30T00:00:00' } );
 	} );
