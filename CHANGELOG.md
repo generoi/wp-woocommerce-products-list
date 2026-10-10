@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.11 - 2026-10-11
+
+Fixes for the closeout pass 4 errors on 0.3.10.
+
+- A variation whose parent is permanently deleted while a bulk save writes it is left out as "deleted meanwhile", not reported as "You are not allowed to edit this item.". WordPress refuses `edit_post` for a post it no longer finds, so wc/v3 answered `woocommerce_rest_cannot_edit` for a variation deleted between its load and the permission check; such a refusal of a row that no longer exists is now the deleted-meanwhile refusal (`wc_products_list_deleted`, logged as skipped). History no longer counts these rows as failed, and the editor offers no retry for them.
+- The Prices (SEK) note of a variable product on a language tab no longer shows the shop-currency price range ("Regular price now 169,00 €") after the General tab was opened and left: the note followed the tab it was first built on.
+
 ## 0.3.10 - 2026-10-11
 
 Fixes for the three errors left after the third closeout verification on 0.3.9.

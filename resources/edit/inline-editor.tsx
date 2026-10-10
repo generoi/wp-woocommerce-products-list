@@ -2847,9 +2847,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				setAcknowledged( null );
 			},
 		} ),
-		// The note is rebuilt every render; what it shows follows these.
+		// The note is rebuilt every render; what it shows follows these (the tab too: a market-currency tab leaves out the
+		// shop-currency price range).
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk, failedIds, retryTargets, plan, plannedEdits, editFields ]
+		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk, failedIds, retryTargets, plan, plannedEdits, editFields, tab.id, settings ]
 	);
 
 	// wc/v3's batch routes need edit_others_products (woocommerce_rest_cannot_batch);

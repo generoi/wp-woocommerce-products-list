@@ -265,6 +265,7 @@ final class Saves
         }
 
         if ($request->get_method() !== 'GET' && ListMode::active()) {
+            $response = self::deletedRefusals($response, $request);
             $response = self::nameSkuOwners($response, $request);
         }
 
@@ -354,6 +355,72 @@ final class Saves
                 $data['update'][$index]['error']['message'] = $message;
                 $changed = true;
             }
+        }
+
+        if (! $changed) {
+            return $response;
+        }
+
+        if ($isResponse) {
+            $response->set_data($data);
+
+            return $response;
+        }
+
+        return $data;
+    }
+
+    /**
+     * A batch item wc/v3 refused as not editable because its post was
+     * deleted while the batch ran: a parent deleted permanently deletes
+     * its variations one by one, and a variation loaded just before its
+     * row went fails `edit_post` (core's map_meta_cap denies a post it no
+     * longer finds), so wc/v3 answers `woocommerce_rest_cannot_edit`. The
+     * item is the deleted-meanwhile refusal (`wc_products_list_deleted`,
+     * logged as skipped), like its siblings the guard or wc/v3 found gone,
+     * not a permission failure. A refusal of a row that is still there
+     * stays as it is.
+     *
+     * @param  mixed  $response  a WP_Error, a WP_REST_Response or a batch handler's plain array
+     * @return mixed
+     */
+    public static function deletedRefusals($response, WP_REST_Request $request)
+    {
+        if (is_wp_error($response) || ! Recorder::writesProducts($request->get_route())) {
+            return $response;
+        }
+
+        $isResponse = $response instanceof \WP_REST_Response;
+        $data = $isResponse ? $response->get_data() : $response;
+
+        if (! is_array($data) || ! is_array($data['update'] ?? null)) {
+            return $response;
+        }
+
+        $changed = false;
+
+        foreach ($data['update'] as $index => $item) {
+            $code = is_array($item) && is_array($item['error'] ?? null) ? (string) ($item['error']['code'] ?? '') : '';
+            $id = is_array($item) ? (int) ($item['id'] ?? 0) : 0;
+
+            if ($code === '' || $id <= 0 || ! Recorder::isRefusal($code, $item['error']['data'] ?? null)) {
+                continue;
+            }
+
+            // Another request deleted it: read the row, not this request's cache.
+            clean_post_cache($id);
+
+            if (get_post($id) !== null) {
+                continue;
+            }
+
+            $error = Concurrency::deletedError($id);
+            $data['update'][$index]['error'] = [
+                'code' => $error->get_error_code(),
+                'message' => $error->get_error_message(),
+                'data' => $error->get_error_data(),
+            ];
+            $changed = true;
         }
 
         if (! $changed) {

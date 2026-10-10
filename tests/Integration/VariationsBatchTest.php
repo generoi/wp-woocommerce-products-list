@@ -134,6 +134,64 @@ class VariationsBatchTest extends RestTestCase
         $this->assertSame([], array_values(array_filter($this->rows(), static fn (array $row): bool => $row['status'] === 'error')));
     }
 
+    /**
+     * A parent deleted permanently while the batch runs deletes its
+     * variations one by one: one loaded just before its row went fails
+     * core's `edit_post` (no post), and wc/v3 answers
+     * `woocommerce_rest_cannot_edit`. That is the deleted-meanwhile
+     * refusal, logged as left out, not "not allowed" (and not a failure).
+     */
+    public function test_a_variation_deleted_between_load_and_permission_check_is_deleted_meanwhile(): void
+    {
+        $a = $this->variableProduct(['38', '39']);
+        [$a38, $a39] = $a->get_children();
+
+        // The other request's delete lands between wc/v3's load of the variation and its permission check.
+        add_filter('woocommerce_rest_check_permissions', static function ($permission, $context, $objectId) use ($a39) {
+            if ($context === 'edit' && (int) $objectId === $a39 && get_post($a39) !== null) {
+                wp_delete_post($a39, true);
+
+                return current_user_can('edit_post', $a39);
+            }
+
+            return $permission;
+        }, 10, 3);
+
+        $response = $this->request('POST', '/wc-products-list/v1/variations/batch', [
+            'update' => [
+                ['id' => $a38, 'sale_price' => '5', 'parent_id' => $a->get_id()],
+                ['id' => $a39, 'sale_price' => '5', 'parent_id' => $a->get_id()],
+            ],
+        ], [Logger::SOURCE_HEADER => 'bulk']);
+        $this->assertStatus(200, $response);
+        $update = $this->data($response)['update'];
+        $this->assertSame('5', $update[0]['sale_price']);
+        $this->assertSame('wc_products_list_deleted', $update[1]['error']['code']);
+
+        $rows = array_values(array_filter($this->rows(), static fn (array $row): bool => (int) $row['object_id'] === $a39));
+        $this->assertCount(1, $rows);
+        $this->assertSame('skipped', $rows[0]['status']);
+        $this->assertSame('variation', $rows[0]['object_type']);
+        $this->assertSame($a->get_id(), (int) $rows[0]['parent_id']);
+        $this->assertSame('deleted', json_decode((string) $rows[0]['context'], true)['reason'] ?? null);
+        $this->assertSame([], array_values(array_filter($this->rows(), static fn (array $row): bool => $row['status'] === 'error')));
+    }
+
+    /** A refusal of a variation that is still there stays a refusal. */
+    public function test_a_refused_variation_that_still_exists_stays_refused(): void
+    {
+        $a = $this->variableProduct(['38']);
+        [$a38] = $a->get_children();
+
+        add_filter('woocommerce_rest_check_permissions', static fn ($permission, $context, $objectId) => $context === 'edit' && (int) $objectId === $a38 ? false : $permission, 10, 3);
+
+        $response = $this->request('POST', '/wc-products-list/v1/variations/batch', [
+            'update' => [['id' => $a38, 'sale_price' => '5']],
+        ], [Logger::SOURCE_HEADER => 'bulk']);
+        $this->assertStatus(200, $response);
+        $this->assertSame('woocommerce_rest_cannot_edit', $this->data($response)['update'][0]['error']['code']);
+    }
+
     public function test_limits_and_permissions(): void
     {
         $parent = $this->variableProduct(['38']);
