@@ -132,7 +132,11 @@ Further reading:
 
 ## Known gaps
 
-- Speed under concurrency: with several editors saving at once the list request and 100-row saves exceeded the budgets in the last audit round. Client timings have only been measured in background tabs. A foreground, idle-host re-measure and CI timing gates are the next step.
+- Speed under concurrency: with several editors saving at once the list request and 100-row saves exceeded the budgets in an earlier audit round. A foreground tab was measured in 0.2.1 (a 1,731-row background save: long tasks p50 65 ms, max 102 ms, 2.2 s of long tasks over 35 s), but CI timing gates are still missing.
+- Clash prevention (docs/contracts.md §3.6): gds-woo-i18n's attribute-term translation route (`PUT /gds-woo-i18n/v1/terms/{id}`) takes no lock, no expected value and writes no log row, so two users translating the same term overwrite each other. It is the one unchecked write path the list offers.
+- An editor tab the user leaves open holds core's post lock and blocks their own list saves and row actions (other than Duplicate) for that product until it is closed. If that lock expires (heartbeat stopped after an hour idle, laptop asleep), a later Update in the old editor tab overwrites a list save without a log row.
+- A description with a shortcode is loaded raw for editing; only a client that still sends the rendered form as the expected value can get a false conflict.
+- `both` / `revisions` History modes are a proof of concept: about 2x save time and +200-330 MB of postmeta per full-catalogue campaign; `revisions` has no History screen (undo is CLI only).
 - No row virtualisation: Expand all on a 100-per-page view expands as many parents as fit in about 600 rows, and rendering that takes several seconds; selecting or collapsing at that size blocks the tab noticeably.
 - Only the default view's list request is prefetched; deep links with search or filters wait for the bundle.
 - Per-row variation summaries cost 226–437 ms of a list request on a loaded host, and batch writes compute them once per item.
