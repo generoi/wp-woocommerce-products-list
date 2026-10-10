@@ -379,8 +379,19 @@
 		}
 	}
 
+	// A long text shows its first lines until it is edited (scrolling inside), so a full short description never pushes
+	// Pricing below the fold; while focused it takes the room it needs.
+	.wc-pl-html-editor__visual:not( :focus ) {
+		max-height: 11.2em;
+	}
+
 	.wc-pl-edit__form.is-narrow .dataforms-layouts-card__field {
 		--wp-ui-card-padding: 12px;
+	}
+
+	// A narrow panel (the drawer): tighter tabs, so the languages fit on fewer rows.
+	.wc-pl-edit__tabs.is-narrow [role='tab'] {
+		padding-inline: 6px;
 	}
 
 	// The apply-to-variations control: the first row of Pricing, its note right under the checkbox.
@@ -491,14 +502,20 @@
 	margin-bottom: 8px;
 }
 
+// The time never shrinks below "hh.mm" and its clock icon: in a narrow card it goes under the date instead.
+.wc-pl-date-control__inputs {
+	flex-wrap: wrap;
+}
+
 .wc-pl-date-control__inputs input {
 	min-height: 40px;
-	flex: 1 1 auto;
+	flex: 1 1 9.5em;
 	min-width: 0;
 }
 
 .wc-pl-date-control__inputs input[type="time"] {
-	flex: 0 1 8.5em;
+	flex: 0 0 auto;
+	width: 7.5em;
 }
 
 .wc-pl-edit__notice {
@@ -1021,6 +1038,9 @@ html.wc-pl-panel-resizing {
 html.wc-pl-panel-open .wc-products-list__notices {
 	// Left of the panel: the window less the panel, the admin menu and the gaps.
 	max-width: max( 240px, calc( 100vw - var( --wc-pl-panel-width ) - 208px ) );
+	// A wide panel leaves less than those 240px: the snackbar then reaches over the panel's foot, so it rises above
+	// the Update / Cancel footer (the clamp is 0 while the room left of the panel is enough, 88px once it is not).
+	bottom: calc( 24px + var( --wc-pl-footer-height, 0px ) + clamp( 0px, ( 448px - 100vw + var( --wc-pl-panel-width ) ) * 1000, 88px ) );
 
 	@media ( max-width: 959px ) {
 		left: 16px;

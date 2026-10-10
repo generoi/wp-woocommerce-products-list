@@ -55,6 +55,20 @@ export const SELLABLE_FIELD_IDS: ReadonlySet< string > = new Set( [
 	'cost_of_goods_sold',
 ] );
 
+/**
+ * Fields a variable parent works out from its variations, whatever is written to it: WooCommerce syncs a variable
+ * product's stock status from its variations (or from its own quantity when it manages stock), so a write is
+ * silently undone. Shown for the other rows of a selection, never sent to a variable parent.
+ */
+export const PARENT_DERIVED_FIELD_IDS: ReadonlySet< string > = new Set( [ 'stock_status' ] );
+
+/** Whether a variable parent ignores a write of this field (its variations decide it). */
+export function isParentDerivedField( fieldOrId: ProductField | string ): boolean {
+	const id = typeof fieldOrId === 'string' ? fieldOrId : fieldOrId.id;
+
+	return PARENT_DERIVED_FIELD_IDS.has( id );
+}
+
 /** Fields that cannot be set on many rows at once. */
 export const BULK_UNSUPPORTED_FIELD_IDS: ReadonlySet< string > = new Set( [ 'sku', 'global_unique_id', 'slug' ] );
 
@@ -171,7 +185,9 @@ export function visibleEditFields( fields: ProductField[], items: ProductListIte
 		// A sellable field skips the variable parents (their variations sell) unless they
 		// apply it to their variations: shown when the other rows (selected variations,
 		// simple products) take it, so prices never vanish because a parent is ticked too.
-		const takers = withVariableParents && isSellableField( field ) && ! options.applyToVariations ? rows.filter( ( item ) => ! isVariableParent( item ) ) : rows;
+		// A stock status skips them always: WooCommerce derives a variable product's from its variations.
+		const skipsParents = withVariableParents && ( ( isSellableField( field ) && ! options.applyToVariations ) || isParentDerivedField( field ) );
+		const takers = skipsParents ? rows.filter( ( item ) => ! isVariableParent( item ) ) : rows;
 
 		if ( takers.length === 0 ) {
 			return false;

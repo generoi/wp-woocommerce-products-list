@@ -15,4 +15,11 @@ describe( 'editor tab memory', () => {
 		expect( openingTab( undefined ) ).toBe( 'i18n:en' );
 		expect( openingTab( undefined ) ).toBe( 'i18n:se' );
 	} );
+
+	it( 'opens a bulk edit on General (or the filter\'s language) and leaves the quick edits\' tab alone', () => {
+		rememberTab( 'i18n:se' );
+		expect( openingTab( undefined, 'bulk' ) ).toBe( 'general' );
+		expect( openingTab( 'i18n:de', 'bulk' ) ).toBe( 'i18n:de' );
+		expect( openingTab( undefined ) ).toBe( 'i18n:se' );
+	} );
 } );

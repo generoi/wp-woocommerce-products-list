@@ -105,3 +105,14 @@ describe( 'resolveSaveTargetsWith, a retry', () => {
 		expect( again[ 0 ]?.edits ).toHaveProperty( 'stock_quantity' );
 	} );
 } );
+
+describe( 'resolveSaveTargetsWith, a stock status', () => {
+	it( 'never reaches a variable product (WooCommerce derives it from the variations) and still reaches the other rows', () => {
+		const targets = resolveSaveTargetsWith( [ variable( 3 ), simple( 4 ) ], { stock_status: 'outofstock', status: 'draft' }, fields, { applyToVariations: false } );
+
+		expect( targets.map( ( t ) => [ t.item.id, t.edits ] ) ).toEqual( [
+			[ 3, { status: 'draft' } ],
+			[ 4, { stock_status: 'outofstock', status: 'draft' } ],
+		] );
+	} );
+} );

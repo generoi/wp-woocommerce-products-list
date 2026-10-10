@@ -32,7 +32,7 @@ import { createMixedTextControl } from './mixed-text-control';
 import { createTermTokensControl } from './term-tokens-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { saleDateProblem } from './sale-schedule';
-import { leafOf } from './visibility';
+import { isParentDerivedField, isSellableField, leafOf } from './visibility';
 
 export type { FormData } from './bulk-numeric-control';
 
@@ -47,6 +47,11 @@ export interface FormFieldOptions {
 	pending?: ReadonlySet< string >;
 	/** The labels the form shows, by field id, where they differ from the field's (formLabelOf in form-layouts.ts). */
 	labels?: Record< string, string >;
+	/**
+	 * A quick edit of a variable product setting the price of all its variations: the price fields take the bulk
+	 * operations (change to, regular price minus 20 %…), since its variations' prices can differ.
+	 */
+	sellableOps?: boolean;
 }
 
 /** Variations are Active (publish) or Inactive (private): the list's vocabulary, and what the Enable/Disable actions write. */
@@ -133,17 +138,18 @@ function integerMessage( value: unknown ): string | null {
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
-	const { bulk, items, base, mixed, settings, pending, labels } = options;
+	const { bulk, items, base, mixed, settings, pending, labels, sellableOps = false } = options;
 	const ids = new Set( fields.map( ( field ) => field.id ) );
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
 	const onlyVariableParents = rows.length > 0 && rows.every( isVariableParent );
+	const someVariableParents = rows.some( isVariableParent );
 
 	return fields.map( ( field ) => {
 		const state = mixed[ field.id ];
 		const isMixed = state?.isMixed === true;
 		const reference = mergeReference( items, field );
-		const kind = bulk ? numericKindOf( field ) : null;
+		const kind = bulk || ( sellableOps && isSellableField( field ) ) ? numericKindOf( field ) : null;
 		const scheduleId = scheduleIdFor( field.id );
 		const leaf = leafOf( field.id );
 
@@ -242,6 +248,20 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		// A variable product's own stock is the whole product's; restocking sizes happens on the variations.
 		if ( onlyVariableParents && field.id === 'manage_stock' ) {
 			formField.description ??= __( 'Stock for the product as a whole. Each variation (a size, a colour) can keep its own stock.', 'wp-woocommerce-products-list' );
+		}
+
+		// WooCommerce works the stock status out from the quantity of a row that manages stock, and a variable product's from
+		// its variations: the edit skips those rows (row-rules.ts, visibility.ts). One row managing stock: the status is not offered.
+		if ( isParentDerivedField( field ) ) {
+			if ( ! bulk && field.id === leaf && ids.has( 'manage_stock' ) ) {
+				formField.isVisible = ( data ) => data.manage_stock !== true;
+			}
+
+			if ( bulk && someVariableParents ) {
+				formField.description ??= __( 'Skipped for variable products (their variations decide it) and for items that manage stock (their quantity decides it).', 'wp-woocommerce-products-list' );
+			} else if ( bulk ) {
+				formField.description ??= __( 'Skipped for items that manage stock: their quantity decides it.', 'wp-woocommerce-products-list' );
+			}
 		}
 
 		// A variation without a class of its own ships like its parent; the product-level "No shipping class" is not a choice here.

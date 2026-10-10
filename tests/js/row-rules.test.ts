@@ -136,3 +136,12 @@ describe( 'schedule sale without dates', () => {
 		expect( validateBulkNumericEdits( [ variation( 12, 1, { regular_price: '100', sale_price: '50', date_on_sale_to: '2026-12-01T00:00:00' } ) ], { schedule_sale: true }, fields, settings ) ).toEqual( [] );
 	} );
 } );
+
+describe( 'resolveRowEdits, a stock status', () => {
+	it( 'is not sent to a row that manages stock (WooCommerce sets it from the quantity), and is to one that does not', () => {
+		expect( resolveRowEdits( simple( 1, { manage_stock: true, stock_quantity: 9 } ), { stock_status: 'outofstock', status: 'draft' } ) ).toEqual( { status: 'draft' } );
+		expect( resolveRowEdits( simple( 2, { manage_stock: false } ), { stock_status: 'outofstock' } ) ).toEqual( { stock_status: 'outofstock' } );
+		// Turning stock management off in the same edit lets the status through.
+		expect( resolveRowEdits( simple( 3, { manage_stock: true } ), { stock_status: 'outofstock', manage_stock: false } ) ).toEqual( { stock_status: 'outofstock', manage_stock: false } );
+	} );
+} );

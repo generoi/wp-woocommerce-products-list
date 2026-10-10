@@ -9,7 +9,7 @@ import type { ProductField, ProductListItem } from '../../resources/types';
 import { createSalePriceField } from '../../resources/fields/sale-price';
 import { createStockQuantityField } from '../../resources/fields/stock-quantity';
 import { createStockStatusField } from '../../resources/fields/stock-status';
-import { coreFields, editSettings, field, simple } from './edit-fixtures';
+import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
 
 const i18nName = field( 'i18n:se.name', { rest: { fields: [ 'i18n.se.name' ], applies: { product: true, variation: false } } } );
 const fields: ProductField[] = [ ...coreFields(), i18nName ];
@@ -199,5 +199,21 @@ describe( 'changedSinceShown', () => {
 
 		expect( changedSinceShown( [ price ], [ row( 1, {} ) ], first, new ShownValues(), new Map(), () => false ) ).toEqual( [] );
 		expect( first.size ).toBe( 0 );
+	} );
+} );
+
+describe( 'changedSinceShown, a variation\'s tax class', () => {
+	it( 'reads the stored "parent" and the parent\'s class the list showed as the same setting, not as a change by someone else', () => {
+		const taxClass = field( 'tax_class', { rest: { fields: [ 'tax_class' ], applies: { product: true, variation: true } } } );
+		const first = new Map< string, string >();
+		const listed = variation( 7, 1, { tax_class: '' } );
+
+		expect( changedSinceShown( [ taxClass ], [ listed ], first, new ShownValues(), new Map(), () => true ) ).toEqual( [] );
+		expect( changedSinceShown( [ taxClass ], [ { ...listed, tax_class: 'parent' } ], first, new ShownValues(), new Map(), () => true ) ).toEqual( [] );
+		// Shown as a class of its own, then another one: a change.
+		const own = new Map< string, string >();
+
+		changedSinceShown( [ taxClass ], [ { ...listed, tax_class: 'zero-rate' } ], own, new ShownValues(), new Map(), () => true );
+		expect( changedSinceShown( [ taxClass ], [ { ...listed, tax_class: 'reduced-rate' } ], own, new ShownValues(), new Map(), () => true ) ).toEqual( [ { id: 'tax_class', now: 'reduced-rate', edited: false } ] );
 	} );
 } );

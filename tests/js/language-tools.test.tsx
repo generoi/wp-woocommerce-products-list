@@ -112,7 +112,7 @@ describe( 'language tools', () => {
 
 		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ), variation( 41, 1 ) ] } settings={ settings } run={ run } onDone={ onDone } /> );
 
-		fireEvent.click( screen.getByText( 'Svenska tools: Copy translations' ) );
+		fireEvent.click( screen.getByText( /^Svenska tools \(/ ) );
 		expect( screen.queryByLabelText( 'Regular price' ) ).not.toBeInTheDocument();
 		fireEvent.click( screen.getByLabelText( 'Name' ) );
 		fireEvent.click( screen.getByRole( 'button', { name: 'Copy translations: Svenska, apply now to 2 items…' } ) );
@@ -143,7 +143,7 @@ describe( 'language tools', () => {
 		const run = vi.fn( async () => undefined );
 
 		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ) ] } settings={ tools } run={ run } onDone={ vi.fn() } /> );
-		fireEvent.click( screen.getByText( /^Svenska tools: / ) );
+		fireEvent.click( screen.getByText( /^Svenska tools \(/ ) );
 
 		// Find & replace (the default operation): its two inputs, not the prefix one.
 		expect( screen.getByLabelText( 'Find (find & replace)' ) ).toHaveAttribute( 'type', 'text' );
@@ -256,7 +256,7 @@ describe( 'language tools', () => {
 		const tools = editSettings( { actions: [ transformAction() ], languages: settings.languages } );
 
 		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ simple( 1 ) ] } settings={ tools } run={ async () => undefined } onDone={ vi.fn() } onDirtyChange={ onDirtyChange } /> );
-		fireEvent.click( screen.getByText( /^Svenska tools: / ) );
+		fireEvent.click( screen.getByText( /^Svenska tools \(/ ) );
 		fireEvent.change( screen.getByLabelText( 'Find (find & replace)' ), { target: { value: 'x' } } );
 		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
 

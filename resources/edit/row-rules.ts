@@ -6,6 +6,8 @@
  *   backorders on rows that manage stock (the REST controllers reset them
  *   otherwise), so those edits are dropped for rows that do not, unless the
  *   save also turns stock management on;
+ * - WooCommerce works the stock status of a row that manages stock out
+ *   from its quantity, so a status edit is dropped for such a row;
  * - a campaign may skip the rows that already run a sale, so an open-ended
  *   discount is not silently replaced by a scheduled one.
  *
@@ -158,6 +160,12 @@ export function resolveRowEdits( item: ProductListItem, edits: Record< string, u
 		} else if ( options.enableManageStock && ! managesStock( item ) && result.manage_stock === undefined && canEnableStock( item ) ) {
 			result = { ...result, manage_stock: true };
 		}
+	}
+
+	// WooCommerce sets the stock status of a row that manages stock from its quantity (and backorders): a status written
+	// alongside is silently replaced, so it is not sent (the form says so).
+	if ( result.stock_status !== undefined && willManageStock( item, result, options ) ) {
+		result = omit( result, ( id ) => id === 'stock_status' );
 	}
 
 	if ( options.skipExistingSales && hasSale( item ) && hasSaleEdit( result ) ) {

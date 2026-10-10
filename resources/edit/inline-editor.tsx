@@ -57,7 +57,7 @@ import { editorConflictMessage, fieldOfErrorCode, isConflictCode, isGoneCode, is
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
 import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
 import type { StagedTool } from './language-tools';
-import { editTypeOf, isVariableParent, isVariation } from './field-value';
+import { editTypeOf, isVariableParent, isVariation, parentIdOf } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
 import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, buildTabs, fieldsOfTab, formLabelOf, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
 import { ApplyControlContext, applyControlField } from './apply-control';
@@ -103,11 +103,13 @@ const PANEL_ID = 'wc-pl-edit-panel';
 export const SAVED_NOTICE_ID = 'wc-pl-saved';
 
 /**
- * The tab the editor opens on is remembered: switching to another product,
- * opening bulk edit or reloading the page keeps the last tab the user was on
- * (fixing Swedish names product after product stays on Svenska). A list
- * filtered on a translation ("Missing in Svenska") still opens on that
- * language. "Update & next" hands its tab over explicitly as well.
+ * The tab a quick edit opens on is remembered: switching to another product
+ * or reloading the page keeps the last tab the user was on (fixing Swedish
+ * names product after product stays on Svenska). A bulk edit opens on
+ * General (prices, stock, categories: what a bulk edit is for) and leaves
+ * the quick edits' tab alone. A list filtered on a translation ("Missing in
+ * Svenska") still opens on that language. "Update & next" hands its tab
+ * over explicitly as well.
  */
 const REMEMBERED_TAB_KEY = 'wcProductsList.editorTab';
 
@@ -141,19 +143,27 @@ export function carryTabToNext( tab: string ): void {
 
 /**
  * The tab a new editor opens on: the filter's language, else the tab carried
- * by "Update & next", else the last tab used, else General. A remembered tab
- * the editor does not have (an extension tab) falls back to the first tab.
+ * by "Update & next", else (quick edit) the last tab used, else General. A
+ * remembered tab the editor does not have (an extension tab) falls back to
+ * the first tab.
  */
-export function openingTab( initialTab: string | undefined | null ): string {
+export function openingTab( initialTab: string | undefined | null, mode: 'quick' | 'bulk' = 'quick' ): string {
 	const carried = carriedTab;
 
 	carriedTab = null;
+
+	if ( mode === 'bulk' ) {
+		return initialTab ?? GENERAL_TAB_ID;
+	}
 
 	return initialTab ?? carried ?? readRememberedTab() ?? GENERAL_TAB_ID;
 }
 
 /** How many item names a notice lists before "and N more". */
 const NAMES_SHOWN = 5;
+
+/** Up to how many selected items the bulk editor's list starts open. */
+export const ITEMS_OPEN_MAX = 5;
 
 /** How many rows the bulk editor's list names before "and N more". */
 export const ITEMS_LISTED = 200;
@@ -468,6 +478,41 @@ function kindLabel( item: ProductListItem, types: Array< { value: string; label:
 }
 
 /**
+ * What the variations a price edit reaches cost now: "Regular price now
+ * 119,00 €–139,00 €; 5 are on sale." (empty when none has a price), so a
+ * campaign on all of a product's variations starts from their prices.
+ */
+export function variationPriceRange( rows: ProductListItem[], settings: Settings, now: number = Date.now() ): string {
+	const regular = rows
+		.filter( ( row ) => ! row._placeholder )
+		.map( ( row ) => parseNumeric( ( row as { regular_price?: unknown } ).regular_price, settings ) )
+		.filter( ( value ): value is number => value !== undefined );
+
+	if ( regular.length === 0 ) {
+		return '';
+	}
+
+	const low = Math.min( ...regular );
+	const high = Math.max( ...regular );
+	/* translators: 1: lowest price, 2: highest price */
+	const span = low === high ? formatPrice( low, settings ) : sprintf( __( '%1$s–%2$s', 'wp-woocommerce-products-list' ), formatPrice( low, settings ), formatPrice( high, settings ) );
+	const onSale = rows.filter( ( row ) => ! row._placeholder && saleIsActive( row, now ) ).length;
+
+	return onSale
+		? sprintf(
+				/* translators: 1: a price or a price range, 2: number of variations on sale now */
+				_n( 'Regular price now %1$s; %2$d is on sale.', 'Regular price now %1$s; %2$d are on sale.', onSale, 'wp-woocommerce-products-list' ),
+				span,
+				onSale
+		  )
+		: sprintf(
+				/* translators: %s: a price or a price range */
+				__( 'Regular price now %s.', 'wp-woocommerce-products-list' ),
+				span
+		  );
+}
+
+/**
  * The sales a bulk edit would end right now: how many rows are on sale at
  * this moment, the lowest price they sell at, and when the new sale starts.
  * A sale scheduled for later still replaces the running one on save (a
@@ -524,16 +569,19 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const liveRows = useMemo( () => hostItems.filter( ( item ) => ! item._placeholder ), [ hostItems ] );
 	const [ frozenRows, setFrozenRows ] = useState< ProductListItem[] | null >( null );
 	// Bulk: the list of selected items is a collapsible section at the top of the panel's body.
-	const [ itemsOpen, setItemsOpen ] = useState( true );
+	// Open for a few items; a long list (all the variations of a product) would push the form below the fold.
+	const [ itemsOpen, setItemsOpen ] = useState( () => liveRows.length <= ITEMS_OPEN_MAX );
 	const selectedRows = frozenRows ?? liveRows;
 	const selectionKey = selectedRows.map( ( item ) => item.id ).join( ',' );
 	// The tab the editor opens on: the list's translation filter, else the one "Update & next" carried over, else the last one used, else General.
-	const [ tabId, setTabId ] = useState( () => openingTab( initialTab ) );
+	const [ tabId, setTabId ] = useState( () => openingTab( initialTab, mode ) );
 
-	// Remember the open tab for the next editor (another product, bulk edit, a reload).
+	// Remember the open tab for the next quick edit (another product, a reload).
 	useEffect( () => {
-		rememberTab( tabId );
-	}, [ tabId ] );
+		if ( ! bulk ) {
+			rememberTab( tabId );
+		}
+	}, [ tabId, bulk ] );
 	// The same rows reloaded with the editable fields of the open tabs (the list only carries the visible columns), by id.
 	const [ hydrated, setHydrated ] = useState< ReadonlyMap< number, ProductListItem > >( () => new Map() );
 	const [ loaded, setLoaded ] = useState( false );
@@ -759,6 +807,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		[ enableManageStock, skipExistingSales, onlyLowerSale, editFields, settings ]
 	);
 	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
+	// A quick edit setting the price of all of a variable product's variations is a campaign on those variations: the
+	// price fields take the bulk operations ("regular price minus 20 %"), and the sale checks of a bulk edit apply.
+	const sellableOps = ! bulk && applyToVariations && variableParents.length > 0;
+	const priceOps = bulk || sellableOps;
 	// The edits belong to this editor: ticking another row into a bulk edit keeps what was typed.
 	const state = useEditState( items, editFields, mode );
 	const editFieldsById = useMemo( () => new Map( editFields.map( ( field ) => [ field.id, field ] ) ), [ editFields ] );
@@ -796,10 +848,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// The labels inside the form ("Stock status"; "Name" on the Svenska tab): what a control is found by.
 	const controlLabels = useMemo( () => Object.fromEntries( editFields.map( ( field ) => [ field.id, formLabelOf( field, settings ) ] ) ), [ editFields, settings ] );
 	const formFields = useMemo(
-		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels } ),
+		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels, sellableOps } ),
 		// state.data changes on every keystroke; the placeholders only need the merged base, which state.mixed tracks.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels ]
+		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels, sellableOps ]
 	);
 
 	// A tab visited for the first time loads its fields; the rows merge in object by object.
@@ -1055,15 +1107,30 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		  )
 		: __( 'Set the price of all its variations', 'wp-woocommerce-products-list' );
 	const applyField = useMemo( () => applyControlField( applyLabel ), [ applyLabel ] );
+	// A variable product selected together with every one of its variations needs no "apply to its variations": the
+	// price fields reach those variations already, and the box would contradict the selection.
+	const applyOffered = useMemo( () => variableParents.some( ( parent ) => {
+		const total = Number( parent._childCount ) || 0;
+
+		return total === 0 || items.filter( ( item ) => isVariation( item ) && parentIdOf( item ) === parent.id ).length < total;
+	} ), [ variableParents, items ] );
+
+	// Ticked, then the rest of the variations were selected too: the box is gone, and so is what it asked for.
+	useEffect( () => {
+		if ( ! applyOffered && applyToVariations ) {
+			setApplyToVariations( false );
+		}
+	}, [ applyOffered, applyToVariations ] );
+
 	const formLeads = useMemo< Record< string, string[] > | undefined >( () => {
-		if ( variableParents.length === 0 ) {
+		if ( ! applyOffered ) {
 			return undefined;
 		}
 
 		const section = tab.id === GENERAL_TAB_ID ? 'pricing' : tab.id.startsWith( 'i18n:' ) && editFields.some( ( field ) => tabOf( field ) === tab.id && isSellableField( field ) ) ? 'prices' : null;
 
 		return section ? { [ section ]: [ APPLY_TO_VARIATIONS_FIELD_ID ] } : undefined;
-	}, [ variableParents.length, tab.id, editFields ] );
+	}, [ applyOffered, tab.id, editFields ] );
 	const dataFormFields = useMemo( () => ( formLeads ? [ ...formFields, applyField ] : formFields ), [ formLeads, formFields, applyField ] );
 
 	// Collapsed cards open for a field with a pending edit or a problem, and that stays so for this selection: a card
@@ -1225,11 +1292,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// Rows a stock edit would be dropped for, before the "turn on Manage stock" option is applied.
 	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( targetsForValidation, plannedEdits ) : [] ), [ plannedCount, targetsForValidation, plannedEdits ] );
 	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
-	// Rows whose current sale the edits replace (bulk only: quick edit shows the field itself).
-	const existingSales = useMemo( () => ( bulk && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ bulk, plannedCount, targetsForValidation, plannedEdits ] );
+	// Rows whose current sale the edits replace (bulk, or all of a product's variations: a quick edit of one row shows the field itself).
+	const existingSales = useMemo( () => ( priceOps && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ priceOps, plannedCount, targetsForValidation, plannedEdits ] );
 	// Sales running now that the edits would end: the user says replace or skip before anything is written.
 	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
-	const saleChoiceNeeded = bulk && runningSales.count > 0 && saleChoice === null;
+	const saleChoiceNeeded = priceOps && runningSales.count > 0 && saleChoice === null;
 
 	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) ), [ bulk, selectedRows ] );
 
@@ -1703,7 +1770,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// Rows trashed or deleted since the editor loaded them are left out and named, not written in the Trash as if nothing happened.
 			// With a relative price op the same request also brings each row's last-modified stamp: a row saved by someone
 			// else meanwhile would get the op applied to a value it no longer has.
-			const checkBases = runFields && bulk && hasLoadRelativeOps( pendingEdits );
+			const checkBases = runFields && priceOps && hasLoadRelativeOps( pendingEdits );
 			// The rows this Update writes: the field edits' (all, or the failed ones on a retry), and the staged tools' (every row).
 			const checkItems = runFields ? ( stagedCount ? Array.from( new Map( [ ...retryTargets.items, ...items ].map( ( item ) => [ item.id, item ] ) ).values() ) : retryTargets.items ) : items;
 
@@ -2253,7 +2320,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		const modifier = event.metaKey || event.ctrlKey;
 
 		// Bulk: plain Enter in a numeric value box ("-5", "+10%") never saves every selected item; Cmd/Ctrl+Enter or Update does.
-		if ( bulk && ! modifier && event.target instanceof HTMLElement && event.target.closest( '.wc-pl-bulk-numeric' ) ) {
+		if ( priceOps && ! modifier && event.target instanceof HTMLElement && event.target.closest( '.wc-pl-bulk-numeric' ) ) {
 			event.preventDefault();
 
 			return;
@@ -2382,8 +2449,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		if ( variations.status === 'loaded' ) {
+			const range = variationPriceRange( Array.from( variations.byParent.values() ).flat(), settings );
+
 			return (
 				<span className="wc-pl-edit__note">
+					{ range ? `${ range } ` : '' }
 					{ sprintf(
 						/* translators: 1: "N variations", 2: "N variable products" */
 						__( 'Prices will change on %1$s of %2$s.', 'wp-woocommerce-products-list' ),
@@ -2725,7 +2795,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				) : null }
 
 				{ tabs.length > 1 ? (
-					<div className="wc-pl-edit__tabs" role="tablist" aria-label={ __( 'Edit sections', 'wp-woocommerce-products-list' ) } onKeyDown={ onTabKeyDown }>
+					<div className={ `wc-pl-edit__tabs${ formColumns.narrow ? ' is-narrow' : '' }` } role="tablist" aria-label={ __( 'Edit sections', 'wp-woocommerce-products-list' ) } onKeyDown={ onTabKeyDown }>
 						{ tabs.map( ( entry ) => {
 							const selectedTab = entry.id === tab.id;
 
@@ -2897,7 +2967,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</Notice>
 				) : null }
 
-				{ bulk && plannedEdits.sale_price !== undefined && ! loading ? (
+				{ priceOps && plannedEdits.sale_price !== undefined && ! loading ? (
 					<div className="wc-pl-edit__options">
 						<CheckboxControl
 							__nextHasNoMarginBottom
@@ -2914,7 +2984,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</div>
 				) : null }
 
-				{ bulk && plannedCount > 0 && ! loading ? (
+				{ priceOps && plannedCount > 0 && ! loading ? (
 					<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } />
 				) : null }
 

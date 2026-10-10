@@ -20,7 +20,7 @@ import { isVariableParent, readFieldValue } from './field-value';
 import { itemLabel } from './item-label';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { isInvalidDate } from './sale-schedule';
-import { fieldAppliesTo, isSellableField, leafOf } from './visibility';
+import { fieldAppliesTo, isParentDerivedField, isSellableField, leafOf } from './visibility';
 
 export interface ChangeLine {
 	field: string;
@@ -205,7 +205,7 @@ export function describeValue( field: ProductField, value: unknown, settings: Se
 
 /** Does the edit of `field` reach this row? Sellable edits skip variable parents (they go to the variations). */
 function reaches( field: ProductField, item: ProductListItem, applyToVariations: boolean ): boolean {
-	if ( isVariableParent( item ) && isSellableField( field ) ) {
+	if ( isVariableParent( item ) && ( isSellableField( field ) || isParentDerivedField( field ) ) ) {
 		return false;
 	}
 
@@ -406,10 +406,18 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 		<div className="wc-pl-edit__summary-box" aria-live="polite">
 			<strong>
 				{ sprintf(
-					/* translators: 1: number of fields, 2: number of rows */
-					_n( '%1$d field will change on %2$d rows:', '%1$d fields will change on %2$d rows:', lines.length, 'wp-woocommerce-products-list' ),
-					lines.length,
-					rows
+					/* translators: 1: "N fields", 2: "N rows" */
+					__( '%1$s will change on %2$s:', 'wp-woocommerce-products-list' ),
+					sprintf(
+						/* translators: %d: number of fields */
+						_n( '%d field', '%d fields', lines.length, 'wp-woocommerce-products-list' ),
+						lines.length
+					),
+					sprintf(
+						/* translators: %d: number of rows */
+						_n( '%d row', '%d rows', rows, 'wp-woocommerce-products-list' ),
+						rows
+					)
 				) }
 			</strong>
 			<ul>

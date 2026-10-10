@@ -8,6 +8,12 @@
 - A collapsed card opens for a field with a pending edit or a problem, shows " •" when it holds a pending edit, and a field focused from the problem list (or the first invalid one on Update) opens its card first.
 - Language tabs: Translation, Prices (with the currency) and SEO cards; labels inside the form drop the language name. The tab strip stays in view while the form scrolls.
 - WooCommerce wording in the form: Stock status, Stock quantity, Allow backorders?; helper texts on a variation's status and a variable product's Manage stock.
+- Quick edit of a variable product, "Set the price of all its variations": the prices take the bulk operations (regular price minus 20 %, decrease by %, rounding), the note shows the variations' current regular price and how many are on sale, and the existing-sales choice, "only lower" and the change summary apply as in bulk edit.
+- Stock status is no longer offered for variable products (WooCommerce derives it from the variations) and is not sent to a row that manages stock (WooCommerce sets it from the quantity); a quick edit with Manage stock on hides it, and a bulk edit says which rows it skips. Before, the save reported success and nothing changed.
+- No "Also apply to the variations" box when every variation of the selected variable product is selected too.
+- Bulk edit opens on General (or the filtered language), not on the tab the last quick edit used; quick edits still remember their tab.
+- A variation's tax class stored as "parent" no longer raises a false "changed by someone else" notice after a save.
+- Short description sits under the name in quick edit; long texts show their first lines until focused, so Pricing stays in view. Shipping, Tax and Advanced end the shorter column (the main one in bulk edit). Every card with a pending edit shows " •". The bulk item list starts folded above 5 items. Sale times keep room for "hh.mm" and wrap under the date when narrow. A snackbar over a wide panel rises above its Update / Cancel footer. Shorter language tools summary ("Svenska tools (5)"). Change summary plural ("on 1 row").
 
 ## 0.2.4 - 2026-10-10
 

@@ -1256,13 +1256,13 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	);
 }
 
-/** "Copy, clear, edit text, adjust prices": the tools' own names, so the folded panel says what is inside. */
+/** "Svenska tools (5)": short, the tools' own names are the headings inside; the count says how many wait there. */
 export function toolsSummary( tools: DeclarativeAction[], tabLabel: string ): string {
 	return sprintf(
-		/* translators: 1: language name, 2: comma-separated tool names */
-		__( '%1$s tools: %2$s', 'wp-woocommerce-products-list' ),
+		/* translators: 1: language name, 2: number of tools */
+		__( '%1$s tools (%2$d)', 'wp-woocommerce-products-list' ),
 		tabLabel,
-		tools.map( ( def ) => def.label ).join( ', ' )
+		tools.length
 	);
 }
 

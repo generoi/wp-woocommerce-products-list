@@ -129,6 +129,41 @@ describe( 'buildInlineForm', () => {
 		expect( bulk[ 'group:tax' ] ).toMatchObject( { label: 'Tax', layout: { isOpened: false, summary: [] } } );
 	} );
 
+	it( 'puts the short description under the name in a quick edit, and with the description in a bulk edit', () => {
+		const quick = Object.fromEntries( cards( buildInlineForm( registryFields(), general, [ simple( 1 ) ], settings ).fields as FormField[] ).map( ( card ) => [ card.id, ids( card.children as FormField[] ) ] ) );
+
+		expect( quick[ 'group:general' ] ).toEqual( [ 'name', 'slug', 'short_description' ] );
+		expect( quick[ 'group:content' ] ).toEqual( [ 'description' ] );
+
+		const bulk = Object.fromEntries( cards( buildInlineForm( registryFields(), general, [ simple( 1 ), simple( 2 ) ], settings, { bulk: true } ).fields as FormField[] ).map( ( card ) => [ card.id, ids( card.children as FormField[] ) ] ) );
+
+		expect( bulk[ 'group:content' ] ).toEqual( [ 'short_description', 'description' ] );
+	} );
+
+	it( 'marks every card holding a pending edit, open or collapsed', () => {
+		const all = Object.fromEntries( cards( buildInlineForm( registryFields(), general, [ simple( 1 ) ], settings, { pending: new Set( [ 'sale_price', 'tax_status' ] ) } ).fields as FormField[] ).map( ( card ) => [ card.id, card.label ] ) );
+
+		expect( all[ 'group:pricing' ] ).toBe( 'Pricing •' );
+		expect( all[ 'group:tax' ] ).toBe( 'Tax •' );
+		expect( all[ 'group:inventory' ] ).toBe( 'Inventory' );
+	} );
+
+	it( 'ends the shorter column with the collapsed settings: the main one in a bulk edit with long organization fields', () => {
+		const bulkFields = [
+			...registryFields().filter( ( entry ) => ! [ 'name', 'slug', 'sku', 'short_description', 'description', 'notes' ].includes( entry.id ) ),
+			edit( 'tags', 'organization', 41, { type: 'array' } ),
+			edit( 'brands', 'organization', 42, { type: 'array' } ),
+			edit( 'categories_op', 'organization', 39.5 ),
+			edit( 'tags_op', 'organization', 40.5 ),
+			edit( 'brands_op', 'organization', 41.5 ),
+		].map( ( entry ) => ( entry.id === 'categories' ? { ...entry, type: 'array' as const } : entry ) );
+		const [ row ] = buildInlineForm( bulkFields.filter( ( entry ) => ! entry.id.startsWith( 'stock_' ) && ! [ 'backorders', 'low_stock_amount', 'sold_individually', 'date_on_sale_from', 'date_on_sale_to' ].includes( entry.id ) ), general, [ simple( 1 ), simple( 2 ) ], settings, { columns: 2, bulk: true } ).fields as FormField[];
+		const [ main, side ] = row!.children as FormField[];
+
+		expect( ( main!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:pricing', 'group:inventory', 'group:shipping', 'group:tax', 'group:advanced' ] );
+		expect( ( side!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:visibility', 'group:organization' ] );
+	} );
+
 	it( 'keeps Pricing with only the apply-to-variations control, first in the card', () => {
 		const leads = { pricing: [ APPLY_TO_VARIATIONS_FIELD_ID ] };
 		const withoutPrices = registryFields().filter( ( entry ) => ! [ 'regular_price', 'sale_price', 'date_on_sale_from', 'date_on_sale_to' ].includes( entry.id ) );

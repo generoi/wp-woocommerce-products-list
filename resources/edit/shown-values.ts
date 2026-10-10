@@ -18,7 +18,7 @@
  */
 import type { ProductField, ProductListItem } from '../types';
 import { arrayFieldOf, isArrayOpFieldId } from './bulk-array';
-import { isPlainObject, normalizeForCompare, readFieldValue } from './field-value';
+import { isPlainObject, isVariation, normalizeForCompare, readFieldValue } from './field-value';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { leafOf } from './visibility';
 
@@ -251,6 +251,14 @@ export function changedSinceShown(
 		}
 
 		if ( before === key ) {
+			continue;
+		}
+
+		// A variation's stored `parent` tax class is shown in view context (the list, a save's answer) as the parent's
+		// class: the same setting read two ways, not a change by someone else (the server's check agrees: Concurrency.php).
+		if ( field.id === 'tax_class' && rows.every( isVariation ) && ( values.every( ( value ) => value === 'parent' ) || before === normalizeForCompare( rows.map( () => 'parent' ) ) ) ) {
+			first.set( field.id, key );
+
 			continue;
 		}
 

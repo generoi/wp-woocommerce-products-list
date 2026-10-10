@@ -8,7 +8,7 @@
  */
 import type { ProductField, ProductListItem } from '../types';
 import { isVariableParent } from './field-value';
-import { isSellableField } from './visibility';
+import { isParentDerivedField, isSellableField } from './visibility';
 
 export interface SaveTarget {
 	item: ProductListItem;
@@ -119,6 +119,8 @@ export function resolveSaveTargetsWith(
 ): SaveTarget[] {
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const { parent, sellable } = splitParentEdits( edits, fields );
+	// What a variable parent works out from its variations (its stock status) is never sent to it.
+	const ownEdits = Object.fromEntries( Object.entries( parent ).filter( ( [ id ] ) => ! isParentDerivedField( id ) ) );
 	const targets = new Map< number, SaveTarget >();
 
 	for ( const item of rows ) {
@@ -127,7 +129,7 @@ export function resolveSaveTargetsWith(
 		}
 
 		if ( isVariableParent( item ) ) {
-			targets.set( item.id, { item, edits: parent, viaParent: false } );
+			targets.set( item.id, { item, edits: ownEdits, viaParent: false } );
 		} else {
 			targets.set( item.id, { item, edits, viaParent: false } );
 		}

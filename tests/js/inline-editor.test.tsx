@@ -282,7 +282,7 @@ describe( 'InlineEditor', () => {
 			const view = renderEditor( [ simple( 1, { name: 'One' } ) ], { fields: withLanguage, session: { initialTab: 'i18n:se' } } );
 
 			await screen.findByText( 'One' );
-			fireEvent.click( await screen.findByText( /tools: Edit translated text/ ) );
+			fireEvent.click( await screen.findByText( /tools \(\d+\)$/ ) );
 
 			// Chrome hands the Escape that closes a native select's dropdown to the page: it stays with the select.
 			fireEvent.mouseDown( screen.getByLabelText( 'Operation' ) );

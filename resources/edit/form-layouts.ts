@@ -17,6 +17,7 @@ import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
 import { isVariation } from './field-value';
 import { isEditorHostedAction, LANG_ARG } from './hosted-actions';
+import { numericKindOf } from './bulk-numeric';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
 import { isSellableField, leafOf } from './visibility';
 
@@ -244,6 +245,15 @@ export const LAYOUT_GROUP_OF_FIELD: Record< string, string > = {
 	global_unique_id: 'inventory',
 };
 
+/**
+ * Fields laid out with the product's identity in quick edit: the short description sits under the name, as the
+ * language tabs' Translation card has it (fixing a name and its short text is one task); the long description keeps
+ * its own card lower down. Bulk edit has no name, so there the short description stays with the description.
+ */
+export const QUICK_LAYOUT_GROUP_OF_FIELD: Record< string, string > = {
+	short_description: 'general',
+};
+
 /** Sections of the side column when the form is wide, as WooCommerce's Edit product sidebar. */
 export const SIDE_GROUPS: ReadonlySet< string > = new Set( [ 'visibility', 'organization', 'shipping', 'tax', 'advanced', 'linked', 'downloads', 'prices', 'seo' ] );
 
@@ -286,8 +296,8 @@ function isLanguageTab( tab: QuickEditTab ): boolean {
 	return tab.id.startsWith( 'i18n:' );
 }
 
-/** The section (card) a field is laid out under on `tab`. */
-export function layoutGroupOf( field: ProductField, tab?: QuickEditTab ): string {
+/** The section (card) a field is laid out under on `tab` (in a quick edit unless `bulk`). */
+export function layoutGroupOf( field: ProductField, tab?: QuickEditTab, bulk = false ): string {
 	if ( tab && isLanguageTab( tab ) ) {
 		const leaf = leafOf( field.id );
 
@@ -298,7 +308,7 @@ export function layoutGroupOf( field: ProductField, tab?: QuickEditTab ): string
 		return TRANSLATION_LEAVES.has( leaf ) || isLongText( field ) ? 'translation' : 'seo';
 	}
 
-	const group = LAYOUT_GROUP_OF_FIELD[ field.id ] ?? groupOf( field );
+	const group = ( bulk ? undefined : QUICK_LAYOUT_GROUP_OF_FIELD[ field.id ] ) ?? LAYOUT_GROUP_OF_FIELD[ field.id ] ?? groupOf( field );
 
 	return SECTION_OF_GROUP[ group ] ?? group;
 }
@@ -314,7 +324,7 @@ export function isCollapsedGroup( group: string ): boolean {
 }
 
 /** The sections of a tab, each with its fields in `edit.order`, in single-column order. */
-export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads: Record< string, string[] > = {} ): Array< { group: string; fields: string[] } > {
+export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads: Record< string, string[] > = {}, bulk = false ): Array< { group: string; fields: string[] } > {
 	const tabFields = fieldsOfTab( fields, tab );
 	const sections = new Map< string, string[] >();
 
@@ -327,7 +337,7 @@ export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads:
 	const seen: string[] = [];
 
 	tabFields
-		.map( ( field, index ) => ( { field, index, group: layoutGroupOf( field, tab ) } ) )
+		.map( ( field, index ) => ( { field, index, group: layoutGroupOf( field, tab, bulk ) } ) )
 		.sort( ( a, b ) => orderOf( a.field ) - orderOf( b.field ) || a.index - b.index )
 		.forEach( ( { field, group } ) => {
 			if ( ! seen.includes( group ) ) {
@@ -381,10 +391,27 @@ export interface LayoutOptions {
 	open?: ReadonlySet< string >;
 	/** Fields that open their section's card, by section (the apply-to-variations control first in Pricing); the card is kept even when it has nothing else. */
 	leads?: Record< string, string[] >;
-	/** Fields with a pending edit: a collapsible card holding one says so in its title (" •", as the tabs do). */
+	/** Fields with a pending edit: a card holding one says so in its title (" •", as the tabs do). */
 	pending?: ReadonlySet< string >;
 	/** A bulk edit: no value summaries in the collapsed headers (one row's value would mislead). */
 	bulk?: boolean;
+}
+
+/** A card's title and padding, in rows of a plain field: what a closed card weighs when the columns are balanced. */
+const CARD_WEIGHT = 1.5;
+
+/** Roughly how many rows of a plain field a field takes: a text editor several, a term list or a bulk number operation more than one. */
+function fieldWeight( field: ProductField | undefined, bulk: boolean ): number {
+	if ( ! field ) {
+		// The apply-to-variations control: a checkbox and its note.
+		return 1.5;
+	}
+
+	if ( isLongText( field ) ) {
+		return 6;
+	}
+
+	return field.type === 'array' || ( bulk && numericKindOf( field ) !== null ) ? 2.5 : 1;
 }
 
 /** The card title of a section; on a General tab of a translated shop, the texts say which language they are. */
@@ -419,12 +446,13 @@ function sectionLabel( group: string, tab: QuickEditTab, settings: Settings ): s
  */
 export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, items: ProductListItem[], settings: Settings, options: LayoutOptions = {} ): Form {
 	const { columns = 1, open, leads, pending, bulk = false } = options;
-	const sections = sectionsOfTab( fields, tab, leads );
+	const sections = sectionsOfTab( fields, tab, leads, bulk );
+	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 
-	const cards: Array< { group: string; card: FormField } > = sections.map( ( { group, fields: ids } ) => {
+	const cards: Array< { group: string; card: FormField; weight: number } > = sections.map( ( { group, fields: ids } ) => {
 		const collapsible = isCollapsedGroup( group );
 		const opened = ! collapsible || ids.some( ( id ) => open?.has( id ) );
-		const marked = collapsible && ids.some( ( id ) => pending?.has( id ) );
+		const marked = ids.some( ( id ) => pending?.has( id ) );
 		const summary = ! bulk && SECTION_SUMMARY[ group ] && ids.includes( SECTION_SUMMARY[ group ]! ) ? [ SECTION_SUMMARY[ group ]! ] : [];
 
 		return {
@@ -435,25 +463,45 @@ export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, item
 				layout: collapsible ? { type: 'card', isCollapsible: true, isOpened: opened, summary } : { type: 'card', isCollapsible: false },
 				children: sectionChildren( ids ),
 			} as FormField,
+			// A pair sits side by side: it is as tall as its taller field.
+			weight:
+				CARD_WEIGHT +
+				( opened
+					? sectionChildren( ids ).reduce( ( sum, child ) => sum + ( typeof child === 'string' ? fieldWeight( byId.get( child ), bulk ) : Math.max( ...( child.children as string[] ).map( ( id ) => fieldWeight( byId.get( id ), bulk ) ) ) ), 0 )
+					: 0 ),
 		};
 	} );
 
 	let formFields: FormField[];
 
-	const main = cards.filter( ( entry ) => ! isSideGroup( entry.group ) );
-	const side = cards.filter( ( entry ) => isSideGroup( entry.group ) );
+	const rank = ( group: string ) => ( SECTION_ORDER.indexOf( group ) === -1 ? SECTION_ORDER.indexOf( 'translation' ) + 0.5 : SECTION_ORDER.indexOf( group ) );
+	const byRank = ( a: { group: string }, b: { group: string } ) => rank( a.group ) - rank( b.group );
+	const main = cards.filter( ( entry ) => ! isSideGroup( entry.group ) ).sort( byRank );
+	let side = cards.filter( ( entry ) => isSideGroup( entry.group ) ).sort( byRank );
+
+	// The rarely used settings (Shipping, Tax, Advanced) end the shorter column, so neither column runs on alone past
+	// an empty one: the side column in a quick edit (the main one ends with the long descriptions), the main column in
+	// a bulk edit (no name or descriptions there, and Organization's "how to apply" selects make the side column long).
+	const settingsCards = side.filter( ( entry ) => isCollapsedGroup( entry.group ) );
+	const weigh = ( list: Array< { weight: number } > ) => list.reduce( ( sum, entry ) => sum + entry.weight, 0 );
+
+	if ( settingsCards.length > 0 && settingsCards.length < side.length ) {
+		const core = side.filter( ( entry ) => ! isCollapsedGroup( entry.group ) );
+
+		if ( weigh( main ) < weigh( core ) ) {
+			main.push( ...settingsCards );
+			side = core;
+		}
+	}
 
 	if ( columns === 2 && main.length > 0 && side.length > 0 ) {
-		const rank = ( group: string ) => SECTION_ORDER.indexOf( group ) === -1 ? SECTION_ORDER.indexOf( 'translation' ) + 0.5 : SECTION_ORDER.indexOf( group );
-		const byRank = ( a: { group: string }, b: { group: string } ) => rank( a.group ) - rank( b.group );
-
 		formFields = [
 			{
 				id: 'columns',
 				layout: { type: 'row', alignment: 'start', styles: { 'column:main': { flex: '1.7 1 0' }, 'column:side': { flex: '1 1 0' } } },
 				children: [
-					{ id: 'column:main', layout: { type: 'regular', labelPosition: 'top' }, children: [ ...main ].sort( byRank ).map( ( entry ) => entry.card ) },
-					{ id: 'column:side', layout: { type: 'regular', labelPosition: 'top' }, children: [ ...side ].sort( byRank ).map( ( entry ) => entry.card ) },
+					{ id: 'column:main', layout: { type: 'regular', labelPosition: 'top' }, children: main.map( ( entry ) => entry.card ) },
+					{ id: 'column:side', layout: { type: 'regular', labelPosition: 'top' }, children: side.map( ( entry ) => entry.card ) },
 				],
 			},
 		];
