@@ -446,6 +446,31 @@ class SaveHookTest extends RestTestCase
         $this->assertSame(sprintf('The SKU "TAKEN" is already used by "Tom & Jerry" (#%d).', $owner->get_id()), Saves::skuOwnerMessage('TAKEN', $product->get_id()));
     }
 
+    public function test_a_name_is_stored_as_typed_like_the_classic_quick_edit(): void
+    {
+        $product = $this->simpleProduct(['name' => 'Plain']);
+        $typed = 'Renamed ÅÄÖ & "quotes" <b>bold</b>';
+
+        // A user who may post unfiltered HTML: stored as typed, as wp_insert_post stores it.
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => $typed]);
+        $this->assertStatus(200, $response);
+        $this->assertSame($typed, get_post($product->get_id())->post_title);
+
+        // The editor reads it back (context=edit) as typed and bases its expected value on that.
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => $typed.' 2', '_wcpl_expect' => ['name' => $typed]]);
+        $this->assertStatus(200, $response);
+        $this->assertSame($typed.' 2', get_post($product->get_id())->post_title);
+
+        $row = array_values(array_filter($this->rows(), static fn (array $row): bool => $row['field'] === 'name'));
+        $this->assertSame(['Plain', $typed], [$row[0]['old_value'], $row[0]['new_value']]);
+
+        // Without unfiltered_html, WooCommerce's kses filter stays, as wp_insert_post's does.
+        $this->actAs('shop_manager');
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'A & <script>x</script>B'], [ListMode::BATCH_HEADER => wp_generate_uuid4()]);
+        $this->assertStatus(200, $response);
+        $this->assertSame(wp_filter_post_kses('A & <script>x</script>B'), get_post($product->get_id())->post_title);
+    }
+
     public function test_a_generated_batch_id_groups_rows_when_the_header_is_missing(): void
     {
         global $wpdb;

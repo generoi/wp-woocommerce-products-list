@@ -447,6 +447,8 @@ final class Saves
             $product->set_menu_order(0);
         }
 
+        self::unfilteredName($product, $request);
+
         // POC: in `revisions` mode the field log stays quiet (docs/revisions.md).
         if (History::logs()) {
             Recorder::begin($product, $request, $creating);
@@ -481,6 +483,24 @@ final class Saves
         }
 
         return $product;
+    }
+
+    /**
+     * WooCommerce's controller saves `name` through wp_filter_post_kses()
+     * for everyone, so "Tom & Jerry" is stored as "Tom &amp; Jerry" and
+     * the editor, which reads the raw title, shows "&amp;". wp_insert_post()
+     * (the classic editor and quick edit) filters the title only for users
+     * without `unfiltered_html`: store it as typed for the others, as there.
+     */
+    private static function unfilteredName(WC_Product $product, WP_REST_Request $request): void
+    {
+        if ($product instanceof \WC_Product_Variation || ! isset($request['name']) || ! is_string($request['name'])) {
+            return;
+        }
+
+        if (current_user_can('unfiltered_html')) {
+            $product->set_name($request['name']);
+        }
     }
 
     /**
