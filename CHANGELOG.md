@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4 - 2026-10-10
+
+- Translation grid: an edit typed back to its original keeps the value it was typed over, so a later keystroke cannot expect a value the input never showed and write over another user's change (f88dcbe).
+- Translation grid: after a refusal, typing over the value the grid now shows (another user's save) and Retry saves, instead of being refused again; a reload that shows the stored value drops a stale base (dcf37ff).
+- Audit close-out: the robustness, performance and front-end reviewers all signed off on the save, History and clash-prevention path.
+
 ## 0.2.3 - 2026-10-10
 
 Clash-prevention fixes from audit rounds 11-13: the value a save sends as expected (`_wcpl_expect`, translation `expect`) is now always the one the form or grid showed the user, never one loaded after they started editing.
