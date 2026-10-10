@@ -210,6 +210,8 @@ describe( 'checkRevertPlan', () => {
 		expect( summary.alreadyReverted ).toBe( 1 );
 		// The example is a real change, not one an earlier revert put back.
 		expect( summary.example?.id ).toBe( 2 );
+		// Every changed object, so the confirm's preview leaves them out (the revert leaves them as they are).
+		expect( summary.changedIds ).toEqual( [ 1, 2, 3 ] );
 	} );
 
 	it( 'checks a one-chunk batch without ids', async () => {

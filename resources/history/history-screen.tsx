@@ -100,19 +100,24 @@ export function conflictFields( outcome: Pick< RevertOutcome, 'conflicts' >, opt
 const PREVIEW_ROWS = 5;
 
 /** "Pelsi Black 37: Quantity 12 → 2": what the revert puts back, for the first few changes of the batch. */
-function RevertPreview( { batchId, options }: { batchId: string; options: LogFieldOption[] } ) {
+function RevertPreview( { batchId, options, exclude }: { batchId: string; options: LogFieldOption[]; exclude?: number[] } ) {
 	const settings = getSettings();
 	const [ preview, setPreview ] = useState< { rows: LogRowType[]; total: number } | null >( null );
+	// Items the dry run found changed since the batch: the revert leaves them as they are, so they are not "goes back to".
+	const excludeKey = ( exclude ?? [] ).join( ',' );
 
 	useEffect( () => {
 		let cancelled = false;
+		const left = new Set( excludeKey ? excludeKey.split( ',' ).map( Number ) : [] );
 
 		getLog( { batch: batchId, per_page: 20 } )
 			.then( ( result ) => {
 				if ( ! cancelled ) {
-					const rows = result.items.filter( isRevertableRow );
+					const revertable = result.items.filter( isRevertableRow );
+					const rows = revertable.filter( ( row ) => ! left.has( row.object_id ) );
+					const total = Math.max( revertable.length, result.total - ( result.items.length - revertable.length ) ) - ( revertable.length - rows.length );
 
-					setPreview( { rows: rows.slice( 0, PREVIEW_ROWS ), total: Math.max( rows.length, result.total - ( result.items.length - rows.length ) ) } );
+					setPreview( { rows: rows.slice( 0, PREVIEW_ROWS ), total: Math.max( rows.length, total ) } );
 				}
 			} )
 			.catch( () => {
@@ -124,7 +129,7 @@ function RevertPreview( { batchId, options }: { batchId: string; options: LogFie
 		return () => {
 			cancelled = true;
 		};
-	}, [ batchId ] );
+	}, [ batchId, excludeKey ] );
 
 	if ( ! preview || ! preview.rows.length ) {
 		return null;
@@ -331,6 +336,8 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 
 	// Items the check found changed since the batch: the revert leaves them as they are, so they are not "put back".
 	const keptItems = ! outcome && check && check !== 'loading' ? check.changed : 0;
+	// The scope line keeps saying what the dry run found once a pass ran (not "N changes on N items" as if nothing was left alone).
+	const scopeKept = check && check !== 'loading' ? check.changed : 0;
 	const nothingLeft = keptItems > 0 && !! plan && plan !== 'loading' && itemsLeftToRevert( { objects: plan.objects }, keptItems ) === 0;
 
 	return (
@@ -362,7 +369,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
 					</>
 				) : plan ? (
-					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ), keptItems ) }</strong>
+					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ), scopeKept ) }</strong>
 				) : (
 					planError ?? __( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
@@ -407,7 +414,9 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 				</div>
 			) : null }
 			<SaveProgress done={ progress.done } total={ progress.total } saving={ busy } label={ revertLabel } />
-			{ ! outcome && batchId && plan && plan !== 'loading' && plan.revertable ? <RevertPreview batchId={ batchId } options={ fieldOptions } /> : null }
+			{ ! outcome && ! nothingLeft && batchId && plan && plan !== 'loading' && plan.revertable && check !== 'loading' ? (
+				<RevertPreview batchId={ batchId } options={ fieldOptions } exclude={ check?.changedIds } />
+			) : null }
 			{ outcome ? (
 				<div className="wc-pl-confirm__conflicts" role="status">
 					<p>

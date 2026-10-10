@@ -107,6 +107,8 @@ export interface RevertCheckSummary {
 	alreadyReverted: number;
 	/** One changed object, for an example sentence. */
 	example: ActionResult | null;
+	/** The ids of the changed objects (the revert leaves them as they are). */
+	changedIds: number[];
 }
 
 /**
@@ -129,12 +131,13 @@ export async function checkRevertPlan( batchId: string, plan: Pick< RevertPlan, 
 	};
 
 	await Promise.all( Array.from( { length: Math.min( REVERT_PARALLEL, parts.length ) }, worker ) );
-	const summary: RevertCheckSummary = { changed: 0, alreadyReverted: 0, example: null };
+	const summary: RevertCheckSummary = { changed: 0, alreadyReverted: 0, example: null, changedIds: [] };
 
 	for ( const response of responses.filter( Boolean ) ) {
 		summary.changed += response.changed ?? 0;
 		summary.alreadyReverted += response.already_reverted ?? 0;
 		summary.example ??= response.items.find( ( item ) => ! item.already_reverted?.length ) ?? response.items[ 0 ] ?? null;
+		summary.changedIds.push( ...response.items.map( ( item ) => item.id ) );
 	}
 
 	return summary;

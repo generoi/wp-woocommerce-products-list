@@ -241,7 +241,8 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 				label: __( 'Item ID', 'wp-woocommerce-products-list' ),
 				enableSorting: false,
 				filterBy: { operators: [ 'is' ] },
-				// An id, not a quantity: 40561, never 40,561.
+				// An id, not a quantity: 40561, never 40,561 (the cell, and the filter's summary "Item ID is: 40561").
+				format: { separatorThousand: '' },
 				render: ( { item } ) => <span>{ String( item.object_id ) }</span>,
 			}
 		);
