@@ -445,6 +445,35 @@ final class Revert
     }
 
     /**
+     * Take one field of an object (or the whole object) out of the plan:
+     * its body and the batch values the write expects.
+     *
+     * @param  Plan  $plan
+     */
+    private static function dropPlanned(array &$plan, int $id, ?string $field = null): void
+    {
+        if ($field !== null) {
+            unset($plan['products'][$id][$field], $plan['final'][$id][$field]);
+
+            foreach (array_keys($plan['variations']) as $parent) {
+                unset($plan['variations'][$parent][$id][$field]);
+            }
+
+            return;
+        }
+
+        unset($plan['products'][$id], $plan['final'][$id]);
+
+        foreach (array_keys($plan['variations']) as $parent) {
+            unset($plan['variations'][$parent][$id]);
+
+            if ($plan['variations'][$parent] === []) {
+                unset($plan['variations'][$parent]);
+            }
+        }
+    }
+
+    /**
      * The parent (variation) or 0 (product) of an object in the plan.
      *
      * @param  Plan  $plan
@@ -516,6 +545,55 @@ final class Revert
                 $current = self::conflictValues($id, $final);
 
                 if ($current === []) {
+                    continue;
+                }
+
+                // Fields an earlier revert of this batch put back and that
+                // still hold that value: nothing to write and no clash.
+                $done = array_filter($current, static fn (?string $value, string $field): bool => isset($reverted[$id][$field]) && Concurrency::same($value, self::plannedOld($plan, $id, $field)), ARRAY_FILTER_USE_BOTH);
+
+                if ($done !== [] && count($done) === count($current)) {
+                    [$type, $parent] = self::planType($plan, $id);
+
+                    if (count($done) === count($final)) {
+                        $targets = [];
+
+                        foreach (array_keys($done) as $field) {
+                            $targets[$field] = self::plannedOld($plan, $id, $field);
+                        }
+
+                        self::dropPlanned($plan, $id);
+                        $message = sprintf(
+                            /* translators: %s: comma-separated field names */
+                            _n('%s was already put back by an earlier revert of this batch and was left as it is.', '%s were already put back by an earlier revert of this batch and were left as they are.', count($done), 'wp-woocommerce-products-list'),
+                            implode(', ', array_map([self::class, 'fieldLabel'], array_keys($done)))
+                        );
+                        $results[] = ['id' => $id, 'ok' => false, 'code' => 'skipped', 'message' => $message];
+
+                        foreach ($done as $field => $value) {
+                            $skippedRows[] = [
+                                'batch_id' => $batchId,
+                                'source' => 'revert',
+                                'object_type' => $type,
+                                'object_id' => $id,
+                                'parent_id' => $parent,
+                                'field' => $field,
+                                'old_value' => $value,
+                                'new_value' => $targets[$field],
+                                'status' => Logger::STATUS_SKIPPED,
+                                'message' => $message,
+                                'context' => ['reason' => 'unchanged', 'batch_value' => $final[$field] ?? null, 'already_reverted' => true],
+                            ];
+                        }
+
+                        continue;
+                    }
+
+                    // The item's other fields are still written; these are left out.
+                    foreach (array_keys($done) as $field) {
+                        self::dropPlanned($plan, $id, $field);
+                    }
+
                     continue;
                 }
 

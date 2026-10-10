@@ -553,6 +553,37 @@ class RevertTest extends RestTestCase
         $this->assertSame($data['batch_id'], $batches[$this->batchId()]['reverted_by']['batch_id']);
     }
 
+    public function test_reverting_again_leaves_items_an_earlier_revert_put_back_out_of_the_clashes(): void
+    {
+        $a = $this->simpleProduct(['sku' => 'A', 'regular_price' => '14']);
+        $b = $this->simpleProduct(['sku' => 'B', 'regular_price' => '14']);
+        $url = '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert';
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $a->get_id(), 'regular_price' => '15.40'], ['id' => $b->get_id(), 'regular_price' => '15.40']],
+        ], [Logger::SOURCE_HEADER => 'bulk']));
+
+        // B changed by someone else; the first revert puts A back and leaves B.
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$b->get_id(), ['regular_price' => '20'], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $first = array_column($this->data($this->request('POST', $url))['results'], null, 'id');
+        $this->assertTrue($first[$a->get_id()]['ok']);
+        $this->assertSame('conflict', $first[$b->get_id()]['code']);
+
+        // Revert again: only B is a clash ("Revert 1 anyway"); A already holds the old value.
+        $data = $this->data($this->request('POST', $url));
+        $results = array_column($data['results'], null, 'id');
+        $this->assertSame('skipped', $results[$a->get_id()]['code']);
+        $this->assertStringContainsString('already put back', $results[$a->get_id()]['message']);
+        $this->assertSame('conflict', $results[$b->get_id()]['code']);
+        $this->assertSame('14', wc_get_product($a->get_id())->get_regular_price());
+        $this->assertSame('20', wc_get_product($b->get_id())->get_regular_price());
+
+        // History names A's skip "already had the value", not "changed by someone else".
+        $rows = array_column($this->rows($data['batch_id']), null, 'object_id');
+        $this->assertSame('unchanged', json_decode((string) $rows[$a->get_id()]['context'], true)['reason']);
+        $this->assertSame('conflict', json_decode((string) $rows[$b->get_id()]['context'], true)['reason']);
+    }
+
     public function test_a_relative_revert_takes_a_restock_off_and_keeps_a_sale_made_since(): void
     {
         $parent = $this->variableProduct(['37', '38']);
@@ -600,17 +631,24 @@ class RevertTest extends RestTestCase
         $this->assertSame([true], array_column($data['results'], 'ok'));
         $this->assertSame(5, wc_get_product($id)->get_stock_quantity());
 
-        // Again: a conflict, and not one a relative revert is offered for.
+        // Again: already put back, so left out (not a clash a relative revert or "Revert anyway" is offered for).
+        $data = $this->data($this->request('POST', $url));
+        $this->assertSame('skipped', $data['results'][0]['code']);
+        $this->assertStringContainsString('already put back', $data['results'][0]['message']);
+
+        // Asked for relatively: nothing is taken off a second time.
+        $data = $this->data($this->request('POST', $url, ['relative' => true]));
+        $this->assertSame('skipped', $data['results'][0]['code']);
+        $this->assertSame(5, wc_get_product($id)->get_stock_quantity());
+
+        // Changed again after the first revert (a sale): now it is a clash, still not a relative one.
+        wc_update_product_stock(wc_get_product($id), 1, 'decrease');
         $data = $this->data($this->request('POST', $url));
         $this->assertSame('conflict', $data['results'][0]['code']);
         $this->assertFalse($data['results'][0]['relative']);
         $this->assertSame(['stock_quantity'], $data['results'][0]['already_reverted']);
-        $this->assertStringContainsString('already put back', $data['results'][0]['message']);
-
-        // Asked for anyway: nothing is taken off a second time.
-        $data = $this->data($this->request('POST', $url, ['relative' => true]));
-        $this->assertSame('conflict', $data['results'][0]['code']);
-        $this->assertSame(5, wc_get_product($id)->get_stock_quantity());
+        $this->assertSame(4, wc_get_product($id)->get_stock_quantity());
+        wc_update_product_stock(wc_get_product($id), 5, 'set');
 
         // The dry run says the same, without writing.
         $check = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId().'/check'));

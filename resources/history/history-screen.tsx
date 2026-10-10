@@ -373,7 +373,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
 					</>
 				) : plan ? (
-					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ), scopeKept ) }</strong>
+					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ), scopeKept, check && check !== 'loading' ? check.alreadyReverted : 0 ) }</strong>
 				) : (
 					planError ?? __( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }

@@ -124,6 +124,12 @@ describe( 'left-out items', () => {
 		expect( describeBatchScope( scope, 0 ) ).toBe( 'This will put back 4 changes on 3 items.' );
 	} );
 
+	it( 'does not say every item changed since when an earlier revert put some back', () => {
+		const scope = scopeFromPlan( { rows: 4, objects: 4, skipped: [] } );
+
+		expect( describeBatchScope( scope, 4, 3 ) ).toBe( 'Nothing is left to put back: every item of this batch was put back by an earlier revert or changed since (see below).' );
+	} );
+
 	it( 'keeps Revert on when every item changed since but some were changed by someone else (the pass offers "Revert anyway")', () => {
 		const scope = { objects: 1 };
 

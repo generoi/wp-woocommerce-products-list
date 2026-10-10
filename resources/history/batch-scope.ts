@@ -138,7 +138,7 @@ export function nothingToRevert( scope: Pick< BatchScope, 'objects' >, check: { 
  * @param kept Items the pre-revert check found changed since the batch (or already put back by an earlier
  *             revert): the revert leaves them as they are, so they are not counted as put back.
  */
-export function describeBatchScope( scope: BatchScope, kept = 0 ): string {
+export function describeBatchScope( scope: BatchScope, kept = 0, alreadyReverted = 0 ): string {
 	const changes = sprintf(
 		/* translators: %d: number of changes */
 		_n( '%d change', '%d changes', scope.changes, 'wp-woocommerce-products-list' ),
@@ -160,7 +160,10 @@ export function describeBatchScope( scope: BatchScope, kept = 0 ): string {
 	let head: string = text;
 
 	if ( kept > 0 && left === 0 ) {
-		head = __( 'Nothing is left to put back: every item of this batch changed since (see below).', 'wp-woocommerce-products-list' );
+		head =
+			alreadyReverted > 0
+				? __( 'Nothing is left to put back: every item of this batch was put back by an earlier revert or changed since (see below).', 'wp-woocommerce-products-list' )
+				: __( 'Nothing is left to put back: every item of this batch changed since (see below).', 'wp-woocommerce-products-list' );
 	} else if ( kept > 0 ) {
 		const ofItems = sprintf(
 			/* translators: 1: items the revert puts back, 2: items in the batch */
