@@ -530,16 +530,21 @@ final class Rows
 
             $now = time();
             $in = implode(',', $missing);
-            $relevant = "s.meta_value <> '' AND (l.onsale = 1 OR CAST(f.meta_value AS UNSIGNED) > {$now})";
+            // The window describes the line the row shows: the variations on sale now when any are, else the scheduled ones
+            // (a running sale is not dated by a campaign that starts later).
+            $selling = "s.meta_value <> '' AND l.onsale = 1";
+            $scheduled = "s.meta_value <> '' AND l.onsale = 0 AND CAST(f.meta_value AS UNSIGNED) > {$now}";
 
             // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
             $rows = $wpdb->get_results(
                 "SELECT v.post_parent AS parent_id, COUNT(*) AS total,
                     SUM(l.stock_status = 'outofstock') AS out_of_stock,
                     SUM(l.onsale = 1) AS on_sale,
-                    SUM(s.meta_value <> '' AND l.onsale = 0 AND CAST(f.meta_value AS UNSIGNED) > {$now}) AS scheduled,
-                    MIN(CASE WHEN {$relevant} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS from_ts,
-                    MAX(CASE WHEN {$relevant} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS to_ts
+                    SUM({$scheduled}) AS scheduled,
+                    MIN(CASE WHEN {$selling} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS sale_from_ts,
+                    MAX(CASE WHEN {$selling} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS sale_to_ts,
+                    MIN(CASE WHEN {$scheduled} AND f.meta_value <> '' THEN CAST(f.meta_value AS UNSIGNED) END) AS scheduled_from_ts,
+                    MAX(CASE WHEN {$scheduled} AND t.meta_value <> '' THEN CAST(t.meta_value AS UNSIGNED) END) AS scheduled_to_ts
                 FROM {$wpdb->posts} v
                 INNER JOIN {$wpdb->wc_product_meta_lookup} l ON l.product_id = v.ID
                 LEFT JOIN {$wpdb->postmeta} s ON s.post_id = v.ID AND s.meta_key = '_sale_price'
@@ -556,6 +561,7 @@ final class Rows
             }
 
             foreach (is_array($rows) ? $rows : [] as $row) {
+                $window = (int) $row['on_sale'] > 0 ? 'sale' : 'scheduled';
                 self::$summaries[(int) $row['parent_id']] = [
                     'variation_stock' => [
                         'out_of_stock' => (int) $row['out_of_stock'],
@@ -564,8 +570,8 @@ final class Rows
                     'sale_summary' => [
                         'on_sale' => (int) $row['on_sale'],
                         'scheduled' => (int) $row['scheduled'],
-                        'from' => self::siteTime($row['from_ts']),
-                        'to' => self::siteTime($row['to_ts']),
+                        'from' => self::siteTime($row[$window.'_from_ts']),
+                        'to' => self::siteTime($row[$window.'_to_ts']),
                     ],
                 ];
             }
@@ -1106,7 +1112,7 @@ final class Rows
                 ],
                 'sale_summary' => [
                     'type' => ['object', 'null'],
-                    'description' => 'Variable products: variations on sale now and with a sale scheduled, earliest start and latest end (site-local ISO).',
+                    'description' => 'Variable products: variations on sale now and with a sale scheduled; earliest start and latest end (site-local ISO) of the variations on sale now when any are, else of the scheduled ones.',
                     'properties' => [
                         'on_sale' => ['type' => 'integer'],
                         'scheduled' => ['type' => 'integer'],

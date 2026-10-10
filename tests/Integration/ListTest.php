@@ -217,6 +217,13 @@ class ListTest extends RestTestCase
         $row = $this->data($this->request('GET', '/wc/v3/products', ['include' => [$variable->get_id()], '_fields' => 'id,wc_products_list']))[0][Rows::KEY];
         $this->assertSame(1, $row['sale_summary']['on_sale']);
         $this->assertSame(11, $row['sale_summary']['scheduled']);
+        // The "On sale" line is dated by the running sale, not by a campaign scheduled later.
+        $ends = time() + DAY_IN_SECONDS;
+        $running->set_date_on_sale_to((string) $ends);
+        $running->save();
+        $row = $this->data($this->request('GET', '/wc/v3/products', ['include' => [$variable->get_id()], '_fields' => 'id,wc_products_list']))[0][Rows::KEY];
+        $this->assertSame((new \DateTimeImmutable('@'.(time() - DAY_IN_SECONDS)))->setTimezone($timezone)->format('Y-m-d'), substr((string) $row['sale_summary']['from'], 0, 10));
+        $this->assertSame((new \DateTimeImmutable('@'.$ends))->setTimezone($timezone)->format('Y-m-d\\TH:i:s'), $row['sale_summary']['to']);
 
         // The restock list: parents with an out-of-stock variation.
         $this->assertSame([$variable->get_id()], $this->ids(['variation_stock_status' => 'outofstock']));
