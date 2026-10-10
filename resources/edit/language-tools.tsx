@@ -1256,13 +1256,17 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	);
 }
 
-/** "Svenska tools (5)": short, the tools' own names are the headings inside; the count says how many wait there. */
+/** "Svenska tools (5): Copy from Suomi, Clear, Find and replace…": what waits inside, by the tools' own names. */
 export function toolsSummary( tools: DeclarativeAction[], tabLabel: string ): string {
+	const names = tools.map( ( def ) => def.label || def.id ).filter( Boolean );
+	const shown = names.slice( 0, 3 ).join( ', ' );
+
 	return sprintf(
-		/* translators: 1: language name, 2: number of tools */
-		__( '%1$s tools (%2$d)', 'wp-woocommerce-products-list' ),
+		/* translators: 1: language name, 2: number of tools, 3: the first tools' names */
+		__( '%1$s tools (%2$d): %3$s', 'wp-woocommerce-products-list' ),
 		tabLabel,
-		tools.length
+		tools.length,
+		names.length > 3 ? `${ shown }…` : shown
 	);
 }
 

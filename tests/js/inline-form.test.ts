@@ -6,7 +6,7 @@
  * and SEO; the apply-to-variations control leading Pricing.
  */
 import { describe, expect, it } from 'vitest';
-import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, formLabelOf, GENERAL_TAB_ID, layoutGroupOf, sectionsOfTab } from '../../resources/edit/form-layouts';
+import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, formLabelOf, GENERAL_TAB_ID, layoutGroupOf, sectionNoteFieldId, sectionsOfTab } from '../../resources/edit/form-layouts';
 import { applyControlField } from '../../resources/edit/apply-control';
 import type { Form, FormField } from '../../resources/dataviews';
 import type { ProductField } from '../../resources/types';
@@ -61,16 +61,16 @@ function ids( children: Array< string | FormField > ): string[] {
 }
 
 describe( 'buildInlineForm', () => {
-	it( 'puts one card per section in task order when the form is narrow', () => {
+	it( 'puts one card per section in task order when the form is narrow, status and categories before the stock', () => {
 		const form: Form = buildInlineForm( registryFields(), general, [ simple( 1 ) ], settings );
 
 		expect( form.layout ).toEqual( { type: 'regular', labelPosition: 'top' } );
 		expect( ( form.fields as FormField[] ).map( ( card ) => card.id ) ).toEqual( [
 			'group:general',
 			'group:pricing',
-			'group:inventory',
 			'group:visibility',
 			'group:organization',
+			'group:inventory',
 			'group:content',
 			'group:notes',
 			'group:shipping',
@@ -228,5 +228,15 @@ describe( 'the apply-to-variations control field', () => {
 		expect( control.id ).toBe( APPLY_TO_VARIATIONS_FIELD_ID );
 		expect( control.getValue?.( { item: { regular_price: '10' } } as never ) ).toBeUndefined();
 		expect( control.setValue?.( { item: {}, value: true } as never ) ).toEqual( {} );
+	} );
+} );
+
+describe( 'section notes', () => {
+	it( 'end the section they belong to and never make a card of their own', () => {
+		const sections = sectionsOfTab( registryFields(), general, {}, false, { inventory: [ sectionNoteFieldId( 'inventory' ) ], external: [ sectionNoteFieldId( 'external' ) ] } );
+		const inventory = sections.find( ( section ) => section.group === 'inventory' );
+
+		expect( inventory?.fields[ inventory.fields.length - 1 ] ).toBe( sectionNoteFieldId( 'inventory' ) );
+		expect( sections.some( ( section ) => section.group === 'external' ) ).toBe( false );
 	} );
 } );

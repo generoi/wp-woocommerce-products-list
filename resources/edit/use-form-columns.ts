@@ -1,13 +1,13 @@
 /**
  * How many columns the edit form is wide enough for, measured on the form
  * itself (the panel can be a 480 px drawer or 1500 px wide on any screen),
- * not on the viewport: two from 760 px, else one. `narrow` (under 560 px)
+ * not on the viewport: two from 720 px (a 1280-1440 px laptop's default panel), else one. `narrow` (under 560 px)
  * tightens the cards' padding.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from '@wordpress/element';
 import type { RefObject } from 'react';
 
-export const TWO_COLUMNS_MIN_WIDTH = 760;
+export const TWO_COLUMNS_MIN_WIDTH = 720;
 export const NARROW_MAX_WIDTH = 560;
 
 export interface FormColumns {

@@ -14,6 +14,11 @@
 - Bulk edit opens on General (or the filtered language), not on the tab the last quick edit used; quick edits still remember their tab.
 - A variation's tax class stored as "parent" no longer raises a false "changed by someone else" notice after a save.
 - Short description sits under the name in quick edit; long texts show their first lines until focused, so Pricing stays in view. Shipping, Tax and Advanced end the shorter column (the main one in bulk edit). Every card with a pending edit shows " •". The bulk item list starts folded above 5 items. Sale times keep room for "hh.mm" and wrap under the date when narrow. A snackbar over a wide panel rises above its Update / Cancel footer. Shorter language tools summary ("Svenska tools (5)"). Change summary plural ("on 1 row").
+- The panel opens at least 880 px wide (within its limits) until the user drags its edge, and the form takes two columns from 720 px, so a 1280-1440 px laptop gets the side column (Status, Categories). In one column, Status and visibility and Organization come right after Pricing, before Inventory.
+- Quick edit: Stock quantity, Allow backorders? and Low stock threshold show only once Manage stock is ticked, as on WooCommerce's product screen ("Track stock quantity for this product.").
+- Bulk stock status is not offered when no selected row would take it; Inventory says why and what to do instead ("Set Stock quantity to 0", or for variable products: select their variations). Why a stock edit is skipped, the existing-sales choice and "only lower" now sit at the end of the Inventory and Pricing cards, and a greyed-out Update says why next to it.
+- Bulk price operations: the operation select has its own row (no more "Regular pr…"), the rounding sits beside the value, the direction appears only once a rounding is picked, and "Reads as" shares the note's reserved slot: no empty band and no jump while typing "r-20%".
+- A long text that is not focused no longer scrolls inside: the mouse wheel over it scrolls the panel. Language tools summary names the tools. A language tab's "Default:" hint shows the General tab's unsaved text ("Default (not saved yet): …").
 
 ## 0.2.4 - 2026-10-10
 

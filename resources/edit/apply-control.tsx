@@ -11,7 +11,7 @@ import type { ReactNode } from 'react';
 import type { DataFormControlProps, Field } from '../dataviews';
 import { CheckboxControl } from '../ui/checkbox-control';
 import type { FormData } from './bulk-numeric-control';
-import { APPLY_TO_VARIATIONS_FIELD_ID } from './form-layouts';
+import { APPLY_TO_VARIATIONS_FIELD_ID, sectionNoteFieldId } from './form-layouts';
 
 export interface ApplyControlState {
 	checked: boolean;
@@ -57,6 +57,42 @@ export function applyControlField( label: string ): Field< FormData > {
 		id: APPLY_TO_VARIATIONS_FIELD_ID,
 		label,
 		Edit: ApplyToVariationsControl,
+		getValue: () => undefined,
+		setValue: () => ( {} ),
+	};
+}
+
+/**
+ * Notes that end a section (why a stock edit is skipped and what to do instead, in Inventory), by section: shown
+ * next to the fields they are about rather than below the form. Form-only, like the apply control.
+ */
+export const SectionNotesContext = createContext< Record< string, ReactNode > >( {} );
+
+function sectionNoteControl( group: string ) {
+	return function SectionNote( _props: DataFormControlProps< FormData > ) {
+		const notes = useContext( SectionNotesContext );
+		const note = notes[ group ];
+
+		return note ? <div className="wc-pl-edit__section-note">{ note }</div> : null;
+	};
+}
+
+const noteControls = new Map< string, ReturnType< typeof sectionNoteControl > >();
+
+/** The note's DataForm field: no label of its own (the note says what it is about). */
+export function sectionNoteField( group: string ): Field< FormData > {
+	let Edit = noteControls.get( group );
+
+	// One component per section for the module's life: a re-render never remounts the note (and drops focus in it).
+	if ( ! Edit ) {
+		Edit = sectionNoteControl( group );
+		noteControls.set( group, Edit );
+	}
+
+	return {
+		id: sectionNoteFieldId( group ),
+		label: '',
+		Edit,
 		getValue: () => undefined,
 		setValue: () => ( {} ),
 	};

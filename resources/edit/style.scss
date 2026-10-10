@@ -129,6 +129,15 @@
 			margin-inline-start: 8px;
 		}
 
+		// Why Update is greyed out: a line of its own under the buttons.
+		.wc-pl-edit__footer-reason {
+			flex: 1 1 100%;
+			order: 1;
+			margin: 0;
+			font-size: 12px;
+			color: var( --wp-components-color-foreground-muted, #757575 );
+		}
+
 		// While saving: a full-width block above the buttons with the count, percent, time left and a hint.
 		.wc-pl-edit__progress.is-prominent {
 			order: -1;
@@ -381,8 +390,10 @@
 
 	// A long text shows its first lines until it is edited (scrolling inside), so a full short description never pushes
 	// Pricing below the fold; while focused it takes the room it needs.
+	// It does not scroll inside until it is focused either: the mouse wheel over it scrolls the panel, on to Pricing.
 	.wc-pl-html-editor__visual:not( :focus ) {
 		max-height: 11.2em;
+		overflow: hidden;
 	}
 
 	.wc-pl-edit__form.is-narrow .dataforms-layouts-card__field {
@@ -403,6 +414,36 @@
 
 	.wc-pl-edit__apply-note {
 		padding-inline-start: 24px;
+	}
+
+	// A note ending a card (existing sales in Pricing, skipped stock edits in Inventory): next to its fields. The field
+	// wrapper of a note with nothing to say takes no room.
+	.dataforms-layouts-regular__field:empty {
+		display: none;
+	}
+
+	.wc-pl-edit__section-note {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+
+		.wc-pl-edit__notice {
+			margin: 0;
+		}
+
+		.wc-pl-edit__options {
+			margin: 0;
+		}
+	}
+
+	.wc-pl-edit__status-note {
+		margin: 0;
+		font-size: 12px;
+		color: var( --wp-components-color-foreground-muted, #757575 );
+
+		.components-button.is-link {
+			font-size: 12px;
+		}
 	}
 
 }
@@ -666,34 +707,46 @@
 	}
 }
 
-.wc-pl-bulk-numeric__round {
+.wc-pl-bulk-numeric__op {
+	margin-bottom: 8px;
+}
+
+// Beside the value: kept in the row while it does not apply, so typing "r-20%" moves nothing below.
+.wc-pl-bulk-numeric__round.is-inactive {
+	visibility: hidden;
+}
+
+// Which way the rounding goes: only once a rounding is picked (the user is right there, on the select above).
+.wc-pl-bulk-numeric__round-mode {
 	margin-top: 8px;
 
-	// Kept in the layout while it does not apply: picking an operation or a rounding moves nothing below.
-	&.is-inactive,
-	.is-inactive {
-		visibility: hidden;
+	&.is-inactive {
+		display: none;
 	}
 }
 
-// The operation's note sits in a slot two lines high whether or not there is one, for the same reason.
-.wc-pl-bulk-numeric__resolved {
-	display: block;
-	margin-top: 4px;
-	font-size: 12px;
-	line-height: 1.4;
-
-	&:empty {
-		margin-top: 0;
-	}
-}
-
+// What the typed value reads as, then the operation's note: one slot two lines high whether or not there is
+// anything to say, so neither appearing moves the fields below.
 .wc-pl-bulk-numeric__note {
 	display: block;
 	min-height: calc( 2 * 1.4em );
 	margin-top: 4px;
 	font-size: 12px;
 	line-height: 1.4;
+}
+
+// A sale price's "Reads as: Regular price minus 20 %" and its note run to three lines in a column: room for them.
+.wc-pl-bulk-numeric--sale .wc-pl-bulk-numeric__note {
+	min-height: calc( 3 * 1.4em );
+}
+
+.wc-pl-bulk-numeric__resolved {
+	font-weight: 600;
+	color: var( --wp-components-color-foreground, #1e1e1e );
+
+	&:not( :empty ) {
+		margin-inline-end: 0.4em;
+	}
 }
 
 // The direction of a numeric bulk edit under its summary line; a sale price that rises is flagged.

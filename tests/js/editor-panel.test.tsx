@@ -45,10 +45,10 @@ vi.mock( '../../resources/edit/inline-editor', async () => {
 } );
 
 const { EditorHostProvider } = await import( '../../resources/edit/editor-context' );
-const { EDITED_ROW_ATTRIBUTE, PANEL_DEFAULT_SHARE, PANEL_MIN_WIDTH, PANEL_OPEN_CLASS, PANEL_WIDTH_PREFERENCE, clampPanelWidth, maxPanelWidth, panelWidthFor, sessionKey } = await import( '../../resources/edit/editor-panel' );
+const { EDITED_ROW_ATTRIBUTE, PANEL_DEFAULT_MIN_WIDTH, PANEL_DEFAULT_SHARE, defaultPanelWidth, PANEL_MIN_WIDTH, PANEL_OPEN_CLASS, PANEL_WIDTH_PREFERENCE, clampPanelWidth, maxPanelWidth, panelWidthFor, sessionKey } = await import( '../../resources/edit/editor-panel' );
 
-/** jsdom's window: 1024 px wide, no admin menu. The panel opens at 52 % of it. */
-const PANEL_DEFAULT_WIDTH = Math.round( 1024 * 0.52 );
+/** jsdom's window: 1024 px wide, no admin menu. The panel opens at 52 % of it, at least 880 px, leaving the list 320 px: 704 px. */
+const PANEL_DEFAULT_WIDTH = 704;
 /** The stored preference is the share of the window, rounded to three decimals. */
 const shareOf = ( width: number ) => Math.round( ( width / 1024 ) * 1000 ) / 1000;
 const { PREFERENCES_SCOPE } = await import( '../../resources/store/view' );
@@ -366,11 +366,13 @@ describe( 'EditorPanel', () => {
 		expect( handle.getAttribute( 'aria-valuenow' ) ).toBe( String( PANEL_DEFAULT_WIDTH ) );
 		expect( html.getPropertyValue( '--wc-pl-panel-width' ) ).toBe( `${ PANEL_DEFAULT_WIDTH }px` );
 
+		fireEvent.keyDown( handle, { key: 'ArrowRight' } );
+		expect( handle.getAttribute( 'aria-valuenow' ) ).toBe( String( PANEL_DEFAULT_WIDTH - 16 ) );
+		expect( html.getPropertyValue( '--wc-pl-panel-width' ) ).toBe( `${ PANEL_DEFAULT_WIDTH - 16 }px` );
+		expect( html.getPropertyValue( '--wc-pl-panel-inset' ) ).toBe( `${ PANEL_DEFAULT_WIDTH - 16 }px` );
+		expect( select( preferencesStore ).get( PREFERENCES_SCOPE, PANEL_WIDTH_PREFERENCE ) ).toBe( shareOf( PANEL_DEFAULT_WIDTH - 16 ) );
 		fireEvent.keyDown( handle, { key: 'ArrowLeft' } );
-		expect( handle.getAttribute( 'aria-valuenow' ) ).toBe( String( PANEL_DEFAULT_WIDTH + 16 ) );
-		expect( html.getPropertyValue( '--wc-pl-panel-width' ) ).toBe( `${ PANEL_DEFAULT_WIDTH + 16 }px` );
-		expect( html.getPropertyValue( '--wc-pl-panel-inset' ) ).toBe( `${ PANEL_DEFAULT_WIDTH + 16 }px` );
-		expect( select( preferencesStore ).get( PREFERENCES_SCOPE, PANEL_WIDTH_PREFERENCE ) ).toBe( shareOf( PANEL_DEFAULT_WIDTH + 16 ) );
+		expect( handle.getAttribute( 'aria-valuenow' ) ).toBe( String( PANEL_DEFAULT_WIDTH ) );
 
 		fireEvent.keyDown( handle, { key: 'Home' } );
 		expect( handle.getAttribute( 'aria-valuenow' ) ).toBe( String( PANEL_MIN_WIDTH ) );
@@ -407,16 +409,16 @@ describe( 'EditorPanel', () => {
 
 			fireEvent.pointerDown( handle, { button: 0, clientX: 600, pointerId: 1 } );
 			expect( document.documentElement.classList.contains( 'wc-pl-panel-resizing' ) ).toBe( true );
-			fireEvent.pointerMove( handle, { clientX: 560, pointerId: 1 } );
+			fireEvent.pointerMove( handle, { clientX: 640, pointerId: 1 } );
 			frames.splice( 0 ).forEach( ( frame ) => frame( 0 ) );
 
-			expect( html.getPropertyValue( '--wc-pl-panel-width' ) ).toBe( `${ PANEL_DEFAULT_WIDTH + 40 }px` );
+			expect( html.getPropertyValue( '--wc-pl-panel-width' ) ).toBe( `${ PANEL_DEFAULT_WIDTH - 40 }px` );
 			expect( html.getPropertyValue( '--wc-pl-panel-inset' ) ).toBe( `${ PANEL_DEFAULT_WIDTH }px` );
 
-			fireEvent.pointerUp( handle, { clientX: 560, pointerId: 1 } );
-			expect( html.getPropertyValue( '--wc-pl-panel-inset' ) ).toBe( `${ PANEL_DEFAULT_WIDTH + 40 }px` );
+			fireEvent.pointerUp( handle, { clientX: 640, pointerId: 1 } );
+			expect( html.getPropertyValue( '--wc-pl-panel-inset' ) ).toBe( `${ PANEL_DEFAULT_WIDTH - 40 }px` );
 			expect( document.documentElement.classList.contains( 'wc-pl-panel-resizing' ) ).toBe( false );
-			expect( select( preferencesStore ).get( PREFERENCES_SCOPE, PANEL_WIDTH_PREFERENCE ) ).toBe( shareOf( PANEL_DEFAULT_WIDTH + 40 ) );
+			expect( select( preferencesStore ).get( PREFERENCES_SCOPE, PANEL_WIDTH_PREFERENCE ) ).toBe( shareOf( PANEL_DEFAULT_WIDTH - 40 ) );
 		} finally {
 			raf.mockRestore();
 		}
@@ -427,6 +429,12 @@ describe( 'EditorPanel', () => {
 		expect( PANEL_DEFAULT_SHARE ).toBeLessThanOrEqual( 0.55 );
 		expect( panelWidthFor( PANEL_DEFAULT_SHARE, 1920, 160 ) ).toBe( 998 );
 		expect( panelWidthFor( PANEL_DEFAULT_SHARE, 1280, 160 ) ).toBe( 666 );
+		// Until the user picks a width: wide enough for the form's side column on a laptop.
+		expect( PANEL_DEFAULT_MIN_WIDTH ).toBe( 880 );
+		expect( defaultPanelWidth( 1440, 160 ) ).toBe( 880 );
+		expect( defaultPanelWidth( 1280, 160 ) ).toBe( 800 );
+		expect( defaultPanelWidth( 1920, 160 ) ).toBe( 998 );
+		expect( defaultPanelWidth( 800, 0 ) ).toBe( 800 );
 		expect( clampPanelWidth( 100, 1600, 0 ) ).toBe( PANEL_MIN_WIDTH );
 		expect( clampPanelWidth( 2000, 1600, 0 ) ).toBe( 1200 );
 		expect( clampPanelWidth( 500.4, 1600, 0 ) ).toBe( 500 );

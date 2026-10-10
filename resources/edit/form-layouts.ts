@@ -87,13 +87,13 @@ function orderOf( field: ProductField ): number {
 	return field.edit && typeof field.edit.order === 'number' ? field.edit.order : 100;
 }
 
-/** Where the groups not in GROUP_ORDER (an extension's) go: after the texts, before the rarely used settings. */
-const UNKNOWN_GROUP_RANK = GROUP_ORDER.indexOf( 'seo' ) + 0.5;
+/* Groups not in the order (an extension's) go after the texts, before the rarely used settings (groupRank). */
 
-function groupRank( group: string, seen: string[] ): number {
-	const index = GROUP_ORDER.indexOf( group );
+function groupRank( group: string, seen: string[], order: readonly string[] = GROUP_ORDER ): number {
+	const index = order.indexOf( group );
+	const unknown = order.indexOf( 'seo' ) + 0.5;
 
-	return index === -1 ? UNKNOWN_GROUP_RANK + ( seen.indexOf( group ) + 1 ) / 1000 : index;
+	return index === -1 ? unknown + ( seen.indexOf( group ) + 1 ) / 1000 : index;
 }
 
 /**
@@ -260,8 +260,19 @@ export const SIDE_GROUPS: ReadonlySet< string > = new Set( [ 'visibility', 'orga
 /** Rarely used sections: a collapsed card, opened by the user or by an edit, a problem or a focus request inside. */
 export const COLLAPSED_GROUPS: ReadonlySet< string > = new Set( [ 'shipping', 'tax', 'advanced', 'linked', 'downloads' ] );
 
-/** Section order in a single column: Status and Organization come before the long descriptions. */
-export const NARROW_ORDER: readonly string[] = GROUP_ORDER;
+/**
+ * Section order in a single column (a laptop-wide panel, a drawer): what it is and what it costs, then how it is
+ * shown and filed (publish or draft, categories, brands: the WordPress Publish and Categories boxes, used daily),
+ * then the stock, the texts, and last the rarely used settings.
+ */
+export const NARROW_ORDER: readonly string[] = [ 'general', 'pricing', 'price', 'external', 'visibility', 'organization', 'inventory', 'content', 'translation', 'prices', 'seo', 'shipping', 'tax', 'advanced', 'linked', 'downloads' ];
+
+/** A form-only note at the end of a section (`wcpl_note_inventory`: why a stock edit is skipped and what to do instead). */
+export const SECTION_NOTE_FIELD_PREFIX = 'wcpl_note_';
+
+export function sectionNoteFieldId( group: string ): string {
+	return `${ SECTION_NOTE_FIELD_PREFIX }${ group }`;
+}
 
 /** Section order when wide: the main column (the work), then the side column (the settings); prices come before SEO. */
 export const SECTION_ORDER: readonly string[] = [ 'general', 'pricing', 'external', 'inventory', 'content', 'translation', 'visibility', 'organization', 'prices', 'seo', 'shipping', 'tax', 'advanced' ];
@@ -324,7 +335,7 @@ export function isCollapsedGroup( group: string ): boolean {
 }
 
 /** The sections of a tab, each with its fields in `edit.order`, in single-column order. */
-export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads: Record< string, string[] > = {}, bulk = false ): Array< { group: string; fields: string[] } > {
+export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads: Record< string, string[] > = {}, bulk = false, trails: Record< string, string[] > = {} ): Array< { group: string; fields: string[] } > {
 	const tabFields = fieldsOfTab( fields, tab );
 	const sections = new Map< string, string[] >();
 
@@ -347,9 +358,18 @@ export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads:
 			sections.set( group, [ ...( sections.get( group ) ?? [] ), field.id ] );
 		} );
 
+	// A trailing note only ends a section that is there: it never makes a card of its own.
+	for ( const [ group, ids ] of Object.entries( trails ) ) {
+		const current = sections.get( group );
+
+		if ( current && ids.length ) {
+			sections.set( group, [ ...current, ...ids ] );
+		}
+	}
+
 	return Array.from( sections.entries() )
 		.map( ( [ group, ids ] ) => ( { group, fields: ids } ) )
-		.sort( ( a, b ) => groupRank( a.group, seen ) - groupRank( b.group, seen ) );
+		.sort( ( a, b ) => groupRank( a.group, seen, NARROW_ORDER ) - groupRank( b.group, seen, NARROW_ORDER ) );
 }
 
 /** A section's children: field ids, with the pairs as `row` layouts (aligned at the top so uneven help texts do not shift the inputs). */
@@ -391,6 +411,8 @@ export interface LayoutOptions {
 	open?: ReadonlySet< string >;
 	/** Fields that open their section's card, by section (the apply-to-variations control first in Pricing); the card is kept even when it has nothing else. */
 	leads?: Record< string, string[] >;
+	/** Form-only notes that end a section (sectionNoteFieldId), by section; never a card on their own. */
+	trails?: Record< string, string[] >;
 	/** Fields with a pending edit: a card holding one says so in its title (" •", as the tabs do). */
 	pending?: ReadonlySet< string >;
 	/** A bulk edit: no value summaries in the collapsed headers (one row's value would mislead). */
@@ -445,8 +467,8 @@ function sectionLabel( group: string, tab: QuickEditTab, settings: Settings ): s
  * `wcProductsList.quickEdit.layout` runs last.
  */
 export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, items: ProductListItem[], settings: Settings, options: LayoutOptions = {} ): Form {
-	const { columns = 1, open, leads, pending, bulk = false } = options;
-	const sections = sectionsOfTab( fields, tab, leads, bulk );
+	const { columns = 1, open, leads, trails, pending, bulk = false } = options;
+	const sections = sectionsOfTab( fields, tab, leads, bulk, trails );
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 
 	const cards: Array< { group: string; card: FormField; weight: number } > = sections.map( ( { group, fields: ids } ) => {

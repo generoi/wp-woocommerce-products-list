@@ -31,6 +31,7 @@ import { createHtmlTextControl } from './html-text-control';
 import { createMixedTextControl } from './mixed-text-control';
 import { createTermTokensControl } from './term-tokens-control';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
+import { isStockGatedEdit, managesStock } from './row-rules';
 import { saleDateProblem } from './sale-schedule';
 import { isParentDerivedField, isSellableField, leafOf } from './visibility';
 
@@ -52,6 +53,17 @@ export interface FormFieldOptions {
 	 * operations (change to, regular price minus 20 %…), since its variations' prices can differ.
 	 */
 	sellableOps?: boolean;
+	/** General-tab values with an unsaved edit (`name`): a language field's "Default:" hint shows what was typed, not the saved text. */
+	editedDefaults?: Record< string, unknown >;
+}
+
+/**
+ * How many rows take a stock status with the form's Manage stock value: not a variable product (its variations decide
+ * it) and not a row that manages stock (its quantity decides it). `manageStock` is the form's value: true or false
+ * for every row, anything else (untouched, mixed) leaves each row as it is.
+ */
+export function stockStatusTakers( rows: ProductListItem[], manageStock: unknown ): number {
+	return rows.filter( ( item ) => ! isVariableParent( item ) && ( manageStock === false || ( manageStock !== true && ! managesStock( item ) ) ) ).length;
 }
 
 /** Variations are Active (publish) or Inactive (private): the list's vocabulary, and what the Enable/Disable actions write. */
@@ -138,7 +150,7 @@ function integerMessage( value: unknown ): string | null {
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
-	const { bulk, items, base, mixed, settings, pending, labels, sellableOps = false } = options;
+	const { bulk, items, base, mixed, settings, pending, labels, sellableOps = false, editedDefaults = {} } = options;
 	const ids = new Set( fields.map( ( field ) => field.id ) );
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
@@ -169,7 +181,16 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 			setValue: ( { value } ) => ( { [ field.id ]: value } ),
 		};
 
-		if ( reference !== null && reference !== '' ) {
+		// Texts only: a language's price is in that market's currency, its default in the shop's.
+		const edited = reference !== null && leaf !== field.id && numericKindOf( field ) === null && Object.prototype.hasOwnProperty.call( editedDefaults, leaf ) ? editedDefaults[ leaf ] : undefined;
+
+		if ( typeof edited === 'string' && edited !== '' ) {
+			formField.description = sprintf(
+				/* translators: %s: the default-language value as typed on the General tab, not saved yet */
+				__( 'Default (not saved yet): %s', 'wp-woocommerce-products-list' ),
+				referenceText( field, edited, settings )
+			);
+		} else if ( reference !== null && reference !== '' ) {
 			formField.description = sprintf(
 				/* translators: %s: the default-language value */
 				__( 'Default: %s', 'wp-woocommerce-products-list' ),
@@ -251,17 +272,29 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		}
 
 		// WooCommerce works the stock status out from the quantity of a row that manages stock, and a variable product's from
-		// its variations: the edit skips those rows (row-rules.ts, visibility.ts). One row managing stock: the status is not offered.
-		if ( isParentDerivedField( field ) ) {
-			if ( ! bulk && field.id === leaf && ids.has( 'manage_stock' ) ) {
-				formField.isVisible = ( data ) => data.manage_stock !== true;
-			}
+		// its variations: the edit skips those rows (row-rules.ts, visibility.ts). The status is offered only while some
+		// row still takes it with the Manage stock the form shows (in a bulk edit too: a field every row would skip is a
+		// dead end; the Inventory card says what to do instead, inline-editor.tsx).
+		if ( isParentDerivedField( field ) && field.id === leaf && ids.has( 'manage_stock' ) ) {
+			formField.isVisible = ( data ) => stockStatusTakers( rows, data.manage_stock ) > 0;
+		}
 
+		if ( isParentDerivedField( field ) ) {
 			if ( bulk && someVariableParents ) {
 				formField.description ??= __( 'Skipped for variable products (their variations decide it) and for items that manage stock (their quantity decides it).', 'wp-woocommerce-products-list' );
 			} else if ( bulk ) {
 				formField.description ??= __( 'Skipped for items that manage stock: their quantity decides it.', 'wp-woocommerce-products-list' );
 			}
+		}
+
+		// As WooCommerce's product screen: quantity, backorders and the low stock threshold show once Manage stock is on
+		// (WooCommerce ignores them otherwise). A bulk edit keeps them, for the rows that do manage stock.
+		if ( ! bulk && field.id === leaf && isStockGatedEdit( field.id ) && ids.has( 'manage_stock' ) ) {
+			formField.isVisible = ( data ) => data.manage_stock === true;
+		}
+
+		if ( ! bulk && field.id === 'manage_stock' ) {
+			formField.description ??= onlyVariations ? __( 'Track stock quantity for this variation.', 'wp-woocommerce-products-list' ) : __( 'Track stock quantity for this product.', 'wp-woocommerce-products-list' );
 		}
 
 		// A variation without a class of its own ships like its parent; the product-level "No shipping class" is not a choice here.

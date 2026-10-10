@@ -252,30 +252,32 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 				label={ field.label }
 				hideLabelFromVision={ hideLabelFromVision }
 				help={ error ?? help }
-				className={ `wc-pl-bulk-numeric${ error ? ' wc-pl-bulk-numeric--invalid' : '' }` }
+				className={ `wc-pl-bulk-numeric${ salePrice ? ' wc-pl-bulk-numeric--sale' : '' }${ error ? ' wc-pl-bulk-numeric--invalid' : '' }` }
 			>
+				{ /* The operation on a row of its own: "Regular price minus (%)" is read in full, not cut to "Regular pr…". */ }
+				<SelectControl
+					className="wc-pl-bulk-numeric__op"
+					__nextHasNoMarginBottom
+					__next40pxDefaultSize
+					id={ `${ baseId }-op` }
+					aria-label={ `${ field.label }: ${ __( 'operation', 'wp-woocommerce-products-list' ) }` }
+					value={ choiceValue( op ) }
+					options={ list.map( ( choice ) => ( { value: choice.value, label: choice.label } ) ) }
+					onChange={ ( value: string ) => {
+						const choice = list.find( ( entry ) => entry.value === value ) ?? list[ 0 ]!;
+
+						chosenRef.current = choice.operation !== 'dont_change';
+						setDraft( null );
+
+						update( {
+							operation: choice.operation,
+							value: op.value,
+							percent: choice.percent,
+							...( op.round && choice.operation !== 'set' ? { round: op.round, ...( op.roundMode ? { roundMode: op.roundMode } : {} ) } : {} ),
+						} );
+					} }
+				/>
 				<HStack alignment="top" spacing={ 2 } className="wc-pl-bulk-numeric__row">
-					<SelectControl
-						__nextHasNoMarginBottom
-						__next40pxDefaultSize
-						id={ `${ baseId }-op` }
-						aria-label={ `${ field.label }: ${ __( 'operation', 'wp-woocommerce-products-list' ) }` }
-						value={ choiceValue( op ) }
-						options={ list.map( ( choice ) => ( { value: choice.value, label: choice.label } ) ) }
-						onChange={ ( value: string ) => {
-							const choice = list.find( ( entry ) => entry.value === value ) ?? list[ 0 ]!;
-
-							chosenRef.current = choice.operation !== 'dont_change';
-							setDraft( null );
-
-							update( {
-								operation: choice.operation,
-								value: op.value,
-								percent: choice.percent,
-								...( op.round && choice.operation !== 'set' ? { round: op.round, ...( op.roundMode ? { roundMode: op.roundMode } : {} ) } : {} ),
-							} );
-						} }
-					/>
 					<TextControl
 						__nextHasNoMarginBottom
 						__next40pxDefaultSize
@@ -293,51 +295,49 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 							update( next );
 						} }
 					/>
-				</HStack>
-				{ rounding.length > 0 ? (
-					// Always in the layout (hidden while it does not apply), so choosing an operation or a rounding never
-					// moves the controls below it: the next click lands where the eye aimed (Schedule sale, the dates).
-					<HStack
-						alignment="top"
-						spacing={ 2 }
-						className={ `wc-pl-bulk-numeric__row wc-pl-bulk-numeric__round${ roundable ? '' : ' is-inactive' }` }
-						aria-hidden={ roundable ? undefined : true }
-					>
-						<SelectControl
-							__nextHasNoMarginBottom
-							__next40pxDefaultSize
-							id={ `${ baseId }-round` }
-							aria-label={ `${ field.label }: ${ __( 'rounding', 'wp-woocommerce-products-list' ) }` }
-							value={ op.round ?? '' }
-							options={ rounding }
-							disabled={ ! roundable }
-							tabIndex={ roundable ? undefined : -1 }
-							onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
-						/>
-						<div className={ `wc-pl-bulk-numeric__round-mode${ roundable && op.round ? '' : ' is-inactive' }` } aria-hidden={ roundable && op.round ? undefined : true }>
+					{ rounding.length > 0 ? (
+						// Beside the value and kept in the row (hidden while it does not apply): typing "r-20%" moves nothing
+						// below it, and an idle control has no empty band where the rounding would go.
+						<div className={ `wc-pl-bulk-numeric__round${ roundable ? '' : ' is-inactive' }` } aria-hidden={ roundable ? undefined : true }>
 							<SelectControl
 								__nextHasNoMarginBottom
 								__next40pxDefaultSize
-								id={ `${ baseId }-round-mode` }
-								aria-label={ `${ field.label }: ${ __( 'rounding direction', 'wp-woocommerce-products-list' ) }` }
-								value={ op.roundMode ?? 'nearest' }
-								options={ modes }
-								disabled={ ! ( roundable && op.round ) }
-								tabIndex={ roundable && op.round ? undefined : -1 }
-								onChange={ ( value: string ) => {
-									const { roundMode: _previous, ...rest } = op;
-
-									update( value === 'nearest' ? rest : { ...rest, roundMode: value as RoundMode } );
-								} }
+								id={ `${ baseId }-round` }
+								aria-label={ `${ field.label }: ${ __( 'rounding', 'wp-woocommerce-products-list' ) }` }
+								value={ op.round ?? '' }
+								options={ rounding }
+								disabled={ ! roundable }
+								tabIndex={ roundable ? undefined : -1 }
+								onChange={ ( value: string ) => update( value ? { ...op, round: value } : { operation: op.operation, value: op.value, ...( op.percent ? { percent: true } : {} ) } ) }
 							/>
 						</div>
-					</HStack>
+					) : null }
+				</HStack>
+				{ rounding.length > 0 ? (
+					// Which way the rounding goes: shown once a rounding is picked (right above it, where the eye already is).
+				<div className={ `wc-pl-bulk-numeric__round-mode${ roundable && op.round ? '' : ' is-inactive' }` } aria-hidden={ roundable && op.round ? undefined : true }>
+					<SelectControl
+						__nextHasNoMarginBottom
+						__next40pxDefaultSize
+						id={ `${ baseId }-round-mode` }
+						aria-label={ `${ field.label }: ${ __( 'rounding direction', 'wp-woocommerce-products-list' ) }` }
+						value={ op.roundMode ?? 'nearest' }
+						options={ modes }
+						disabled={ ! ( roundable && op.round ) }
+						tabIndex={ roundable && op.round ? undefined : -1 }
+						onChange={ ( value: string ) => {
+							const { roundMode: _previous, ...rest } = op;
+
+							update( value === 'nearest' ? rest : { ...rest, roundMode: value as RoundMode } );
+						} }
+					/>
+				</div>
 				) : null }
-				{ /* A fixed slot: an operation's note appearing or going never moves the fields below. */ }
-				<Text className="wc-pl-bulk-numeric__resolved" aria-live="polite" weight={ 600 }>
-					{ resolved ?? '' }
-				</Text>
+				{ /* One slot two lines high for what the typed value reads as and the operation's note: neither moves the fields below. */ }
 				<Text variant="muted" className="wc-pl-bulk-numeric__note">
+					<span className="wc-pl-bulk-numeric__resolved" aria-live="polite">
+						{ resolved ?? '' }
+					</span>
 					{ note ?? ( idle ? shorthandHint( kind, salePrice ) : '' ) }
 				</Text>
 			</BaseControl>

@@ -59,14 +59,14 @@ import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools
 import type { StagedTool } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation, parentIdOf } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
-import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, buildTabs, fieldsOfTab, formLabelOf, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
-import { ApplyControlContext, applyControlField } from './apply-control';
+import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, buildTabs, fieldsOfTab, formLabelOf, GENERAL_TAB_ID, layoutGroupOf, sectionNoteFieldId, tabOf, withScheduleSale } from './form-layouts';
+import { ApplyControlContext, applyControlField, sectionNoteField, SectionNotesContext } from './apply-control';
 import type { ApplyControlState } from './apply-control';
-import { labelsOf, toFormFields } from './form-fields';
+import { labelsOf, stockStatusTakers, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
-import { canEnableStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
+import { canEnableStock, managesStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { saveEdits, saveFields } from './save';
 import { resetHtmlEditorMode } from './html-text-control';
@@ -847,11 +847,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const tab = useMemo< QuickEditTab >( () => tabs.find( ( entry ) => entry.id === tabId ) ?? tabs[ 0 ] ?? { id: GENERAL_TAB_ID, label: __( 'General', 'wp-woocommerce-products-list' ) }, [ tabs, tabId ] );
 	// The labels inside the form ("Stock status"; "Name" on the Svenska tab): what a control is found by.
 	const controlLabels = useMemo( () => Object.fromEntries( editFields.map( ( field ) => [ field.id, formLabelOf( field, settings ) ] ) ), [ editFields, settings ] );
+	// What was typed on General for the texts a language tab shows as its "Default:" (a quick edit's name, say).
+	const editedDefaultsKey = bulk || tab.id === GENERAL_TAB_ID ? '{}' : JSON.stringify( Object.fromEntries( Object.entries( state.edits ).filter( ( [ id, value ] ) => tabOf( editFieldsById.get( id ) ?? ( { id } as ProductField ) ) === GENERAL_TAB_ID && typeof value === 'string' ) ) );
 	const formFields = useMemo(
-		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels, sellableOps } ),
+		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels, sellableOps, editedDefaults: JSON.parse( editedDefaultsKey ) as Record< string, unknown > } ),
 		// state.data changes on every keystroke; the placeholders only need the merged base, which state.mixed tracks.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels, sellableOps ]
+		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels, sellableOps, editedDefaultsKey ]
 	);
 
 	// A tab visited for the first time loads its fields; the rows merge in object by object.
@@ -1131,7 +1133,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		return section ? { [ section ]: [ APPLY_TO_VARIATIONS_FIELD_ID ] } : undefined;
 	}, [ applyOffered, tab.id, editFields ] );
-	const dataFormFields = useMemo( () => ( formLeads ? [ ...formFields, applyField ] : formFields ), [ formLeads, formFields, applyField ] );
+	// Notes that end Pricing and Inventory (existing sales, "only lower", why a stock edit is skipped): next to the fields
+	// they are about. A tab without that card (a language's) shows them below the form, as before.
+	const noteSections = useMemo( () => {
+		const present = new Set( visibleFields.filter( ( field ) => fieldsOfTab( [ field ], tab ).length > 0 ).map( ( field ) => layoutGroupOf( field, tab, bulk ) ) );
+
+		return [ 'pricing', 'inventory' ].filter( ( group ) => present.has( group ) );
+	}, [ visibleFields, tab, bulk ] );
+	const formTrails = useMemo< Record< string, string[] > >( () => Object.fromEntries( noteSections.map( ( group ) => [ group, [ sectionNoteFieldId( group ) ] ] ) ), [ noteSections ] );
+	const dataFormFields = useMemo(
+		() => [ ...formFields, ...( formLeads ? [ applyField ] : [] ), ...noteSections.map( ( group ) => sectionNoteField( group ) ) ],
+		[ formLeads, formFields, applyField, noteSections ]
+	);
 
 	// Collapsed cards open for a field with a pending edit or a problem, and that stays so for this selection: a card
 	// never closes under the user because an edit was typed back or an error went away. (A field focused from the
@@ -1161,9 +1174,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				open: new Set( openKey.split( '|' ) ),
 				pending: new Set( pendingKey.split( '|' ) ),
 				leads: formLeads,
+				trails: formTrails,
 				bulk,
 			} ),
-		[ visibleFields, tab, items, settings, formColumns.columns, openKey, pendingKey, formLeads, bulk ]
+		[ visibleFields, tab, items, settings, formColumns.columns, openKey, pendingKey, formLeads, formTrails, bulk ]
 	);
 	const { validity, isValid } = useFormValidity< FormData >( state.data, dataFormFields, form );
 
@@ -2595,6 +2609,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const showNext = ! bulk && nextRow !== null && ! failedIds;
 	// "Save & next" with nothing typed just moves on; with edits it saves them first.
 	const nextBlocked = saving || loading || needsEditOthers || nothingToWrite;
+	// Edits typed, yet nothing reaches any row: why, next to the greyed-out Update, not only in a note up the form.
+	const nothingReason =
+		! saving && ! loading && nothingToWrite && pendingCount > 0 && stagedCount === 0 && ! failedIds
+			? stockGated.length > 0 && stockGated.length === targetsForValidation.filter( ( item ) => ! item._placeholder ).length
+				? stockGated.length === 1
+					? __( 'Nothing to update: the stock changes need "Manage stock" on (see Inventory).', 'wp-woocommerce-products-list' )
+					: __( 'Nothing to update: none of these items manages stock, so the stock changes are skipped (see Inventory).', 'wp-woocommerce-products-list' )
+				: __( 'Nothing to update: every change is skipped for these items (see the notes in the form).', 'wp-woocommerce-products-list' )
+			: null;
 
 	const title = bulk
 		? sprintf(
@@ -2628,6 +2651,163 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			{ loadingLine }
 		</div>
 	);
+
+
+	const stockGatedTotal = targetsForValidation.filter( ( item ) => ! item._placeholder ).length;
+	// A bulk stock status that no selected row would take (they manage stock, or are variable products): say why, and
+	// what does it instead, rather than a field that ends in "Nothing to update".
+	const statusField = editFields.find( ( field ) => field.id === 'stock_status' );
+	const statusRows = items.filter( ( item ) => ! item._placeholder );
+	const statusDeadEnd =
+		bulk && statusField !== undefined && visibleFields.some( ( field ) => field.id === 'manage_stock' ) && stockStatusTakers( statusRows, state.data.manage_stock ) === 0
+			? statusRows.every( isVariableParent )
+				? 'parents'
+				: statusRows.some( ( item ) => ! isVariableParent( item ) && managesStock( item ) ) || state.data.manage_stock === true
+				? 'managed'
+				: null
+			: null;
+	const canZeroStock = visibleFields.some( ( field ) => field.id === 'stock_quantity' ) && ! isPendingOp( isNumericOp( state.data.stock_quantity ) ? state.data.stock_quantity : undefined );
+	const statusNote =
+		statusDeadEnd === 'parents' ? (
+			<p className="wc-pl-edit__status-note">
+				{ __( 'Stock status: a variable product takes it from its variations. To mark sizes in or out of stock, expand the products in the list and select their variations.', 'wp-woocommerce-products-list' ) }
+			</p>
+		) : statusDeadEnd === 'managed' ? (
+			<p className="wc-pl-edit__status-note">
+				{ statusRows.some( isVariableParent )
+					? __( 'Stock status: the other items manage stock, so their quantity decides it, and variable products take it from their variations. To sell them out, set Stock quantity to 0.', 'wp-woocommerce-products-list' )
+					: __( 'Stock status: these items manage stock, so their quantity decides it. To sell them out, set Stock quantity to 0.', 'wp-woocommerce-products-list' ) }{ ' ' }
+				{ canZeroStock ? (
+					<Button variant="link" disabled={ saving } onClick={ () => onChange( { stock_quantity: { operation: 'set', value: '0' } } ) }>
+						{ __( 'Set Stock quantity to 0', 'wp-woocommerce-products-list' ) }
+					</Button>
+				) : null }
+			</p>
+		) : null;
+	const stockNotice =
+		stockGated.length > 0 && ! loading ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__stock-warning">
+					{ stockGatedTotal === 1
+						? __( 'This item does not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for it: tick Manage stock to set them.', 'wp-woocommerce-products-list' )
+						: sprintf(
+						/* translators: 1: number of rows, 2: number of rows in total, 3: their names */
+						_n(
+							'%1$d of the %2$d rows does not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for it; it will be skipped: %3$s',
+							'%1$d of the %2$d rows do not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for them; they will be skipped: %3$s',
+							stockGated.length,
+							'wp-woocommerce-products-list'
+						),
+						stockGated.length,
+						stockGatedTotal,
+						listNames( stockGated )
+					) }
+					{ stockEnableable.length > 0 ? (
+						<CheckboxControl
+							__nextHasNoMarginBottom
+							label={
+								stockEnableable.length === stockGated.length
+									? sprintf(
+											/* translators: %d: number of rows */
+											_n( 'Turn on "Manage stock" for that row and write the values', 'Turn on "Manage stock" for those %d rows and write the values', stockEnableable.length, 'wp-woocommerce-products-list' ),
+											stockEnableable.length
+									  )
+									: sprintf(
+											/* translators: %d: number of rows */
+											_n( 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', stockEnableable.length, 'wp-woocommerce-products-list' ),
+											stockEnableable.length
+									  )
+							}
+							checked={ enableManageStock }
+							disabled={ saving }
+							onChange={ ( checked ) => {
+								setEnableManageStock( checked );
+								setErrors( [] );
+								setWarnings( [] );
+								setAcknowledged( null );
+							} }
+						/>
+					) : null }
+				</Notice>
+		) : null;
+	const inventoryNote =
+		stockNotice || statusNote ? (
+			<>
+				{ statusNote }
+				{ stockNotice }
+			</>
+		) : null;
+	const saleNotice =
+		existingSales.rows.length > 0 && ! loading ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning">
+					<p>
+						{ sprintf(
+							/* translators: 1: number of rows with a sale, 2: number of rows in total */
+							_n( '%1$d of the %2$d rows already has a sale price.', '%1$d of the %2$d rows already have a sale price.', existingSales.rows.length, 'wp-woocommerce-products-list' ),
+							existingSales.rows.length,
+							targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length
+						) }{ ' ' }
+						{ runningSales.count > 0 ? runningSales.message : null }
+					</p>
+					<RadioControl
+						className="wc-pl-edit__sale-choice"
+						label={ __( 'Existing sales', 'wp-woocommerce-products-list' ) }
+						selected={ saleChoice ?? ( runningSales.count > 0 ? '' : 'replace' ) }
+						options={ [
+							{
+								value: 'replace',
+								label:
+									runningSales.count > 0
+										? sprintf(
+												/* translators: %d: number of rows on sale now */
+												_n( 'Replace them (the %d sale running now ends when you update)', 'Replace them (the %d sales running now end when you update)', runningSales.count, 'wp-woocommerce-products-list' ),
+												runningSales.count
+										  )
+										: __( 'Replace them', 'wp-woocommerce-products-list' ),
+							},
+							{
+								value: 'skip',
+								label: sprintf(
+									/* translators: %d: number of rows */
+									_n( 'Skip the %d row that already has a sale', 'Skip the %d rows that already have a sale', existingSales.rows.length, 'wp-woocommerce-products-list' ),
+									existingSales.rows.length
+								),
+							},
+						] }
+						onChange={ ( value: string ) => {
+							setSaleChoice( value === 'skip' ? 'skip' : 'replace' );
+							setErrors( [] );
+							setWarnings( [] );
+							setAcknowledged( null );
+						} }
+						disabled={ saving }
+					/>
+				</Notice>
+		) : null;
+	const lowerOption =
+		priceOps && plannedEdits.sale_price !== undefined && ! loading ? (
+				<div className="wc-pl-edit__options">
+					<CheckboxControl
+						__nextHasNoMarginBottom
+						label={ __( 'Only where the new sale price is lower than the price the item sells at now', 'wp-woocommerce-products-list' ) }
+						checked={ onlyLowerSale }
+						disabled={ saving }
+						onChange={ ( checked ) => {
+							setOnlyLowerSale( checked );
+							setErrors( [] );
+							setWarnings( [] );
+							setAcknowledged( null );
+						} }
+					/>
+				</div>
+		) : null;
+	const pricingNote =
+		saleNotice || lowerOption ? (
+			<>
+				{ saleNotice }
+				{ lowerOption }
+			</>
+		) : null;
+	const sectionNotes = { inventory: inventoryNote, pricing: pricingNote };
 
 	return (
 		<form
@@ -2872,117 +3052,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						<p>{ __( 'The selected rows share no editable fields.', 'wp-woocommerce-products-list' ) }</p>
 					) : (
 						<ApplyControlContext.Provider value={ applyControl }>
-							<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+							<SectionNotesContext.Provider value={ sectionNotes }>
+								<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+							</SectionNotesContext.Provider>
 						</ApplyControlContext.Provider>
 					) }
 				</div>
 
-				{ stockGated.length > 0 && ! loading ? (
-					<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__stock-warning">
-						{ sprintf(
-							/* translators: 1: number of rows, 2: number of rows in total, 3: their names */
-							_n(
-								'%1$d of the %2$d rows does not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for it; it will be skipped: %3$s',
-								'%1$d of the %2$d rows do not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for them; they will be skipped: %3$s',
-								stockGated.length,
-								'wp-woocommerce-products-list'
-							),
-							stockGated.length,
-							targetsForValidation.filter( ( item ) => ! item._placeholder ).length,
-							listNames( stockGated )
-						) }
-						{ stockEnableable.length > 0 ? (
-							<CheckboxControl
-								__nextHasNoMarginBottom
-								label={
-									stockEnableable.length === stockGated.length
-										? sprintf(
-												/* translators: %d: number of rows */
-												_n( 'Turn on "Manage stock" for that row and write the values', 'Turn on "Manage stock" for those %d rows and write the values', stockEnableable.length, 'wp-woocommerce-products-list' ),
-												stockEnableable.length
-										  )
-										: sprintf(
-												/* translators: %d: number of rows */
-												_n( 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', 'Turn on "Manage stock" for %d of them and write the values (variable products stay skipped: their variations hold the stock)', stockEnableable.length, 'wp-woocommerce-products-list' ),
-												stockEnableable.length
-										  )
-								}
-								checked={ enableManageStock }
-								disabled={ saving }
-								onChange={ ( checked ) => {
-									setEnableManageStock( checked );
-									setErrors( [] );
-									setWarnings( [] );
-									setAcknowledged( null );
-								} }
-							/>
-						) : null }
-					</Notice>
-				) : null }
-
-				{ existingSales.rows.length > 0 && ! loading ? (
-					<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning">
-						<p>
-							{ sprintf(
-								/* translators: 1: number of rows with a sale, 2: number of rows in total */
-								_n( '%1$d of the %2$d rows already has a sale price.', '%1$d of the %2$d rows already have a sale price.', existingSales.rows.length, 'wp-woocommerce-products-list' ),
-								existingSales.rows.length,
-								targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length
-							) }{ ' ' }
-							{ runningSales.count > 0 ? runningSales.message : null }
-						</p>
-						<RadioControl
-							className="wc-pl-edit__sale-choice"
-							label={ __( 'Existing sales', 'wp-woocommerce-products-list' ) }
-							selected={ saleChoice ?? ( runningSales.count > 0 ? '' : 'replace' ) }
-							options={ [
-								{
-									value: 'replace',
-									label:
-										runningSales.count > 0
-											? sprintf(
-													/* translators: %d: number of rows on sale now */
-													_n( 'Replace them (the %d sale running now ends when you update)', 'Replace them (the %d sales running now end when you update)', runningSales.count, 'wp-woocommerce-products-list' ),
-													runningSales.count
-											  )
-											: __( 'Replace them', 'wp-woocommerce-products-list' ),
-								},
-								{
-									value: 'skip',
-									label: sprintf(
-										/* translators: %d: number of rows */
-										_n( 'Skip the %d row that already has a sale', 'Skip the %d rows that already have a sale', existingSales.rows.length, 'wp-woocommerce-products-list' ),
-										existingSales.rows.length
-									),
-								},
-							] }
-							onChange={ ( value: string ) => {
-								setSaleChoice( value === 'skip' ? 'skip' : 'replace' );
-								setErrors( [] );
-								setWarnings( [] );
-								setAcknowledged( null );
-							} }
-							disabled={ saving }
-						/>
-					</Notice>
-				) : null }
-
-				{ priceOps && plannedEdits.sale_price !== undefined && ! loading ? (
-					<div className="wc-pl-edit__options">
-						<CheckboxControl
-							__nextHasNoMarginBottom
-							label={ __( 'Only where the new sale price is lower than the price the item sells at now', 'wp-woocommerce-products-list' ) }
-							checked={ onlyLowerSale }
-							disabled={ saving }
-							onChange={ ( checked ) => {
-								setOnlyLowerSale( checked );
-								setErrors( [] );
-								setWarnings( [] );
-								setAcknowledged( null );
-							} }
-						/>
-					</div>
-				) : null }
+				{ noteSections.includes( 'inventory' ) ? null : inventoryNote }
+				{ noteSections.includes( 'pricing' ) ? null : pricingNote }
 
 				{ priceOps && plannedCount > 0 && ! loading ? (
 					<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } />
@@ -3112,6 +3190,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						</Button>
 					) : null }
 					<SaveProgress done={ progress.done } total={ progress.total } saving={ saving } />
+					{ nothingReason ? <p className="wc-pl-edit__footer-reason">{ nothingReason }</p> : null }
 				</div>
 			</div>
 

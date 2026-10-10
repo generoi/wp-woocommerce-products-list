@@ -57,6 +57,11 @@ export const PANEL_WIDTH_PREFERENCE = 'editorPanelShare';
 /** The share of the window the panel opens at. */
 export const PANEL_DEFAULT_SHARE = 0.52;
 export const PANEL_MIN_WIDTH = 480;
+/**
+ * The panel opens at least this wide (within its limits) until the user picks a width: wide enough for the form's
+ * side column (Status, Categories) on a 1280-1440 px laptop, where 52 % alone gives one long column.
+ */
+export const PANEL_DEFAULT_MIN_WIDTH = 880;
 /** At most this share of the window. */
 export const PANEL_MAX_SHARE = 0.75;
 /** The list keeps at least this much room left of the panel (split view). */
@@ -141,6 +146,24 @@ export function clampPanelWidth( width: number, viewport: number = viewportWidth
 	const value = Number.isFinite( width ) ? width : viewport * PANEL_DEFAULT_SHARE;
 
 	return Math.round( Math.min( maxPanelWidth( viewport, left ), Math.max( minPanelWidth( viewport ), value ) ) );
+}
+
+/** The share of the window the user left the panel at, if they moved its edge. */
+function rememberedPanelShare(): number | null {
+	let stored: unknown;
+
+	try {
+		stored = select( preferencesStore ).get( PREFERENCES_SCOPE, PANEL_WIDTH_PREFERENCE );
+	} catch {
+		stored = undefined;
+	}
+
+	return typeof stored === 'number' && stored > 0 && stored < 1 ? stored : null;
+}
+
+/** The width the panel opens at before the user picks one: 52 % of the window, at least PANEL_DEFAULT_MIN_WIDTH, within the limits. */
+export function defaultPanelWidth( viewport: number = viewportWidth(), left: number = contentLeft() ): number {
+	return clampPanelWidth( Math.max( PANEL_DEFAULT_SHARE * viewport, PANEL_DEFAULT_MIN_WIDTH ), viewport, left );
 }
 
 /** The share of the window the user left the panel at, else the default (52 %). */
@@ -363,7 +386,8 @@ function ResizeHandle( { panelRef }: { panelRef: RefObject< HTMLElement | null >
 	// when the window is resized (or the admin menu folds), so the panel and the list always fit side by side.
 	useLayoutEffect( () => {
 		const fit = () => {
-			const width = panelWidthFor( storedPanelShare() );
+			const share = rememberedPanelShare();
+			const width = share === null ? defaultPanelWidth() : panelWidthFor( share );
 
 			applyPanelWidth( width, true );
 			show( width );
