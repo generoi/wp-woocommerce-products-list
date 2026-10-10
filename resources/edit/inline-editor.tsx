@@ -44,7 +44,7 @@ import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, settleDeletions, tabFetchFields } from './hydrate';
 import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown-values';
 import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
@@ -95,6 +95,9 @@ type VariationLoad = { status: 'idle' | 'loading' | 'loaded' | 'error'; byParent
 const IDLE_LOAD: VariationLoad = { status: 'idle', byParent: new Map(), count: 0 };
 
 const PANEL_ID = 'wc-pl-edit-panel';
+
+/** A variation the save could no longer edit: refused like this once its parent is being deleted. */
+const DENIED_CODES = new Set( [ 'woocommerce_rest_cannot_edit', 'rest_cannot_edit', 'rest_forbidden' ] );
 
 /**
  * The snackbar after a plain save: one at a time, a new save replaces the
@@ -1780,6 +1783,42 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	};
 
 	/**
+	 * Parents a save found deleted under it (their variations were): once their deletion is over they are named and
+	 * left out like any row deleted meanwhile, or, still there, loaded again (then nothing of them is half-deleted).
+	 */
+	const settleParents = async ( rows: ProductListItem[] ) => {
+		const settled = await settleDeletions( rows ).catch( () => null );
+
+		if ( ! mountedRef.current ) {
+			return;
+		}
+
+		const missingSet = new Set( settled?.missing ?? [] );
+		const trashedSet = new Set( settled?.trashed ?? [] );
+
+		[ ...missingSet, ...trashedSet ].forEach( ( id ) => pendingRemovalRef.current.add( id ) );
+
+		if ( missingSet.size || trashedSet.size ) {
+			setExcluded( ( current ) => {
+				const known = new Set( [ ...current.missing, ...current.trashed ].map( ( row ) => row.id ) );
+
+				return {
+					missing: [ ...current.missing, ...rows.filter( ( row ) => missingSet.has( row.id ) && ! known.has( row.id ) ) ],
+					trashed: [ ...current.trashed, ...rows.filter( ( row ) => trashedSet.has( row.id ) && ! known.has( row.id ) ) ],
+				};
+			} );
+		}
+
+		setHydrated( ( current ) => {
+			const next = new Map( current );
+
+			rows.forEach( ( row ) => ! missingSet.has( row.id ) && ! trashedSet.has( row.id ) && next.delete( row.id ) );
+
+			return next;
+		} );
+	};
+
+	/**
 	 * Load again the rows someone else saved since the editor loaded them (every tab visited so far), and the
 	 * variations of such variable parents, so the preview and the next Update work on the values stored now.
 	 */
@@ -2330,6 +2369,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					setVariationEpoch( ( epoch ) => epoch + 1 );
 				}
 
+				// The parents whose variations this save found deleted (or could no longer edit) may be being deleted
+				// themselves: WordPress deletes a product's terms and meta, then its variations, and the product last, so a
+				// read now could find it half-deleted (no categories, tags or brands: "changed by someone else"), and as
+				// still there. They are not read again until the deletion is over (settleParents below).
+				const deletedVariations = new Set( result.errors.filter( ( error ) => isGoneCode( error.code ) || DENIED_CODES.has( error.code ?? '' ) ).map( ( error ) => error.id ) );
+				const settling = new Set( Array.from( carriers ).filter( ( parentId ) => ( variations.byParent.get( parentId ) ?? [] ).some( ( row ) => deletedVariations.has( row.id ) ) ) );
+
 				// A retry works on the values the rows have now, not on the ones the editor opened with: the saved rows
 				// take what the server returned, and the failed rows are fetched again (a relative op resolves on that).
 				setHydrated( ( current ) => {
@@ -2346,11 +2392,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						}
 					}
 
-					failedNow.forEach( ( id ) => next.delete( id ) );
-					carriers.forEach( ( id ) => next.delete( id ) );
+					failedNow.forEach( ( id ) => ! settling.has( id ) && next.delete( id ) );
+					carriers.forEach( ( id ) => ! settling.has( id ) && next.delete( id ) );
 
 					return next;
 				} );
+
+				if ( settling.size ) {
+					void settleParents( items.filter( ( item ) => settling.has( item.id ) ) );
+				}
 			}
 		} catch ( error ) {
 			failed = true;

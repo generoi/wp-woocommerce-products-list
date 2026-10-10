@@ -3,6 +3,7 @@
  * per-row history modal. Filtering and sorting happen on the server
  * (`GET /log`), so fields only declare which operators map to a param.
  */
+import { decodeEntities } from '@wordpress/html-entities';
 import { __ } from '@wordpress/i18n';
 import type { Field } from '../dataviews';
 import { formatPrice } from '../fields/currency';
@@ -79,7 +80,55 @@ function text( value: string | null ): string {
 		}
 	}
 
-	return value;
+	// A title saved by a shop manager is stored (and logged) with "&" as "&amp;": shown as the product screen shows it.
+	return decodeEntities( value );
+}
+
+/** An item's name for a person: a title stored with "&amp;" reads "&". */
+export function logObjectName( item: Pick< LogRow, 'object_name' | 'object_id' > ): string {
+	return item.object_name ? decodeEntities( item.object_name ) : `#${ item.object_id }`;
+}
+
+/**
+ * The label the server's messages give a key no registered field declares (`Log\Revert::fieldLabel()`):
+ * "stock_quantity" → "Stock quantity".
+ */
+function serverFieldLabel( key: string ): string {
+	const words = key.replace( /meta_data\./g, '' ).replace( /[_.]/g, ' ' ).trim();
+
+	return words ? words.charAt( 0 ).toUpperCase() + words.slice( 1 ) : '';
+}
+
+function escapeRegExp( value: string ): string {
+	return value.replace( /[.*+?^${}()|[\]\\]/g, '\\$&' );
+}
+
+/**
+ * A logged message (why a row was skipped or failed) with its fields named as History's Field column names them:
+ * the server says "Stock quantity was changed again…" for the field History lists as "Quantity". Only whole
+ * labels at a word boundary are renamed; the stored message is not changed.
+ */
+export function historyMessage( message: string, fieldOptions: LogFieldOption[] ): string {
+	const renames = new Map< string, string >();
+
+	for ( const option of fieldOptions ) {
+		const server = serverFieldLabel( option.value );
+
+		if ( server && server !== option.label && ! renames.has( server ) ) {
+			renames.set( server, option.label );
+		}
+	}
+
+	if ( ! message || renames.size === 0 ) {
+		return message;
+	}
+
+	const alternatives = Array.from( renames.keys() )
+		.sort( ( a, b ) => b.length - a.length )
+		.map( escapeRegExp );
+	const pattern = new RegExp( `(^|[\\s,(])(${ alternatives.join( '|' ) })(?=$|[\\s,.;:)])`, 'g' );
+
+	return message.replace( pattern, ( _match, before: string, label: string ) => `${ before }${ renames.get( label ) ?? label }` );
 }
 
 const PRICE_KEY = /^(?:i18n\.([A-Za-z_-]+)\.)?(?:regular_price|sale_price|price)$/;
@@ -212,9 +261,9 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 				enableSorting: false,
 				enableHiding: false,
 				filterBy: false,
-				getValue: ( { item } ) => item.object_name || `#${ item.object_id }`,
+				getValue: ( { item } ) => logObjectName( item ),
 				render: ( { item } ) => {
-					const label = item.object_name || `#${ item.object_id }`;
+					const label = logObjectName( item );
 					const kind =
 						item.object_type === 'variation'
 							? ` (${ __( 'variation', 'wp-woocommerce-products-list' ) })`
@@ -304,11 +353,11 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 				item.status === 'ok' ? (
 					<span>{ __( 'OK', 'wp-woocommerce-products-list' ) }</span>
 				) : item.status === 'skipped' ? (
-					<span className="wc-pl-history__skipped">{ item.message || __( 'Skipped.', 'wp-woocommerce-products-list' ) }</span>
+					<span className="wc-pl-history__skipped">{ historyMessage( item.message, fieldOptions ) || __( 'Skipped.', 'wp-woocommerce-products-list' ) }</span>
 				) : (
 					<span className="wc-pl-history__error">
 						<strong>{ __( 'Error', 'wp-woocommerce-products-list' ) }</strong>
-						{ item.message ? `: ${ item.message }` : '' }
+						{ item.message ? `: ${ historyMessage( item.message, fieldOptions ) }` : '' }
 					</span>
 				),
 		},

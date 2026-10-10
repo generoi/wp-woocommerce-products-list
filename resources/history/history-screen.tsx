@@ -26,7 +26,7 @@ import type { LogFieldOption } from '../fields/log-labels';
 import type { ProductField, Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
-import { actionLabel, createLogFields, formatLogValue, logQueryFromView } from './log-fields';
+import { actionLabel, createLogFields, formatLogValue, logObjectName, logQueryFromView } from './log-fields';
 import { describeBatchScope, isRevertableRow, itemsLeftToRevert, nothingToRevert, scopeFromPlan } from './batch-scope';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from './revert';
 import type { RevertCheckSummary, RevertOutcome } from './revert';
@@ -90,7 +90,13 @@ export function conflictFields( outcome: Pick< RevertOutcome, 'conflicts' >, opt
 	const labels = new Set< string >();
 
 	for ( const result of outcome.conflicts ) {
-		( result.fields ?? [] ).forEach( ( key, index ) => labels.add( result.labels?.[ index ] || logFieldLabel( key, options ) ) );
+		// Named as History's Field column and the conflict lines below name it ("Quantity"); the server's label
+		// ("Stock quantity") only for a key History does not know (describeConflict() does the same).
+		( result.fields ?? [] ).forEach( ( key, index ) => {
+			const mapped = logFieldLabel( key, options );
+
+			labels.add( mapped && mapped !== key ? mapped : result.labels?.[ index ] || mapped );
+		} );
 	}
 
 	return Array.from( labels );
@@ -143,7 +149,7 @@ function RevertPreview( { batchId, options, exclude }: { batchId: string; option
 			<ul>
 				{ preview.rows.map( ( row ) => (
 					<li key={ row.id }>
-						<strong>{ row.object_name || `#${ row.object_id }` }</strong>: { logFieldLabel( row.field, options ) }{ ' ' }
+						<strong>{ logObjectName( row ) }</strong>: { logFieldLabel( row.field, options ) }{ ' ' }
 						{ formatLogValue( row.field, row.new_value, settings ) } → { formatLogValue( row.field, row.old_value, settings ) }
 					</li>
 				) ) }

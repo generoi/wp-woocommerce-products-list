@@ -405,6 +405,15 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 					return typeof value === 'string' ? decodeEntities( value ) : value;
 				};
+
+				// Typed back to the shown text (a character typed, then deleted): that is the stored value again, so the
+				// edit drops out (no dirty form, nothing saved) instead of differing from "&amp;" by its spelling only.
+				const stored = rows.length === 1 ? readFieldValue( field, rows[ 0 ] as ProductListItem ) : undefined;
+				const write = formField.setValue;
+
+				if ( typeof stored === 'string' && decodeEntities( stored ) !== stored ) {
+					formField.setValue = ( args ) => ( args.value === decodeEntities( stored ) ? { [ field.id ]: stored } : write ? write( args ) : { [ field.id ]: args.value } );
+				}
 			}
 
 			if ( numericKindOf( field ) === 'integer' ) {

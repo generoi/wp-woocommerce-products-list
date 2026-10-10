@@ -3,6 +3,7 @@ import { isPlainTextField, referenceText, toFormFields, VARIATION_STATUS_ELEMENT
 import { describeConflictValues } from '../../resources/edit/errors';
 import { mergeItems, MIXED_VALUE } from '../../resources/edit/merge';
 import { validateFormData } from '../../resources/edit/validity';
+import { effectiveEdits } from '../../resources/edit/use-edit-state';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
 
@@ -261,5 +262,20 @@ describe( 'quick edit Name with entities', () => {
 
 		expect( form.getValue!( { item: data } as never ) ).toBe( 'Socks & laces' );
 		expect( ( data as Record< string, unknown > ).name ).toBe( 'Socks &amp; laces' );
+	} );
+
+	it( 'counts the shown text typed back (a character typed, then deleted) as no change, and any other text as an edit', () => {
+		const name = coreFields().find( ( f ) => f.id === 'name' )!;
+		const item = simple( 1, { name: 'Socks &amp; laces' } );
+		const merged = mergeItems( [ item ], [ name ] );
+		const form = toFormFields( [ name ], { bulk: false, items: [ item ], base: merged.data, mixed: merged.mixed, settings } ).find( ( f ) => f.id === 'name' )!;
+		const typed = ( value: string ) => form.setValue!( { item: { ...merged.data, name: value }, value } as never ) as Record< string, unknown >;
+
+		// Back to the shown text: the stored value again, so the edit drops out (no dirty form, no "1 item updated").
+		expect( typed( 'Socks & laces' ) ).toEqual( { name: 'Socks &amp; laces' } );
+		expect( effectiveEdits( typed( 'Socks & laces' ), merged.data, merged.mixed ) ).toEqual( {} );
+		// A real change is kept as typed.
+		expect( typed( 'Socks & laces 2' ) ).toEqual( { name: 'Socks & laces 2' } );
+		expect( effectiveEdits( typed( 'Socks & laces 2' ), merged.data, merged.mixed ) ).toEqual( { name: 'Socks & laces 2' } );
 	} );
 } );

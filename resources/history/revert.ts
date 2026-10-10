@@ -14,6 +14,7 @@
  * so the server can tell a revert cut short from one that finished
  * (docs/contracts.md §3.6).
  */
+import { decodeEntities } from '@wordpress/html-entities';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ActionResult, RevertCheck, RevertPlan } from '../api/client';
 import { checkRevert, closeBatch, getRevertPlan, logSkipped, newBatchId, revertBatch } from '../api/client';
@@ -294,7 +295,8 @@ function shown( value: unknown, key = '', format?: ConflictValueFormat ): string
  * key it does not know (it answers the key itself), and when none is passed.
  */
 export function describeConflict( result: ActionResult, label: ( key: string ) => string = ( key ) => key, format?: ConflictValueFormat ): string {
-	const name = result.name || `#${ result.id }`;
+	// A title saved by a shop manager is stored with "&" as "&amp;": named as the product screen names it.
+	const name = result.name ? decodeEntities( result.name ) : `#${ result.id }`;
 	const keys = result.fields ?? [];
 	const parts = keys.map( ( key, index ) => {
 		const mapped = label( key );

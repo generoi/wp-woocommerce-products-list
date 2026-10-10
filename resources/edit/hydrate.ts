@@ -404,6 +404,42 @@ export async function recheckStatuses( items: ProductListItem[], deps: Pick< Hyd
 	};
 }
 
+export interface SettledDeletions extends StatusChanges {
+	/** Products still there after the last check. */
+	present: number[];
+}
+
+/**
+ * Waits for deletions that may be under way. WordPress deletes a product's terms and meta first, then WooCommerce
+ * deletes its variations one by one, and the product itself goes last: for a few seconds (a product with hundreds
+ * of variations) a read finds it still there, without its categories, tags, brands or prices. A save that found a
+ * product's variations deleted checks the product this way, up to `tries` times `interval` ms apart, until it is
+ * gone (or trashed); those still there afterwards are `present`.
+ */
+export async function settleDeletions(
+	items: ProductListItem[],
+	{ tries = 8, interval = 1000, deps = defaultDeps(), sleep = ( ms: number ) => new Promise< void >( ( resolve ) => setTimeout( resolve, ms ) ) }: { tries?: number; interval?: number; deps?: Pick< HydrateDeps, 'listProducts' >; sleep?: ( ms: number ) => Promise< void > } = {}
+): Promise< SettledDeletions > {
+	let pending = items.filter( ( item ) => ! item._placeholder && ! isVariation( item ) );
+	const missing: number[] = [];
+	const trashed: number[] = [];
+
+	for ( let attempt = 0; attempt < tries && pending.length > 0; attempt++ ) {
+		if ( attempt > 0 ) {
+			await sleep( interval );
+		}
+
+		const check = await recheckStatuses( pending, deps );
+		const done = new Set( [ ...check.missing, ...check.trashed ] );
+
+		missing.push( ...check.missing );
+		trashed.push( ...check.trashed );
+		pending = pending.filter( ( item ) => ! done.has( item.id ) );
+	}
+
+	return { missing, trashed, present: pending.map( ( item ) => item.id ) };
+}
+
 /**
  * The rows saved by someone else since the editor loaded them: their
  * `date_modified_gmt` now differs from the one loaded. WooCommerce stamps a
