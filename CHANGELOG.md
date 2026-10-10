@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.1 - 2026-10-10
+
+Fixes from three rounds of editor QA on 0.3.0 (quick edit of simple and variable products, bulk edit, translations, History and clash handling).
+
+### Saving
+- Turning "Schedule sale" off or clearing a sale date now clears the stored dates (WooCommerce skipped the `null` the editor sent; it now sends an empty string).
+- A product name with "&" is no longer stored as "&amp;" when saved from the list, and the duplicate SKU message no longer shows the owner's name with HTML entities.
+- A typed slug is cleaned with `sanitize_title()` (Polylang for WooCommerce stored it with spaces and capitals).
+- Quick edit can clear the weight and the low stock threshold (it said "Nothing changed"), and accepts a negative menu order (it said "The quantity cannot be negative."); bulk "Change to" a negative menu order is no longer refused or clamped to 0.
+- A save that turns Virtual on or stock management off asks back the fields WooCommerce clears with it, so the next edit does not call them someone else's change; Undo/revert puts the cleared shipping data back.
+- Saved rows keep their thumbnail-size image, and a parent's "set the price of all its variations" no longer shows the parent's image on variations with their own.
+- A sale end date typed without a time is stored as 23:59:59.
+- A price operation whose result equals the stored price is no longer sent or counted.
+
+### Quick and bulk edit
+- Bulk edit no longer crashes when a stock notice's controls come or go (typing a relative stock value such as -5), or after a partial failure with a pending numeric operation.
+- Bulk edit no longer says every field was changed by someone else after the selection changes; the first-shown value is kept per row.
+- A whole-list selection's footer action (Mark as featured, Publish, Move to Trash …) reaches the other pages' rows, also when some rows on the page do not need it, and no longer keeps stale off-page rows.
+- The change summary names categories, tags and brands instead of their ids, does not count non-price fields on the variations added for prices or plain values on rows that already hold them, and does not count fields that reach no row.
+- Variable parents no longer make a shared price "Mixed" unless "Also apply to the variations" is ticked; shared prices use the shop's notation. The stock notice counts only rows a stock edit reaches. The existing-sales notice follows "Only where lower".
+- A variable parent's "On sale" line is dated by the running sale, and leaves a side open when a variation has no start or end date. Changing only the dates of a variation's sale is not counted as replacing a sale; a scheduled sale is reported as "already have a sale".
+- The save error notice stays in view above the sticky Update bar, focus moves to the new form after switching rows, and "Update & next" picks the right next row after expanding or collapsing.
+- A sale time cleared segment by segment no longer keeps the "Enter a complete date" error.
+- No empty "Also saved with Update:" heading when only the translation grid has changes.
+- The trash confirm no longer says "0 of them are published"; Undo of a Trash on a product already restored no longer shows an error.
+
+### Translations
+- The translation grid reloads its texts after an Update, so a saved cell shows the saved value and the next edit of it is not refused as someone else's change; refused translations are named by product.
+- A refused grid Apply re-reads the row; the list no longer keeps a refused text. Rows written by language tools stay in a "Missing in" list.
+- Market price fields (SEK) use the shop's notation with the market currency and keep their "Default: …" hint; the Prices (SEK) group no longer shows the euro range. Language tools keep their typed settings when the tab is left.
+
+### History and clashes
+- Undo of turning a variation's stock management off puts the quantity back.
+- History no longer counts an item as skipped after "Revert anyway" or "Subtract the change instead" wrote it, no longer marks a batch reverted when its revert put nothing back, and skips items an earlier revert already put back as unchanged instead of "changed by someone else".
+- Revert stays available for a batch whose Undo left items changed since; the revert confirm lists only items it will write and keeps the dry-run scope after a pass. Long Changed lines are cut with an ellipsis; the Item ID filter chip has no thousands separator.
+- Conflict texts show prices in the shop's notation.
+
 ## 0.3.0 - 2026-10-10
 
 New layout for the quick and bulk edit panel, following WooCommerce's Edit product screen. It replaces the three equal columns (General, Organization, Pricing) that were hard to scan, repeated the Shipping heading and put the apply-to-variations box above the tabs.
