@@ -170,6 +170,12 @@ function TrashModal( { items, closeModal, onActionPerformed }: RenderModalProps<
 							__( 'Move the published product “%s” to the Trash? It leaves the shop until it is restored.', 'wp-woocommerce-products-list' ),
 							nameOf( rows[ 0 ]! )
 					  )
+					: published === 0
+					? sprintf(
+							/* translators: %d: number of products, none of them published */
+							_n( 'Move %d product to the Trash?', 'Move %d products to the Trash?', rows.length, 'wp-woocommerce-products-list' ),
+							rows.length
+					  )
 					: sprintf(
 							/* translators: 1: number of products, 2: how many of them are published */
 							_n( 'Move %1$d product to the Trash? %2$d of them is published and leaves the shop until it is restored.', 'Move %1$d products to the Trash? %2$d of them are published and leave the shop until they are restored.', rows.length, 'wp-woocommerce-products-list' ),
