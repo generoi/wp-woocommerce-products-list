@@ -766,6 +766,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	translationsRef.current ??= new TranslationStore();
 	const translations = translationsRef.current;
 	const [ translationCount, setTranslationCount ] = useState( 0 );
+	// Bumped after an Update wrote translations (grid or language tools): an unfolded grid loads its texts again, so a cell shows what is stored now and the next edit expects that.
+	const [ gridEpoch, setGridEpoch ] = useState( 0 );
 	useEffect( () => translations.subscribe( setTranslationCount ), [ translations ] );
 	const stagedCount = staged.size + translationCount;
 	const stageTool = useCallback( ( key: string, entry: StagedTool | null ) => {
@@ -1603,6 +1605,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		// The tabs whose values a tool changed load again if the editor stays open.
 		if ( ranTabs.size && mountedRef.current ) {
 			setLoadedTabs( ( previous ) => new Set( Array.from( previous ).filter( ( id ) => ! ranTabs.has( id ) ) ) );
+			setGridEpoch( ( epoch ) => epoch + 1 );
 		}
 
 		// A price tool that ran on the variations left the fetched ones stale.
@@ -1905,15 +1908,19 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			if ( tools.errors.length ) {
 				failed = true;
 
+				// The rows a tool or a grid translation was refused on: every selected row (a retry after a refused translation has no failed field rows to name them from).
+				const toolNames = new Map< number, string >( [ ...items.map( ( item ): [ number, string ] => [ item.id, nameOf( item ) ] ), ...names ] );
+
 				if ( mountedRef.current ) {
 					// The field edits are saved: what is left is the tools that failed (Update retries them).
 					setFailedIds( new Set() );
+					setErrorNames( toolNames );
 					setErrors( tools.errors );
 				}
 
 				const partial = result.updated.length > 0 || tools.ran > 0;
 
-				notify.error( tools.errors.map( ( error ) => error.message ).join( ' ' ), {
+				notify.error( tools.errors.map( ( error ) => ( error.id > 0 && toolNames.has( error.id ) ? `${ toolNames.get( error.id ) }: ${ error.message }` : error.message ) ).join( ' ' ), {
 					id: mountedRef.current ? SAVED_NOTICE_ID : outcomeNoticeId( result.batchId ),
 					actions: partial && canUndo() ? [ undoAction( result.batchId ) ] : undefined,
 				} );
@@ -3057,7 +3064,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 				{ /* Per-product names and short descriptions in this language, saved with Update. */ }
 				{ bulk && tab.id.includes( ':' ) && ! loading ? (
-					<TranslationGrid key={ tab.id } tabId={ tab.id } tabLabel={ tab.label } items={ items } fields={ allFields } settings={ settings } store={ translations } disabled={ saving } />
+					<TranslationGrid key={ tab.id } tabId={ tab.id } tabLabel={ tab.label } items={ items } fields={ allFields } settings={ settings } store={ translations } disabled={ saving } reload={ gridEpoch } />
 				) : null }
 				{ /* Mounted through the tab's reload after a run, so what was typed into a tool stays. */ }
 				{ tab.id.includes( ':' ) && ! loading ? (

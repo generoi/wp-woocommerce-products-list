@@ -249,6 +249,39 @@ describe( 'TranslationGrid', () => {
 		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'Svensk G' } );
 		expect( screen.queryByText( /Changed by someone else/ ) ).toBeNull();
 	} );
+
+	it( 'loads again after an Update wrote translations: a saved cell shows the stored text and a refused one what is stored now', async () => {
+		const fields = [ i18nField( 'se', 'name' ) ];
+		let stored = { d: '', e: 'Svensk E' };
+		const load = vi.fn( async () => ( { items: [ product( 1, 'D', { name: stored.d } ), product( 2, 'E', { name: stored.e } ) ], missing: [], parentStamps: new Map() } ) );
+		const store = new TranslationStore();
+		const items = [ product( 1, 'D' ), product( 2, 'E' ) ];
+		const settings = { languages: { default: 'fi', others: [ 'se' ], labels: {} } } as never;
+		const { rerender } = render( <TranslationGrid tabId="i18n:se" tabLabel="Svenska" items={ items } fields={ fields } settings={ settings } store={ store } load={ load as never } reload={ 0 } /> );
+		const details = document.querySelector( 'details' ) as HTMLDetailsElement;
+		const names = () => Array.from( document.querySelectorAll< HTMLInputElement >( 'input[data-grid-col="name"]' ) );
+
+		details.open = true;
+		await act( async () => {
+			fireEvent( details, new Event( 'toggle' ) );
+		} );
+		await waitFor( () => expect( names()[ 1 ]!.value ).toBe( 'Svensk E' ) );
+		fireEvent.change( names()[ 0 ]!, { target: { value: 'Svensk D' } } );
+		fireEvent.change( names()[ 1 ]!, { target: { value: 'Svensk E2' } } );
+
+		// The Update saves D; E is refused, someone else saved it meanwhile.
+		stored = { d: 'Svensk D', e: 'Svensk X' };
+		store.clear( [ 1 ] );
+		rerender( <TranslationGrid tabId="i18n:se" tabLabel="Svenska" items={ items } fields={ fields } settings={ settings } store={ store } load={ load as never } reload={ 1 } /> );
+
+		await waitFor( () => expect( load ).toHaveBeenCalledTimes( 2 ) );
+		await waitFor( () => expect( screen.getByText( /Changed by someone else since you started typing, now: Svensk X/ ) ).toBeTruthy() );
+		expect( names()[ 0 ]!.value ).toBe( 'Svensk D' );
+
+		// Fixing a typo in the saved name expects what was saved, never the empty value loaded before it.
+		fireEvent.change( names()[ 0 ]!, { target: { value: 'Svensk D2' } } );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'Svensk D' } );
+	} );
 } );
 
 const transform: DeclarativeAction = {

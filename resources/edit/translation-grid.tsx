@@ -268,6 +268,8 @@ export interface TranslationGridProps {
 	settings: Pick< Settings, 'languages' >;
 	store: TranslationStore;
 	disabled?: boolean;
+	/** Changes after an Update wrote translations: an unfolded grid loads its texts again. */
+	reload?: number;
 	/** Load the rows' texts in this language (tests pass their own). */
 	load?: typeof hydrateSelection;
 }
@@ -428,7 +430,7 @@ export function onGridKeyDown( event: KeyboardEvent< HTMLTableElement > ): void 
 	}
 }
 
-export function TranslationGrid( { tabId, tabLabel, items, fields, settings, store, disabled, load = hydrateSelection }: TranslationGridProps ) {
+export function TranslationGrid( { tabId, tabLabel, items, fields, settings, store, disabled, reload = 0, load = hydrateSelection }: TranslationGridProps ) {
 	const lang = tabId.slice( tabId.indexOf( ':' ) + 1 );
 	const gridFields = useMemo( () => gridFieldsOf( tabId, fields ), [ tabId, fields ] );
 	const products = useMemo( () => items.filter( ( item ) => ! item._placeholder && ! isVariation( item ) ), [ items ] );
@@ -444,7 +446,9 @@ export function TranslationGrid( { tabId, tabLabel, items, fields, settings, sto
 
 	useEffect( () => store.subscribe( setCount ), [ store ] );
 
-	// The texts of this language load when the grid is unfolded (not with the tab), once per selection.
+	// The texts of this language load when the grid is unfolded (not with the tab), once per selection,
+	// and again after an Update wrote translations: the saved cells show the stored text (not the one
+	// loaded before), a refused cell says what is stored now, and the next edit expects that.
 	useEffect( () => {
 		if ( ! open || ! products.length ) {
 			return;
@@ -468,7 +472,7 @@ export function TranslationGrid( { tabId, tabLabel, items, fields, settings, sto
 		};
 		// idsKey stands for the products.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [ open, idsKey, lang ] );
+	}, [ open, idsKey, lang, reload ] );
 
 	if ( ! gridFields.name && ! gridFields.short_description ) {
 		return null;
