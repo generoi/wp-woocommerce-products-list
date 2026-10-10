@@ -63,7 +63,7 @@ export class ErrorBoundary extends Component< BoundaryProps, BoundaryState > {
 		}
 
 		return (
-			<Notice status="error" isDismissible={ false } className="wc-products-list__boundary">
+			<Notice status="error" isDismissible={ false } className="wc-products-list__boundary" spokenMessage={ isChunkError ? __( 'Part of the product list could not be loaded. The plugin may have been updated, or the connection dropped.', 'wp-woocommerce-products-list' ) : __( 'Something went wrong while showing this part of the product list.', 'wp-woocommerce-products-list' ) }>
 				{ isChunkError
 					? __( 'Part of the product list could not be loaded. The plugin may have been updated, or the connection dropped.', 'wp-woocommerce-products-list' )
 					: __( 'Something went wrong while showing this part of the product list.', 'wp-woocommerce-products-list' ) }{ ' ' }

@@ -667,7 +667,7 @@ export function EditorPanel( { host }: { host: EditorHost } ) {
 				<ErrorBoundary
 					context="editor"
 					fallback={ ( { isChunkError, retry } ) => (
-						<Notice status="error" isDismissible={ false } className="wc-pl-inline-edit__failed">
+						<Notice status="error" isDismissible={ false } className="wc-pl-inline-edit__failed" spokenMessage={ isChunkError ? __( 'The editor could not be loaded. The plugin may have been updated, or the connection dropped.', 'wp-woocommerce-products-list' ) : __( 'Something went wrong in the editor.', 'wp-woocommerce-products-list' ) }>
 							{ isChunkError
 								? __( 'The editor could not be loaded. The plugin may have been updated, or the connection dropped.', 'wp-woocommerce-products-list' )
 								: __( 'Something went wrong in the editor.', 'wp-woocommerce-products-list' ) }{ ' ' }

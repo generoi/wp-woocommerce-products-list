@@ -2717,18 +2717,20 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				{ zeroedStock ? __( 'Undo', 'wp-woocommerce-products-list' ) : __( 'Set Stock quantity to 0', 'wp-woocommerce-products-list' ) }
 			</Button>
 		) : null;
+	// Notice reads a non-string `children` with renderToString during its own render, which runs the hooks of the
+	// controls inside (Button, CheckboxControl, RadioControl) on the Notice: when a control comes or goes, the hook
+	// order changes and the editor crashes. Notices that hold controls are given their spoken text as a string.
+	const statusManagedText = statusRows.some( isVariableParent )
+		? __( 'Stock status follows the stock quantity (a variable product’s follows its variations). To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' )
+		: __( 'Stock status follows the stock quantity. To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' );
 	const statusNote =
 		statusDeadEnd === 'parents' ? (
 			<Notice status="info" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__status-note">
 				{ __( 'Stock status: a variable product takes it from its variations. To mark sizes in or out of stock, use Select all variations in the selection bar, then Bulk edit.', 'wp-woocommerce-products-list' ) }
 			</Notice>
 		) : statusDeadEnd === 'managed' ? (
-			<Notice status="info" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__status-note">
-				<p>
-					{ statusRows.some( isVariableParent )
-						? __( 'Stock status follows the stock quantity (a variable product’s follows its variations). To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' )
-						: __( 'Stock status follows the stock quantity. To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' ) }
-				</p>
+			<Notice status="info" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__status-note" spokenMessage={ statusManagedText }>
+				<p>{ statusManagedText }</p>
 				{ zeroButton ? (
 					<p className="wc-pl-edit__status-note-action">
 						{ zeroButton }{ ' ' }
@@ -2737,10 +2739,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				) : null }
 			</Notice>
 		) : null;
-	const stockNotice =
-		stockGated.length > 0 && ! loading ? (
-				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__stock-warning">
-					{ stockGatedTotal === 1
+	const stockGatedText =
+		stockGatedTotal === 1
 						? __( 'This item does not manage stock, so WooCommerce ignores Quantity, Low stock threshold and Backorders for it: tick Manage stock to set them.', 'wp-woocommerce-products-list' )
 						: sprintf(
 						/* translators: 1: number of rows, 2: number of rows in total, 3: their names */
@@ -2753,7 +2753,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						stockGated.length,
 						stockGatedTotal,
 						listNames( stockGated )
-					) }
+					);
+	const stockNotice =
+		stockGated.length > 0 && ! loading ? (
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__stock-warning" spokenMessage={ stockGatedText }>
+					{ stockGatedText }
 					{ stockEnableable.length > 0 ? (
 						<CheckboxControl
 							__nextHasNoMarginBottom
@@ -2789,18 +2793,16 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				{ stockNotice }
 			</>
 		) : null;
+	const saleNoticeText = `${ sprintf(
+		/* translators: 1: number of rows with a sale, 2: number of rows in total */
+		_n( '%1$d of the %2$d rows already has a sale price.', '%1$d of the %2$d rows already have a sale price.', existingSales.rows.length, 'wp-woocommerce-products-list' ),
+		existingSales.rows.length,
+		targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length
+	) } ${ runningSales.count > 0 ? runningSales.message : '' }`.trim();
 	const saleNotice =
 		existingSales.rows.length > 0 && ! loading ? (
-				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning">
-					<p>
-						{ sprintf(
-							/* translators: 1: number of rows with a sale, 2: number of rows in total */
-							_n( '%1$d of the %2$d rows already has a sale price.', '%1$d of the %2$d rows already have a sale price.', existingSales.rows.length, 'wp-woocommerce-products-list' ),
-							existingSales.rows.length,
-							targetsForValidation.filter( ( item ) => ! item._placeholder && ! isVariableParent( item ) ).length
-						) }{ ' ' }
-						{ runningSales.count > 0 ? runningSales.message : null }
-					</p>
+				<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__sale-warning" spokenMessage={ saleNoticeText }>
+					<p>{ saleNoticeText }</p>
 					<RadioControl
 						className="wc-pl-edit__sale-choice"
 						label={ __( 'Existing sales', 'wp-woocommerce-products-list' ) }
