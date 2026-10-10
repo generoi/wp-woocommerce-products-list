@@ -59,6 +59,11 @@ export function variationShippingClassElements( settings: Pick< Settings, 'shipp
 	return [ { value: '', label: __( 'Same as parent', 'wp-woocommerce-products-list' ) }, ...settings.shippingClasses.map( ( entry ) => ( { value: String( entry.value ), label: entry.label } ) ) ];
 }
 
+/** The tax classes a variation can pick: its parent's (stored as `parent`, WooCommerce's own value), or one of the store's. */
+export function variationTaxClassElements( settings: Pick< Settings, 'taxClasses' > ): Option[] {
+	return [ { value: 'parent', label: __( 'Same as parent', 'wp-woocommerce-products-list' ) }, ...settings.taxClasses.map( ( entry ) => ( { value: String( entry.value ), label: entry.label } ) ) ];
+}
+
 function scheduleIdFor( fieldId: string ): string | null {
 	const match = /^(.*)date_on_sale_(from|to)$/.exec( fieldId );
 
@@ -231,6 +236,12 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		// A variation without a class of its own ships like its parent; the product-level "No shipping class" is not a choice here.
 		if ( onlyVariations && field.id === 'shipping_class' && ! field.Edit ) {
 			formField.elements = variationShippingClassElements( settings );
+			formField.getElements = undefined;
+		}
+
+		// A variation stores `parent` to use its parent's tax class (every variation WooCommerce creates starts so); without it in the list, a variation that was never given a class of its own fails validation.
+		if ( onlyVariations && field.id === 'tax_class' && ! field.Edit ) {
+			formField.elements = variationTaxClassElements( settings );
 			formField.getElements = undefined;
 		}
 

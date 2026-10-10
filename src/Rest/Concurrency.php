@@ -469,6 +469,8 @@ final class Concurrency
      * - `short_description`: raw, or through `woocommerce_short_description`;
      * - a variation's `name`: the stored title, or wc/v3's attribute summary
      *   (`wc_get_formatted_variation($v, true, false, false)`);
+     * - a variation's `tax_class`: the stored `parent`, or the parent's
+     *   class that the view context shows for it;
      * - `cost_of_goods_sold`: by its number, from `{value}`, wc/v3's
      *   `{values: [{defined_value}]}` (summed, as WooCommerce does) or a
      *   bare number; no value is 0;
@@ -510,6 +512,10 @@ final class Concurrency
             case 'name':
                 return $isVariation && $stored instanceof \WC_Product_Variation
                     && trim($expected) === trim((string) wc_get_formatted_variation($stored, true, false, false));
+            case 'tax_class':
+                // A variation's `parent` as wc/v3 shows it in view context:
+                // the parent's class.
+                return $isVariation && $current === 'parent' && $expected === (string) $stored->get_tax_class('view');
             case 'cost_of_goods_sold':
                 $want = self::cogsNumber($expected);
                 $have = self::cogsNumber((string) $current);

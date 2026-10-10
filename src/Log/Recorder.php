@@ -2,6 +2,7 @@
 
 namespace GeneroWP\ProductsList\Log;
 
+use GeneroWP\ProductsList\Plugin;
 use GeneroWP\ProductsList\Rest\Rows;
 use WC_Product;
 use WC_Product_Variation;
@@ -400,7 +401,10 @@ final class Recorder
             array_push($rows, ...self::errorRows($item['object_type'], $item['object_id'], $item['parent_id'], $item['creating'], $item['paths'], $item['context'], $error, $item['before'], $item['attempted']));
         }
 
-        if ($errors !== []) {
+        // Error rows from the response only for the routes whose body is a
+        // product or variation write: any other route's `id` (a term, an
+        // order) is not a product, and its body keys are not fields.
+        if ($errors !== [] && self::writesProducts($request->get_route())) {
             $isVariation = str_contains($request->get_route(), '/variations');
             $parentId = (int) ($request['product_id'] ?? 0);
             $bodies = self::bodiesById($request);
@@ -430,6 +434,18 @@ final class Recorder
         }
 
         Logger::log($rows);
+    }
+
+    /**
+     * Whether a route writes products or variations from its body: wc/v3's
+     * `products`, `products/{id}`, `products/batch`,
+     * `products/{id}/variations[/{id}|/batch]`, and the plugin's
+     * cross-parent `variations/batch`.
+     */
+    public static function writesProducts(string $route): bool
+    {
+        return (bool) preg_match('#^/wc/v3/products(?:/batch|/\d+(?:/variations(?:/\d+|/batch)?)?)?/?$#', $route)
+            || $route === '/'.Plugin::REST_NAMESPACE.'/variations/batch';
     }
 
     /**
@@ -683,6 +699,10 @@ final class Recorder
                 'height' => (string) $product->get_height(),
             ],
             'shipping_class' => (string) $product->get_shipping_class(),
+            // As stored (context=edit, what the editor loads): a variation's
+            // `parent`. The view context answers with the parent's class,
+            // which would read as a change nobody made and revert to it.
+            'tax_class' => (string) $product->get_tax_class('edit'),
             'attributes' => self::attributes($product),
             'default_attributes' => self::defaultAttributes($product),
             'grouped_products' => array_map('intval', $product->get_children()),

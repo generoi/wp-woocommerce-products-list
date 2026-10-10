@@ -1124,4 +1124,68 @@ class ConcurrencyTest extends RestTestCase
         $this->assertSame(['unchanged' => 1], $plan['left_out_reasons']);
         $this->assertSame(1, $plan['left_out']);
     }
+
+    public function test_a_variation_using_its_parents_tax_class_is_no_false_conflict_and_reverts_to_parent(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$v38] = $parent->get_children();
+        $route = '/wc/v3/products/'.$parent->get_id().'/variations/'.$v38;
+        // WooCommerce's own default for a variation; view context shows the parent's ''.
+        $this->assertSame('parent', wc_get_product($v38)->get_tax_class('edit'));
+        $this->assertSame('', wc_get_product($v38)->get_tax_class('view'));
+
+        // The editor loaded `parent` (context=edit); an unrelated change saves.
+        $this->assertStatus(200, $this->request('PUT', $route, ['regular_price' => '150', Concurrency::EXPECT_KEY => ['tax_class' => 'parent', 'regular_price' => '189']]));
+        // The view form ('' here) of the same stored value matches too.
+        $this->assertStatus(200, $this->request('PUT', $route, ['regular_price' => '160', Concurrency::EXPECT_KEY => ['tax_class' => '']]));
+
+        $this->assertStatus(200, $this->request('PUT', $route, ['tax_class' => 'zero-rate', Concurrency::EXPECT_KEY => ['tax_class' => 'parent']]));
+        $this->assertSame('zero-rate', wc_get_product($v38)->get_tax_class('edit'));
+
+        $rows = array_values(array_filter($this->rows(), static fn (array $row): bool => $row['field'] === 'tax_class'));
+        $this->assertCount(1, $rows);
+        $this->assertSame('parent', $rows[0]['old_value'], 'the stored value, not the parent\'s');
+        $this->assertSame('ok', $rows[0]['status']);
+
+        // Now a real change by someone else: the stored `zero-rate` is a conflict for an editor that loaded `parent`.
+        $this->assertStatus(409, $this->request('PUT', $route, ['regular_price' => '170', Concurrency::EXPECT_KEY => ['tax_class' => 'parent']]));
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert');
+        $this->assertStatus(200, $response);
+        clean_post_cache($v38);
+        $this->assertSame('parent', wc_get_product($v38)->get_tax_class('edit'));
+        $this->assertSame('189', wc_get_product($v38)->get_regular_price('edit'));
+    }
+
+    public function test_a_refused_write_on_another_route_with_an_id_is_not_logged_as_a_product(): void
+    {
+        $product = $this->simpleProduct();
+        $id = $product->get_id();
+
+        register_rest_route('wcpl-test/v1', '/terms/(?P<id>\d+)', [
+            'methods' => 'PUT',
+            'permission_callback' => '__return_true',
+            'callback' => static fn (\WP_REST_Request $request) => $request['code'] === 'conflict'
+                ? new \WP_Error(Concurrency::CONFLICT_ERROR, 'Changed by someone else.', ['status' => 409])
+                : new \WP_Error('wcpl_test_invalid', 'Bad language.', ['status' => 400]),
+        ]);
+
+        $this->assertStatus(409, $this->request('PUT', '/wcpl-test/v1/terms/'.$id, ['code' => 'conflict', 'translations' => ['se' => ['name' => 'X']], Concurrency::EXPECT_KEY => ['se' => ['name' => 'Y']]]));
+        $this->assertStatus(400, $this->request('PUT', '/wcpl-test/v1/terms/'.$id, ['code' => 'invalid', 'translations' => ['se' => ['name' => 'X']]]));
+
+        $this->assertSame([], $this->rows(), 'no product rows for a term id');
+
+        // The product routes still log their refusals.
+        $this->assertStatus(409, $this->request('PUT', '/wc/v3/products/'.$id, ['name' => 'New', Concurrency::EXPECT_KEY => ['name' => 'Stale']]));
+        $this->assertSame(['product'], array_column($this->rows(), 'object_type'));
+
+        $this->assertTrue(Recorder::writesProducts('/wc/v3/products'));
+        $this->assertTrue(Recorder::writesProducts('/wc/v3/products/batch'));
+        $this->assertTrue(Recorder::writesProducts('/wc/v3/products/12/variations/34'));
+        $this->assertTrue(Recorder::writesProducts('/wc/v3/products/12/variations/batch'));
+        $this->assertTrue(Recorder::writesProducts('/wc-products-list/v1/variations/batch'));
+        $this->assertFalse(Recorder::writesProducts('/gds-woo-i18n/v1/terms/1785'));
+        $this->assertFalse(Recorder::writesProducts('/wc/v3/products/categories/5'));
+        $this->assertFalse(Recorder::writesProducts('/wc/v3/products/attributes/1/terms/5'));
+    }
 }

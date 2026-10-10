@@ -58,7 +58,12 @@ export function conflictDataOf( data: unknown ): ConflictData | null {
 	return fields.length ? { fields, current, expected: asRecord( record.expected ) } : null;
 }
 
-function shownValue( value: unknown ): string {
+function shownValue( value: unknown, path = '' ): string {
+	// A variation's tax class `parent` is WooCommerce's stored value for "use the parent's".
+	if ( path === 'tax_class' && value === 'parent' ) {
+		return __( 'Same as parent', 'wp-woocommerce-products-list' );
+	}
+
 	if ( value === null || value === undefined || value === '' ) {
 		return '—';
 	}
@@ -78,14 +83,14 @@ export function describeConflictValues( conflict: ConflictData, label: ( path: s
 						/* translators: 1: field label, 2: the value stored now, 3: the value when the editor loaded it */
 						__( '%1$s %2$s (was %3$s when loaded)', 'wp-woocommerce-products-list' ),
 						label( path ),
-						shownValue( conflict.current[ path ] ),
-						shownValue( conflict.expected[ path ] )
+						shownValue( conflict.current[ path ], path ),
+						shownValue( conflict.expected[ path ], path )
 				  )
 				: sprintf(
 						/* translators: 1: field label, 2: the value stored now */
 						__( '%1$s %2$s', 'wp-woocommerce-products-list' ),
 						label( path ),
-						shownValue( conflict.current[ path ] )
+						shownValue( conflict.current[ path ], path )
 				  )
 		)
 		.join( '; ' );

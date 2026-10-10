@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { isPlainTextField, referenceText, toFormFields, VARIATION_STATUS_ELEMENTS, variationShippingClassElements } from '../../resources/edit/form-fields';
+import { isPlainTextField, referenceText, toFormFields, VARIATION_STATUS_ELEMENTS, variationShippingClassElements, variationTaxClassElements } from '../../resources/edit/form-fields';
+import { describeConflictValues } from '../../resources/edit/errors';
 import { mergeItems, MIXED_VALUE } from '../../resources/edit/merge';
+import { validateFormData } from '../../resources/edit/validity';
 import type { ProductField, ProductListItem } from '../../resources/types';
 import { coreFields, editSettings, field, simple, variation } from './edit-fixtures';
 
@@ -155,6 +157,28 @@ describe( 'variation shipping class', () => {
 		expect( forVariation.elements ).toEqual( [ { value: '', label: 'Same as parent' }, { value: 'bulky', label: 'Bulky' } ] );
 		expect( variationShippingClassElements( withClasses ) ).toHaveLength( 2 );
 		expect( formFor( [ shipping ], [ simple( 1 ) ] ).get( 'shipping_class' ).elements?.[ 0 ] ).toEqual( { value: '', label: 'No shipping class' } );
+	} );
+} );
+
+describe( 'variation tax class', () => {
+	const taxSettings = editSettings( { taxClasses: [ { value: '', label: 'Standard' }, { value: 'reduced-rate', label: 'Reduced rate' } ] } );
+	const tax = field( 'tax_class', { elements: taxSettings.taxClasses, rest: { fields: [ 'tax_class' ], applies: { product: true, variation: true } }, edit: { group: 'tax', bulk: 'default' } } );
+
+	it( 'offers "Same as parent" (stored as parent) for variations, so a variation loaded with it validates', () => {
+		const items = [ variation( 11, 1, { tax_class: 'parent' } ) ];
+		const merged = mergeItems( items, [ tax ] );
+		const formField = toFormFields( [ tax ], { bulk: false, items, base: merged.data, mixed: merged.mixed, settings: taxSettings } )[ 0 ]!;
+
+		expect( merged.data.tax_class ).toBe( 'parent' );
+		expect( formField.elements ).toEqual( [ { value: 'parent', label: 'Same as parent' }, { value: '', label: 'Standard' }, { value: 'reduced-rate', label: 'Reduced rate' } ] );
+		expect( validateFormData( merged.data, [ { ...formField, isValid: { elements: true } } as never ] ) ).toEqual( [] );
+		expect( variationTaxClassElements( taxSettings ) ).toHaveLength( 3 );
+		// A product never takes `parent`.
+		expect( formFor( [ tax ], [ simple( 1 ) ] ).get( 'tax_class' ).elements?.map( ( e ) => e.value ) ).toEqual( [ '', 'reduced-rate' ] );
+	} );
+
+	it( 'names parent "Same as parent" in the conflict text', () => {
+		expect( describeConflictValues( { fields: [ 'tax_class' ], current: { tax_class: 'reduced-rate' }, expected: { tax_class: 'parent' } } ) ).toBe( 'tax_class reduced-rate (was Same as parent when loaded)' );
 	} );
 } );
 

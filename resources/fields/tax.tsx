@@ -19,6 +19,9 @@ export function createTaxStatusField( settings: Settings ): ProductField {
 }
 
 export function createTaxClassField( settings: Settings ): ProductField {
+	// A variation's `parent` (use the parent's class) is shown, never offered to a product.
+	const shown = [ { value: 'parent', label: __( 'Same as parent', 'wp-woocommerce-products-list' ) }, ...settings.taxClasses ];
+
 	return field( {
 		id: 'tax_class',
 		type: 'text',
@@ -26,7 +29,7 @@ export function createTaxClassField( settings: Settings ): ProductField {
 		elements: settings.taxClasses,
 		enableSorting: false,
 		filterBy: false,
-		render: ( { item } ) => <OptionCell value={ item.tax_class } options={ settings.taxClasses } />,
+		render: ( { item } ) => <OptionCell value={ item.tax_class } options={ shown } />,
 		getValue: ( { item } ) => item.tax_class ?? '',
 		rest: { applies: { product: true, variation: true } },
 		edit: { group: 'tax', bulk: 'default', order: 71 },
