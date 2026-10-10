@@ -3,6 +3,7 @@
  * for filters and edits. Elements load lazily from the terms endpoint and
  * are cached per taxonomy; the filter sends term ids.
  */
+import { decodeEntities } from '@wordpress/html-entities';
 import { __ } from '@wordpress/i18n';
 import { getTerms } from '../api/client';
 import type { Option } from '../dataviews';
@@ -105,11 +106,17 @@ export function termElements( taxonomy: string ): Promise< Option[] > {
 }
 
 const slugCache = new Map< string, Map< number, string > >();
+const nameCache = new Map< string, Map< number, string > >();
+/** Field id (categories, tags, brands) → its taxonomy, for `termLabel`. */
+const fieldTaxonomies = new Map< string, string >();
 
 function rememberSlugs( taxonomy: string, terms: Option[] ): void {
 	const slugs = new Map< number, string >();
+	const names = new Map< number, string >();
 
 	for ( const term of terms ) {
+		names.set( Number( term.value ), decodeEntities( String( term.label ?? term.value ) ) );
+
 		const slug = ( term as Option & { slug?: unknown } ).slug;
 
 		if ( typeof slug === 'string' && slug !== '' ) {
@@ -118,6 +125,29 @@ function rememberSlugs( taxonomy: string, terms: Option[] ): void {
 	}
 
 	slugCache.set( taxonomy, slugs );
+	nameCache.set( taxonomy, names );
+}
+
+/**
+ * The name of a term id of a terms field (categories, tags, brands), read synchronously from the terms loaded so
+ * far (the editor's token control loads them; the sessionStorage copy otherwise). Undefined when not known yet.
+ */
+export function termLabel( fieldId: string, id: unknown ): string | undefined {
+	const taxonomy = fieldTaxonomies.get( fieldId );
+
+	if ( ! taxonomy ) {
+		return undefined;
+	}
+
+	if ( ! nameCache.has( taxonomy ) ) {
+		const stored = readStoredTerms( taxonomy );
+
+		if ( stored ) {
+			rememberSlugs( taxonomy, stored );
+		}
+	}
+
+	return nameCache.get( taxonomy )?.get( Number( id ) );
 }
 
 /**
@@ -184,6 +214,8 @@ interface TermsFieldSpec {
 }
 
 function termsField( spec: TermsFieldSpec ): ProductField {
+	fieldTaxonomies.set( spec.id, spec.taxonomy );
+
 	return field( {
 		id: spec.id,
 		type: 'array',

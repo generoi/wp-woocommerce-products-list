@@ -9,6 +9,7 @@ import { __, _n, sprintf } from '@wordpress/i18n';
 import { formatMoney } from '../extensions/declarative';
 import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
+import { termLabel } from '../fields/terms';
 import type { Option } from '../dataviews';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { applyArrayOp, arrayOpFieldId, describeArrayOperation, hasArrayOp, isArrayOpFieldId, isArrayOperation } from './bulk-array';
@@ -163,7 +164,14 @@ export function describeSiteDateTime( value: string, settings: Pick< Settings, '
 function optionLabel( field: ProductField, value: unknown ): string {
 	const elements = Array.isArray( field.elements ) ? ( field.elements as Option[] ) : [];
 
-	return elements.find( ( element ) => element.value === value )?.label ?? String( value ?? '' );
+	const label = elements.find( ( element ) => String( element.value ) === String( value ) )?.label;
+
+	if ( label !== undefined ) {
+		return String( label );
+	}
+
+	// Terms fields load their options lazily (no `elements`): the edit holds ids, the summary shows the names.
+	return termLabel( field.id, value ) ?? String( value ?? '' );
 }
 
 /** A field's value as the editor's lines show it ("(empty)", Yes/No, option labels, money, site dates). */
