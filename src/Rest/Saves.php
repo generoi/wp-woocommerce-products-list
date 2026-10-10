@@ -387,7 +387,8 @@ final class Saves
         }
 
         $product = wc_get_product($owner);
-        $name = $product instanceof WC_Product ? $product->get_name() : '';
+        // A name saved through wc/v3 is stored kses-filtered ("&" as "&amp;"); the message is shown as text.
+        $name = $product instanceof WC_Product ? html_entity_decode($product->get_name(), ENT_QUOTES | ENT_HTML5, 'UTF-8') : '';
 
         return sprintf(
             /* translators: 1: SKU, 2: product name, 3: product id */

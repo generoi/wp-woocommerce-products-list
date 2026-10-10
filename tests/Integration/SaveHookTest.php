@@ -439,6 +439,11 @@ class SaveHookTest extends RestTestCase
         // A malformed SKU nobody owns keeps WooCommerce's own message.
         $this->assertNull(Saves::skuOwnerMessage('NOBODY', $product->get_id()));
         $this->assertNull(Saves::skuOwnerMessage('FREE', $product->get_id()));
+
+        // A name saved through wc/v3 is stored kses-filtered: the message names it as typed.
+        $owner->set_name('Tom &amp; Jerry');
+        $owner->save();
+        $this->assertSame(sprintf('The SKU "TAKEN" is already used by "Tom & Jerry" (#%d).', $owner->get_id()), Saves::skuOwnerMessage('TAKEN', $product->get_id()));
     }
 
     public function test_a_generated_batch_id_groups_rows_when_the_header_is_missing(): void
