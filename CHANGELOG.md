@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3 - 2026-10-10
+
+Clash-prevention fixes from audit rounds 11-13: the value a save sends as expected (`_wcpl_expect`, translation `expect`) is now always the one the form or grid showed the user, never one loaded after they started editing.
+
+- Quick and bulk edit take each field's expected value from the rows as they were rendered when the user first changed that field (`resources/edit/shown-values.ts`, passed to the save as `expectBase`). Before, the expected value came from the editor's fresh load, so a price typed into a box still showing the list value could write over another user's change without a conflict. Only the stale-row warning's refresh and "Write my values over the other change" replace the remembered values, because both show the user the current ones.
+- A path two fields share (sale price and regular price; stock status, quantity and manage stock; `meta_data`) is taken from the field the user changed first, if its snapshot carries it; a later snapshot only fills a path no earlier one had. `meta_data` is settled whole from the first snapshot that carries it, and a meta key shown absent is expected empty (`null`), so a value set meanwhile is refused (rounds 12-13).
+- The price box shows a newer stored value straight away while focused, as long as the user has not typed; typed text is kept. The HTML editor updates its reference text the same way. The editor notes a field "changed by someone else since the list loaded, now X" (untouched) or "since you started editing it, now X" (edited; the save is then refused with 409).
+- Fields whose value the rows do not have yet (non-column fields, descriptions, translations) are read-only until the editor's load lands.
+- Translation grid: an edit keeps the expected value it started from until the edit is taken out; before, every keystroke replaced it with the stored value, so after folding and unfolding the grid a translation saved meanwhile was written over. Untouched cells show the reloaded value, and an edited cell whose stored value changed says so.
+- History: `GET /log/batches` returns `skipped_fields`, so a batch where every item was refused reads "Regular price on 2 items, none written" instead of "— on 0 items". The revert dialog no longer counts items changed since the batch as put back, and disables Revert when nothing is left.
+- gds-woo-i18n (site repo): when the term edit screen refuses the translations, core's "Item updated." becomes "Name and slug were saved; the translations were not (see the error above)."
+
 ## 0.2.2 - 2026-10-10
 
 Clash-prevention fixes from audit rounds 8-10: attribute-term translations (gds-woo-i18n) are locked, clash-checked and logged; row actions write their History row from the change's own hook; a variation's tax class `parent` no longer fails validation or causes a false conflict.
