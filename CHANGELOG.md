@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 - 2026-10-10
+
+Fixes for the leftovers of the final editor QA pass on 0.3.1.
+
+- A row re-read after a refused save (the translation grid's conflict re-read, and the other re-reads merged over list rows) keeps its thumbnail-size image; the cross-parent variations read passes `image_size` on to wc/v3.
+- Quick edit "Set the price of all its variations": the running-sales notice counts only the rows whose sale the update changes, not the rows that already have the resulting price.
+- The "Adjust market prices" preview warns about a row whose market regular price would be at or below the sale price the shop shows there, which the run refuses.
+- A whole-list selection with rows on other pages offers its bulk actions in the selection bar's "More actions" menu, judged on the whole selection (both "Mark as featured" and "Remove from featured" when both apply); the footer keeps Bulk edit.
+- Conflict texts name stock quantity as the rest of the screen: "Stock quantity" in the editor (as its form field), "Quantity" in History (as its Field column).
+
 ## 0.3.1 - 2026-10-10
 
 Fixes from three rounds of editor QA on 0.3.0 (quick edit of simple and variable products, bulk edit, translations, History and clash handling).
