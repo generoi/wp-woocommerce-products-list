@@ -37,6 +37,22 @@ describe( 'describeEdits', () => {
 		expect( lines[ 0 ] ).toMatchObject( { change: '→ 30,00 €', count: 2 } );
 	} );
 
+	it( 'gives a variation reached only through its selected parent the price and sale edits alone', () => {
+		const targets = [ variable( 1, { status: 'draft' } ), simple( 2, { regular_price: '50', status: 'draft' } ), variation( 11, 1, { regular_price: '40', status: 'publish' } ) ];
+		const lines = describeEdits( { regular_price: { operation: 'increase', value: '1' }, status: 'private' }, fields, targets, settings, true, {}, new Set( [ 11 ] ) );
+
+		expect( lines.find( ( line ) => line.field === 'regular_price' ) ).toMatchObject( { count: 2, rowIds: [ 2, 11 ] } );
+		// The save sends the status to the selected products, not to the variations it adds for the prices.
+		expect( lines.find( ( line ) => line.field === 'status' ) ).toMatchObject( { count: 2, rowIds: [ 1, 2 ] } );
+	} );
+
+	it( 'counts a plain value only on the rows that do not hold it already', () => {
+		const items = [ simple( 1, { featured: true } ), simple( 2, { featured: false } ), simple( 3, { featured: true } ) ];
+		const lines = describeEdits( { featured: true }, fields, items, settings );
+
+		expect( lines[ 0 ] ).toMatchObject( { field: 'featured', count: 1, rowIds: [ 2 ] } );
+	} );
+
 	it( 'skips unknown fields and idle ops', () => {
 		expect( describeEdits( { nope: 'x', stock_quantity: { operation: 'dont_change', value: '' } }, fields, [ simple( 1 ) ], settings ) ).toMatchObject( [ { field: 'stock_quantity', count: 0 } ] );
 	} );

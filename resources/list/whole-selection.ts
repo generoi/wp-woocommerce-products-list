@@ -5,6 +5,11 @@
  * the whole selection instead: the page's selected rows DataViews passed
  * plus the rows selected on other pages. A single-row action on a row that
  * is not the page's whole selection is left alone.
+ *
+ * DataViews passes only the selected rows the action is eligible for (a
+ * product already featured is not handed to "Mark as featured"), so the
+ * page's whole selection is compared with its eligible rows when the
+ * action has an `isEligible`.
  */
 import { createElement } from '@wordpress/element';
 import type { RenderModalProps } from '../dataviews';
@@ -16,15 +21,19 @@ export interface WholeSelection {
 	onPage: string[];
 	/** Rows selected on other pages. */
 	offPage: ProductListItem[];
+	/** The selected rows on the current page (the rows behind `onPage`), to tell which of them an action is eligible for. */
+	onPageRows?: ProductListItem[];
 }
 
-/** `items` is the page's whole selection: extend it with the rows from other pages. */
-export function extendToWholeSelection( items: ProductListItem[], whole: WholeSelection ): ProductListItem[] {
-	if ( ! whole.offPage.length || items.length !== whole.onPage.length ) {
+/** `items` is the page's whole selection (the part of it `isEligible` keeps): extend it with the rows from other pages. */
+export function extendToWholeSelection( items: ProductListItem[], whole: WholeSelection, isEligible?: ( item: ProductListItem ) => boolean ): ProductListItem[] {
+	const pageIds = isEligible && whole.onPageRows ? whole.onPageRows.filter( ( row ) => isEligible( row ) ).map( getItemId ) : whole.onPage;
+
+	if ( ! whole.offPage.length || items.length === 0 || items.length !== pageIds.length ) {
 		return items;
 	}
 
-	const page = new Set( whole.onPage );
+	const page = new Set( pageIds );
 
 	if ( ! items.every( ( item ) => page.has( getItemId( item ) ) ) ) {
 		return items;
@@ -43,12 +52,12 @@ function extendLabel( label: Labelled | undefined, extend: ( items: ProductListI
 
 /** Wrap the bulk actions so their callback, modal and labels see the whole selection. `getWhole` is read at call time. */
 export function withWholeSelection( actions: ProductAction[], getWhole: () => WholeSelection ): ProductAction[] {
-	const extend = ( items: ProductListItem[] ) => extendToWholeSelection( items, getWhole() );
-
 	return actions.map( ( action ) => {
 		if ( ! action.supportsBulk ) {
 			return action;
 		}
+
+		const extend = ( items: ProductListItem[] ) => extendToWholeSelection( items, getWhole(), action.isEligible );
 
 		// An action whose label depends on the count (Quick edit / Bulk edit)
 		// stays on its one row when called with one: DataViews' memoised

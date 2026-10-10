@@ -19,7 +19,7 @@ import { currentSellingPrice } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { isVariableParent, readFieldValue } from './field-value';
 import { itemLabel } from './item-label';
-import { SCHEDULE_SALE_FIELD_ID } from './payload';
+import { SCHEDULE_SALE_FIELD_ID, sameAsCurrent, toSiteDateTime } from './payload';
 import { isInvalidDate } from './sale-schedule';
 import { fieldAppliesTo, isParentDerivedField, isSellableField, leafOf } from './visibility';
 
@@ -211,16 +211,31 @@ export function describeValue( field: ProductField, value: unknown, settings: Se
 	return text.length > 60 ? `${ text.slice( 0, 60 ) }…` : text;
 }
 
-/** Does the edit of `field` reach this row? Sellable edits skip variable parents (they go to the variations). */
-function reaches( field: ProductField, item: ProductListItem, applyToVariations: boolean ): boolean {
+/**
+ * Does the edit of `field` reach this row? Sellable edits skip variable parents (they go to the variations);
+ * a variation reached only through its selected parent ("apply to all variations") gets the sellable edits alone.
+ */
+function reaches( field: ProductField, item: ProductListItem, applyToVariations: boolean, viaParent?: ReadonlySet< number > ): boolean {
 	if ( isVariableParent( item ) && ( isSellableField( field ) || isParentDerivedField( field ) ) ) {
+		return false;
+	}
+
+	if ( viaParent?.has( item.id ) && ! isSellableField( field ) ) {
 		return false;
 	}
 
 	return fieldAppliesTo( field, item, applyToVariations );
 }
 
-export function describeEdits( edits: Record< string, unknown >, fields: ProductField[], targets: ProductListItem[], settings: Settings, applyToVariations = false, options: RowEditOptions = {} ): ChangeLine[] {
+export function describeEdits(
+	edits: Record< string, unknown >,
+	fields: ProductField[],
+	targets: ProductListItem[],
+	settings: Settings,
+	applyToVariations = false,
+	options: RowEditOptions = {},
+	viaParent?: ReadonlySet< number >
+): ChangeLine[] {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 	const rows = uniqueRows( targets );
 	const lines: ChangeLine[] = [];
@@ -233,7 +248,7 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 		}
 
 		// A row the per-row rules drop the edit for (no stock management, an existing sale) is not reached.
-		const reached = rows.filter( ( item ) => reaches( field, item, applyToVariations ) && id in editsForItem( item, edits, fields, options ) );
+		const reached = rows.filter( ( item ) => reaches( field, item, applyToVariations, viaParent ) && id in editsForItem( item, edits, fields, options ) );
 		const label = field.label ?? id;
 
 		if ( Array.isArray( value ) && hasArrayOp( fields, id ) ) {
@@ -343,7 +358,11 @@ export function describeEdits( edits: Record< string, unknown >, fields: Product
 			continue;
 		}
 
-		lines.push( { field: id, label, change: `→ ${ describeValue( field, value, settings ) }`, count: reached.length, rowIds: reached.map( ( item ) => item.id ) } );
+		// A row that already holds the value is not written (buildPayload drops it; the summary counts it as unchanged).
+		const next = field.type === 'datetime' || field.type === 'date' ? toSiteDateTime( value, field.type ) : value;
+		const changed = reached.filter( ( item ) => ! sameAsCurrent( field, item, next ) );
+
+		lines.push( { field: id, label, change: `→ ${ describeValue( field, value, settings ) }`, count: changed.length, rowIds: changed.map( ( item ) => item.id ) } );
 	}
 
 	return lines;
@@ -398,10 +417,12 @@ export interface ChangeSummaryProps {
 	options?: RowEditOptions;
 	/** Rows the edits reach whose values already equal the result (from the save plan). */
 	unchanged?: number;
+	/** Variations among `targets` reached only through a selected parent: they take the price and sale edits alone. */
+	viaParent?: ReadonlySet< number >;
 }
 
-export function ChangeSummary( { edits, fields, targets, settings, applyToVariations, options, unchanged = 0 }: ChangeSummaryProps ) {
-	const lines = describeEdits( edits, fields, targets, settings, applyToVariations, options );
+export function ChangeSummary( { edits, fields, targets, settings, applyToVariations, options, unchanged = 0, viaParent }: ChangeSummaryProps ) {
+	const lines = describeEdits( edits, fields, targets, settings, applyToVariations, options, viaParent );
 
 	if ( lines.length === 0 ) {
 		return null;

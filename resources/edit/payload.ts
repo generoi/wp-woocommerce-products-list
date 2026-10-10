@@ -61,7 +61,8 @@ export function toSiteDateTime( value: unknown, type: 'date' | 'datetime' = 'dat
 	return dateI18n( type === 'date' ? 'Y-m-d' : 'Y-m-d\\TH:i:s', value );
 }
 
-function sameAsCurrent( field: ProductField, item: ProductListItem, value: unknown ): boolean {
+/** Whether `value` is what the row holds already (a plain value equal to the row's is not sent). */
+export function sameAsCurrent( field: ProductField, item: ProductListItem, value: unknown ): boolean {
 	const current = readFieldValue( field, item );
 
 	if ( current === undefined ) {

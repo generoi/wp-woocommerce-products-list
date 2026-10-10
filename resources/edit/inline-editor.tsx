@@ -1346,6 +1346,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		return [ ...base, ...Array.from( retryTargets.prefetched.values() ).flat().filter( ( row ) => ! selected.has( row.id ) ) ];
 	}, [ applyToVariations, items, failedIds, retryTargets ] );
 
+	// The variations among those rows that are there only for their selected parent: they take the price and sale edits alone.
+	const viaParentIds = useMemo( () => {
+		if ( ! applyToVariations ) {
+			return undefined;
+		}
+
+		const selected = new Set( items.map( ( item ) => item.id ) );
+
+		return new Set( targetsForValidation.filter( ( row ) => isVariation( row ) && ! selected.has( row.id ) ).map( ( row ) => row.id ) ) as ReadonlySet< number >;
+	}, [ applyToVariations, items, targetsForValidation ] );
+
 	// The plan and the warnings walk every target row; on a large selection they
 	// follow the keystroke a frame later rather than slowing the input down.
 	const plannedEdits = useDeferredValue( pendingEdits );
@@ -3170,7 +3181,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				{ noteSections.includes( 'pricing' ) ? null : pricingNote }
 
 				{ priceOps && plannedCount > 0 && ! loading ? (
-					<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } />
+					<ChangeSummary edits={ plannedEdits } fields={ editFields } targets={ targetsForValidation } settings={ settings } applyToVariations={ applyToVariations } options={ rowOptions } unchanged={ plan?.unchanged ?? 0 } viaParent={ viaParentIds } />
 				) : null }
 
 				{ shownWarnings.length > 0 ? (

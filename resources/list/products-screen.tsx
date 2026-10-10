@@ -570,7 +570,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 		const shown = new Set( hierarchy.rows.map( getItemId ) );
 		const onPage = selection.filter( ( id ) => shown.has( id ) );
 
-		return { onPage, offPage: selected.rows.filter( ( row ) => ! shown.has( getItemId( row ) ) ) };
+		return { onPage, offPage: selected.rows.filter( ( row ) => ! shown.has( getItemId( row ) ) ), onPageRows: selected.rows.filter( ( row ) => shown.has( getItemId( row ) ) ) };
 	}, [ selection, selected.rows, hierarchy.rows ] );
 	const wholeRef = useRef( whole );
 	useLayoutEffect( () => {

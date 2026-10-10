@@ -27,6 +27,31 @@ describe( 'extendToWholeSelection', () => {
 	} );
 } );
 
+describe( 'extendToWholeSelection with an eligibility rule', () => {
+	it( 'widens the eligible part of the page\'s selection: DataViews leaves out the selected rows an action does not apply to', () => {
+		const featured = { ...product( 3 ), featured: true };
+		const rows = [ product( 1 ), product( 2 ), featured ];
+		const selectAll = { onPage: [ '1', '2', '3' ], offPage, onPageRows: rows };
+		const notFeatured = ( item: ProductListItem ) => ! item.featured;
+
+		// "Mark as featured" over a whole-list selection: DataViews hands it rows 1 and 2 (3 is featured already).
+		expect( extendToWholeSelection( [ rows[ 0 ]!, rows[ 1 ]! ], selectAll, notFeatured ).map( ( row ) => row.id ) ).toEqual( [ 1, 2, 7, 8 ] );
+		// A row's own menu on one of them is still that row alone.
+		expect( extendToWholeSelection( [ rows[ 0 ]! ], selectAll, notFeatured ).map( ( row ) => row.id ) ).toEqual( [ 1 ] );
+		// Without the page's rows the ids decide, as before.
+		expect( extendToWholeSelection( [ rows[ 0 ]!, rows[ 1 ]! ], { onPage: [ '1', '2', '3' ], offPage }, notFeatured ).map( ( row ) => row.id ) ).toEqual( [ 1, 2 ] );
+	} );
+
+	it( 'wraps a bulk action with its own isEligible', () => {
+		const callback = vi.fn();
+		const rows = [ product( 1 ), { ...product( 2 ), featured: true } ];
+		const [ wrapped ] = withWholeSelection( [ { id: 'feature', label: 'Feature', supportsBulk: true, isEligible: ( item ) => ! item.featured, callback } ], () => ( { onPage: [ '1', '2' ], offPage, onPageRows: rows } ) ) as Array< ProductAction & { callback: ( items: ProductListItem[], context: unknown ) => void } >;
+
+		wrapped!.callback( [ rows[ 0 ]! ], {} );
+		expect( ( callback.mock.calls[ 0 ]?.[ 0 ] as ProductListItem[] ).map( ( row ) => row.id ) ).toEqual( [ 1, 7, 8 ] );
+	} );
+} );
+
 describe( 'withWholeSelection', () => {
 	it( 'widens bulk callbacks, modals and labels; leaves single-row actions as they are', () => {
 		const callback = vi.fn();
