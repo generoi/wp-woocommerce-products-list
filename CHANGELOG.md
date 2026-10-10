@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.6 - 2026-10-10
+
+- Adjust market prices on a variable product in quick edit names the quick edit control ("Set the price of all its variations") instead of the bulk edit one ("Also apply to the variations").
+
 ## 0.3.5 - 2026-10-10
 
 Fixes for the last three errors of the verification on 0.3.4.

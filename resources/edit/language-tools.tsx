@@ -817,7 +817,10 @@ type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultO
 function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined ): string {
 	if ( isSellableTool( def ) && items.some( isVariableParent ) ) {
 		if ( ! applyToVariations ) {
-			return __( 'Variable products have no prices of their own. Tick "Also apply to the variations" in Prices to change their variations\' prices.', 'wp-woocommerce-products-list' );
+			// Name the control the editor shows: quick edit (one product) has "Set the price of all its variations", bulk edit "Also apply to the variations".
+			return items.length > 1
+				? __( 'Variable products have no prices of their own. Tick "Also apply to the variations" in Prices to change their variations\' prices.', 'wp-woocommerce-products-list' )
+				: __( 'This variable product has no prices of its own. Tick "Set the price of all its variations" in Prices to change its variations\' prices.', 'wp-woocommerce-products-list' );
 		}
 
 		if ( ! parentVariations?.length ) {

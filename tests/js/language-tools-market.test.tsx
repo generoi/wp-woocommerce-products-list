@@ -212,7 +212,9 @@ describe( 'market price tool', () => {
 		const items = [ variable( 10 ) ];
 		const { rerender } = render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ items } settings={ settings } run={ run } onDone={ vi.fn() } /> );
 
-		expect( screen.getByText( /Variable products have no prices of their own\. Tick "Also apply to the variations" in Prices/ ) ).toBeInTheDocument();
+		// Quick edit (one product) names its own control.
+		expect( screen.getByText( /This variable product has no prices of its own\. Tick "Set the price of all its variations" in Prices/ ) ).toBeInTheDocument();
+		expect( screen.queryByText( /Also apply to the variations/ ) ).toBeNull();
 		expect( screen.queryByText( /variations have no name or SEO fields/ ) ).toBeNull();
 
 		rerender( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ items } settings={ settings } run={ run } onDone={ vi.fn() } applyToVariations parentVariations={ [ variation( 11, 10 ), variation( 12, 10 ) ] } /> );
@@ -220,6 +222,15 @@ describe( 'market price tool', () => {
 		const button = screen.getByRole( 'button', { name: /Adjust market prices: Svenska, apply now to 2 variations of 1 product/ } );
 
 		expect( button ).toHaveAttribute( 'aria-disabled', 'false' );
+	} );
+} );
+
+describe( 'market price tool in bulk edit', () => {
+	it( 'names the bulk control when several variable products are selected', () => {
+		render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ [ variable( 10 ), variable( 20 ) ] } settings={ settings } run={ vi.fn( async () => undefined ) } onDone={ vi.fn() } /> );
+
+		expect( screen.getByText( /Variable products have no prices of their own\. Tick "Also apply to the variations" in Prices/ ) ).toBeInTheDocument();
+		expect( screen.queryByText( /Set the price of all its variations/ ) ).toBeNull();
 	} );
 } );
 
