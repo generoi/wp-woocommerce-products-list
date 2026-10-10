@@ -358,6 +358,18 @@ describe( 'runSave', () => {
 		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41, 1 ] );
 	} );
 
+	it( 'leaves the thumbnails out of the saved rows of variations fetched for a parent\'s "all its variations"', async () => {
+		// The fetched variations carry trimmed fields; normalised they hold `images: []`, which the
+		// hierarchy (the `saved` action) would show as the parent's image over the variation's own.
+		const d = deps( {
+			fetchVariations: vi.fn( async ( parentId: number ) => [ { ...variation( parentId * 10 + 1, parentId, { regular_price: '100' } ), images: [] } ] ),
+		} );
+		const result = await runSave( d, [ variable( 4 ) ], { regular_price: '90' }, fields, settings, { applyToVariations: true, source: 'quick' } );
+
+		expect( result.updated.map( ( row ) => row.id ) ).toEqual( [ 41 ] );
+		expect( result.updated.every( ( row ) => ! ( 'images' in row ) && ! ( 'image' in row ) ) ).toBe( true );
+	} );
+
 	it( 'turns known wc/v3 error codes into human text', async () => {
 		const d = deps( {
 			batchProducts: vi.fn( async ( update: Update[] ) => ( { update: update.map( ( row ) => ( { id: row.id, error: { code: 'woocommerce_rest_product_invalid_id', message: 'Invalid ID.' } } ) ) } ) as BatchResponse< RawProduct > ),

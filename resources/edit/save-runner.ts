@@ -642,7 +642,9 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 			const row = withoutUntouchedImages( normalized as Record< string, unknown >, original?.payload ?? {} ) as ProductListItem;
 
 			patches.push( row );
-			result.updated.push( { ...( original?.target.item ?? {} ), ...row } as ProductListItem );
+			// The target may be a variation fetched with trimmed fields (a parent's "all its variations"), which
+			// normalises to `images: []`: unless the save touched images, they are not part of the saved row.
+			result.updated.push( { ...withoutUntouchedImages( ( original?.target.item ?? {} ) as Record< string, unknown >, original?.payload ?? {} ), ...row } as ProductListItem );
 		}
 
 		for ( const entry of group ) {
@@ -867,7 +869,7 @@ async function settleUncertain(
 
 		if ( stored === true || ( stored === null && touched ) ) {
 			// The write went through before the answer was lost.
-			result.updated.push( { ...entry.target.item, ...row } as ProductListItem );
+			result.updated.push( { ...withoutUntouchedImages( entry.target.item as Record< string, unknown >, entry.payload ), ...row } as ProductListItem );
 			queuePatches( [ patch ] );
 			continue;
 		}
