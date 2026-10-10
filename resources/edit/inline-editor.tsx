@@ -25,7 +25,7 @@
 import { Button, Notice, ProgressBar, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { CheckboxControl } from '../ui/checkbox-control';
 import { outcomeNoticeId } from '../ui/notices';
-import { createPortal, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { createPortal, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
@@ -35,7 +35,7 @@ import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
-import { getCurrentRows } from '../store/rows';
+import { getCurrentRows, getCurrentRowsSnapshot, subscribeCurrentRows } from '../store/rows';
 import { beginSaveJob, finishSaveJob } from '../store/save-activity';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
 import { isBatchItemError } from '../types';
@@ -49,14 +49,14 @@ import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown
 import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
 import { DONT_CHANGE, hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
-import { ChangeSummary, describeSiteDateTime, describeValue } from './change-summary';
+import { ChangeSummary, currencyOf, describeSiteDateTime, describeValue } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import { formatLogValue } from '../history/log-fields';
 import type { EditorHost } from './editor-context';
 import { measureEditorReady } from './editor-panel';
 import { editorConflictMessage, fieldOfErrorCode, isConflictCode, isGoneCode, isServerLoggedCode } from './errors';
 import { itemLabel, parentNameOf, shortNameOf, skuOf } from './item-label';
-import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools';
+import { LanguageTools, stagedToolIds, toolTargetsLabel, type ToolDrafts } from './language-tools';
 import type { StagedTool } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation, parentIdOf } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
@@ -67,7 +67,7 @@ import { labelsOf, stockStatusTakers, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
-import { canEnableStock, managesStock, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
+import { canEnableStock, hasSaleEdit, managesStock, resolveRowEdits, rowsWithExistingSale, saleIsActive, stockGatedRows } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { saveEdits, saveFields } from './save';
 import { resetHtmlEditorMode } from './html-text-control';
@@ -540,6 +540,18 @@ function kindLabel( item: ProductListItem, types: Array< { value: string; label:
 	return types.find( ( entry ) => entry.value === type )?.label ?? type;
 }
 
+/** Whether the prices a tab edits are in a market currency (a language's SEK prices), not the shop's. */
+export function tabPricesInMarketCurrency( fields: ProductField[], tabId: string, settings: Settings ): boolean {
+	return (
+		tabId !== GENERAL_TAB_ID &&
+		fields.some( ( field ) => {
+			const currency = currencyOf( field );
+
+			return tabOf( field ) === tabId && isSellableField( field ) && currency !== undefined && currency.code !== settings.currency.code;
+		} )
+	);
+}
+
 /**
  * What the variations a price edit reaches cost now: "Regular price now
  * 119,00 €–139,00 €; 5 are on sale." (empty when none has a price), so a
@@ -573,6 +585,11 @@ export function variationPriceRange( rows: ProductListItem[], settings: Settings
 				__( 'Regular price now %s.', 'wp-woocommerce-products-list' ),
 				span
 		  );
+}
+
+/** The rows with a sale whose sale the edits still change once the per-row rules ran ("Only where lower" keeps some). */
+export function salesTheEditReaches( rows: ProductListItem[], edits: Record< string, unknown >, options: RowEditOptions ): ProductListItem[] {
+	return options.keepSale ? rows.filter( ( item ) => hasSaleEdit( resolveRowEdits( item, edits, { keepSale: options.keepSale } ) ) ) : rows;
 }
 
 /**
@@ -1413,10 +1430,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// Rows whose current sale the edits replace (bulk, or all of a product's variations: a quick edit of one row shows the field itself).
 	const existingSales = useMemo( () => ( priceOps && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ priceOps, plannedCount, targetsForValidation, plannedEdits ] );
 	// Sales running now that the edits would end: the user says replace or skip before anything is written.
-	const runningSales = useMemo( () => describeRunningSales( existingSales.rows, plannedEdits, settings ), [ existingSales.rows, plannedEdits, settings ] );
+	// A row "Only where lower" leaves out keeps its sale: it is no running sale the edit ends.
+	const runningSales = useMemo(
+		() => describeRunningSales( salesTheEditReaches( existingSales.rows, plannedEdits, rowOptions ), plannedEdits, settings ),
+		[ existingSales.rows, plannedEdits, rowOptions, settings ]
+	);
 	const saleChoiceNeeded = priceOps && runningSales.count > 0 && saleChoice === null;
 
-	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) ), [ bulk, selectedRows ] );
+	// The rows on screen change under an open editor (a parent expanded or collapsed): the next row follows them.
+	const rowsOnScreen = useSyncExternalStore( subscribeCurrentRows, getCurrentRowsSnapshot );
+	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id, rowsOnScreen ) ), [ bulk, selectedRows, rowsOnScreen ] );
+	/** The next row as the screen shows it when the save ends (its rows may have changed while it ran). */
+	const nextRowNow = () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) );
 
 	/** Focus a field from the problem list: its tab first, then its card opened, then its control. */
 	const focusField = useCallback(
@@ -1617,7 +1642,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 
 			try {
-				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true, ...( planned ? { planned } : {} ) } );
+				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true, announce: true, ...( planned ? { planned } : {} ) } );
 				ran++;
 				ranTabs.add( entry.tabId );
 				reachedVariations ||= Boolean( parentVariations?.length ) && ids.some( ( id ) => parentVariations!.some( ( variation ) => variation.id === id ) );
@@ -1697,13 +1722,24 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			if ( refused.length ) {
 				const stale = rows.filter( ( row ) => refused.includes( row.id ) );
 				const gridTabs = new Set( Array.from( keys, ( key ) => key.slice( 0, key.indexOf( '.' ) ) ) );
-				const wanted = Array.from( new Set( Array.from( gridTabs ).flatMap( ( entry ) => editFetchFields( allFields, stale, mode, { tab: entry } ) ) ) ).sort();
+				// The grid's own keys (a bulk edit's fetch leaves out the texts it cannot bulk edit, the name among them) and the tabs' fields.
+				const wanted = Array.from( new Set( [ ...returned, ...Array.from( gridTabs ).flatMap( ( entry ) => editFetchFields( allFields, stale, mode, { tab: entry } ) ) ] ) ).sort();
 
 				try {
 					const { items: full, missing: gone, trashed } = await hydrateSelection( stale, wanted );
 					const goneSet = new Set( [ ...gone, ...trashed ] );
+					const staleById = new Map( stale.map( ( row ) => [ row.id, row ] ) );
 
-					patchItems( full.filter( ( row ) => ! goneSet.has( row.id ) ) );
+					// Merged key by key into the row the editor holds: a partial `i18n` does not drop the other languages.
+					patchItems(
+						full
+							.filter( ( row ) => ! goneSet.has( row.id ) )
+							.map( ( row ) => {
+								const held = staleById.get( row.id );
+
+								return held ? mergeHydrated( held, row ) : row;
+							} )
+					);
 				} catch {
 					// The refusal is shown either way; the list catches up on its next load.
 				}
@@ -1785,9 +1821,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				notify.info( __( 'Nothing changed: the values equal the current ones.', 'wp-woocommerce-products-list' ) );
 			}
 
-			if ( advance && nextRow ) {
+			const next = advance ? nextRowNow() : null;
+
+			if ( next ) {
 				carryTabToNext( tab.id );
-				onAdvance( nextRow );
+				onAdvance( next );
 			} else {
 				onClose();
 			}
@@ -2159,10 +2197,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					return;
 				}
 
-				if ( advance && nextRow ) {
+				const next = advance ? nextRowNow() : null;
+
+				if ( next ) {
 					if ( mountedRef.current ) {
 						carryTabToNext( tab.id );
-						onAdvance( nextRow );
+						onAdvance( next );
 					}
 				} else {
 					finish();
@@ -2352,6 +2392,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	// Settings typed into a language tool and not run yet count as unsaved too.
 	const [ toolsDirty, setToolsDirty ] = useState( 0 );
+	// What was typed into each tab's tools, shown again when the tab is revisited.
+	const toolDraftsRef = useRef< ToolDrafts >( new Map() );
 	// After a save whose only failures were rows deleted meanwhile, what was typed is saved: nothing is left to discard.
 	const savedAll = failedIds !== null && failedIds.size === 0;
 	const unsavedCount = ( savedAll ? 0 : pendingCount ) + toolsDirty + stagedCount;
@@ -2603,7 +2645,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				return <span className="wc-pl-edit__note">{ __( 'The variations were saved: a retry changes none of them.', 'wp-woocommerce-products-list' ) }</span>;
 			}
 
-			const range = variationPriceRange( rows, settings );
+			// The range is in the shop's currency: on a language tab whose prices are in a market currency (SEK) it would
+			// read as the prices being replaced, so it is left out there.
+			const range = tabPricesInMarketCurrency( editFields, tab.id, settings ) ? '' : variationPriceRange( rows, settings );
 			const count = failedIds ? rows.length : variations.count;
 
 			return (
@@ -3195,6 +3239,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						fields={ allFields }
 						disabled={ saving }
 						onDirtyChange={ setToolsDirty }
+						drafts={ toolDraftsRef.current }
 						applyToVariations={ applyToVariations }
 						parentVariations={ parentVariations }
 						defaultOpen={ bulk }
@@ -3202,7 +3247,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						stage={ stageTool }
 						staged={ staged }
 						// A failure shows inline under the tool, not as a snackbar that outlives it.
-						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ), { inlineErrors: true } ) }
+						run={ ( def, ids, args ) => runDeclarativeAction( def.id, def.label || def.id, ids, args, rowFields( allFields ), { inlineErrors: true, announce: true } ) }
 						onDone={ () => {
 							if ( mountedRef.current ) {
 								// The tab's values reload: the copied (or cleared) texts show in the form.

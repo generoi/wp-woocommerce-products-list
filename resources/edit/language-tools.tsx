@@ -12,7 +12,8 @@
  * Each language tab has its own tool settings (a tool is mounted per tab),
  * and a tool can be added to the Update more than once (an SEO title
  * template and an SEO description template): adding resets the form, and
- * changing the form never touches what was added. "Adjust market prices"
+ * changing the form never touches what was added. What was typed into a tab's
+ * tools shows again when the tab is revisited (the editor keeps it, `drafts`). "Adjust market prices"
  * runs on the variations of the selected variable parents when "Apply price
  * and sale fields to all variations" is ticked (`parentVariations`).
  */
@@ -796,13 +797,18 @@ export interface LanguageToolsProps {
 	applyToVariations?: boolean;
 	/** The variations of the selected variable parents, once loaded, while that option is ticked. */
 	parentVariations?: readonly ProductListItem[];
+	/** Kept by the editor: what was typed into each tab's tools, so a tool shows it again when its tab is revisited. */
+	drafts?: ToolDrafts;
 }
+
+/** A tool's typed settings by `<tab id>:<action id>`, and whether they are unsaved. */
+export type ToolDrafts = Map< string, { data: Record< string, unknown >; ranWith: Record< string, unknown >; dirty: boolean } >;
 
 function sameData( a: Record< string, unknown >, b: Record< string, unknown > ): boolean {
 	return JSON.stringify( a ) === JSON.stringify( b );
 }
 
-type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultOpen' > & { def: DeclarativeAction; lang: string; tabId: string; onDirty( id: string, dirty: boolean ): void };
+type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultOpen' | 'drafts' > & { draft?: { get(): { data: Record< string, unknown >; ranWith: Record< string, unknown > } | undefined; set( data: Record< string, unknown >, ranWith: Record< string, unknown > ): void } } & { def: DeclarativeAction; lang: string; tabId: string; onDirty( id: string, dirty: boolean ): void };
 
 /** Why a fields list offers nothing for the selection: prices on variable parents, or names and SEO on variations. */
 function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined ): string {
@@ -823,13 +829,14 @@ function nothingAppliesText( def: DeclarativeAction, items: readonly ProductList
 	return __( 'None of these fields exists on the selected items (variations have no name or SEO fields of their own).', 'wp-woocommerce-products-list' );
 }
 
-function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged, applyToVariations, parentVariations }: ToolProps ) {
+function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, run, onDone, onDirty, stage, staged, applyToVariations, parentVariations, draft }: ToolProps ) {
 	const defaults = useMemo( () => defaultsOf( def, lang ), [ def, lang ] );
 	// This tool's runs added to the Update in this language, in the order added.
 	const stagedEntries = useMemo( () => Array.from( staged?.values() ?? [] ).filter( ( entry ) => entry.tabId === tabId && entry.def.id === def.id ), [ staged, tabId, def.id ] );
-	const [ data, setData ] = useState< Record< string, unknown > >( defaults );
+	// What was typed before the tab was left shows again.
+	const [ data, setData ] = useState< Record< string, unknown > >( () => draft?.get()?.data ?? defaults );
 	// What the last run was made with: settings equal to these are not "unsaved".
-	const [ ranWith, setRanWith ] = useState< Record< string, unknown > >( defaults );
+	const [ ranWith, setRanWith ] = useState< Record< string, unknown > >( () => draft?.get()?.ranWith ?? defaults );
 	const [ running, setRunning ] = useState( false );
 	const [ confirming, setConfirming ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
@@ -854,6 +861,11 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 	// Settings typed but not added (staging) or not run yet.
 	const dirty = ! sameData( data, stage ? defaults : ranWith );
 	const onDirtyRef = useRef( onDirty );
+	const draftRef = useRef( draft );
+
+	useEffect( () => {
+		draftRef.current?.set( data, ranWith );
+	}, [ data, ranWith ] );
 
 	useEffect( () => {
 		onDirtyRef.current = onDirty;
@@ -863,8 +875,12 @@ function Tool( { def, lang, tabId, tabLabel, items, settings, fields, disabled, 
 		onDirtyRef.current( def.id, dirty );
 	}, [ def.id, dirty ] );
 
-	// A tool that leaves (another tab) holds nothing unsaved any more.
-	useEffect( () => () => onDirtyRef.current( def.id, false ), [ def.id ] );
+	// A tool that leaves (another tab) holds nothing unsaved any more, unless the editor keeps what was typed for the tab's return.
+	useEffect( () => () => {
+		if ( ! draftRef.current ) {
+			onDirtyRef.current( def.id, false );
+		}
+	}, [ def.id ] );
 
 	// Only the arguments shown are sent; the fields argument only carries what this run may copy (prices dropped across currencies).
 	const sentArgs = (): Record< string, unknown > => {
@@ -1272,7 +1288,7 @@ export function toolsSummary( tools: DeclarativeAction[], tabLabel: string ): st
 
 /** The tools of one language tab, folded until opened. */
 export function LanguageTools( props: LanguageToolsProps ) {
-	const { tabId, settings, onDirtyChange } = props;
+	const { tabId, settings, onDirtyChange, drafts } = props;
 	const tools = languageToolsFor( settings.actions ?? [], tabId );
 	const lang = tabId.slice( tabId.indexOf( ':' ) + 1 );
 	const dirtyRef = useRef< Set< string > >( new Set() );
@@ -1284,6 +1300,21 @@ export function LanguageTools( props: LanguageToolsProps ) {
 
 	const onDirty = useMemo(
 		() => ( id: string, dirty: boolean ) => {
+			// With the editor's drafts the count covers every tab's tools, not only the ones on screen.
+			if ( drafts ) {
+				const key = `${ tabId }:${ id }`;
+				const entry = drafts.get( key );
+
+				if ( ( entry?.dirty ?? false ) === dirty ) {
+					return;
+				}
+
+				drafts.set( key, { data: entry?.data ?? {}, ranWith: entry?.ranWith ?? {}, dirty } );
+				onDirtyChangeRef.current?.( Array.from( drafts.values() ).filter( ( value ) => value.dirty ).length );
+
+				return;
+			}
+
 			const had = dirtyRef.current.has( id );
 
 			if ( had === dirty ) {
@@ -1298,20 +1329,31 @@ export function LanguageTools( props: LanguageToolsProps ) {
 
 			onDirtyChangeRef.current?.( dirtyRef.current.size );
 		},
-		[]
+		[ drafts, tabId ]
 	);
 
 	if ( tools.length === 0 ) {
 		return null;
 	}
 
-	const { defaultOpen: _defaultOpen, onDirtyChange: _onDirtyChange, ...toolProps } = props;
+	const { defaultOpen: _defaultOpen, onDirtyChange: _onDirtyChange, drafts: _drafts, ...toolProps } = props;
+	const draftOf = ( id: string ) =>
+		drafts
+			? {
+					get: () => drafts.get( `${ tabId }:${ id }` ),
+					set: ( data: Record< string, unknown >, ranWith: Record< string, unknown > ) => {
+						const key = `${ tabId }:${ id }`;
+
+						drafts.set( key, { data, ranWith, dirty: drafts.get( key )?.dirty ?? false } );
+					},
+				}
+			: undefined;
 
 	return (
 		<details className="wc-pl-language-tools" open={ props.defaultOpen || undefined }>
 			<summary>{ toolsSummary( tools, props.tabLabel ) }</summary>
 			{ tools.map( ( def ) => (
-				<Tool key={ `${ tabId }:${ def.id }` } { ...toolProps } def={ def } lang={ lang } onDirty={ onDirty } />
+				<Tool key={ `${ tabId }:${ def.id }` } { ...toolProps } def={ def } lang={ lang } onDirty={ onDirty } draft={ draftOf( def.id ) } />
 			) ) }
 		</details>
 	);

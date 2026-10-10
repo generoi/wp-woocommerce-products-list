@@ -20,7 +20,8 @@ import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
 import { toInput } from '../fields/components/price-edit';
 import type { ProductField, ProductListItem, Settings } from '../types';
-import { allowsNegative, isSalePriceField, numericKindOf } from './bulk-numeric';
+import { allowsNegative, isNumericOp, isSalePriceField, numericKindOf } from './bulk-numeric';
+import { currencyOf, describeOp } from './change-summary';
 import { createBulkNumericControl } from './bulk-numeric-control';
 import type { FormData } from './bulk-numeric-control';
 import { createDateTimeControl } from './datetime-control';
@@ -407,6 +408,22 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 		if ( pending?.has( field.id ) ) {
 			formField.readOnly = true;
+
+			// A read-only field shows its value as text: an edit already typed into a bulk price or stock field
+			// (a "+ 1" operation, an object) is put in words, never handed to React as it is.
+			const opKind = numericKindOf( field );
+
+			if ( opKind ) {
+				formField.getValueFormatted = ( { item } ) => {
+					const value = item[ field.id ];
+
+					if ( isNumericOp( value ) ) {
+						return describeOp( value, opKind, settings, currencyOf( field ) );
+					}
+
+					return value === null || value === undefined || typeof value === 'object' ? '' : String( value );
+				};
+			}
 		}
 
 		return formField;

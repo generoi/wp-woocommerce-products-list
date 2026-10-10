@@ -16,7 +16,7 @@ import { undoBatch } from '../edit/undo';
 import { canUndo } from '../edit/log-access';
 import { getRegisteredActions, useRegistryVersion } from '../extensions/api';
 import type { Hierarchy } from '../hierarchy/use-hierarchy';
-import { actionsFromSettings } from '../extensions/declarative';
+import { actionsFromSettings, announceActionPerformed } from '../extensions/declarative';
 import { FILTERS } from '../extensions/hooks';
 import { findCachedRow, invalidateProducts, patchItems } from '../store/products';
 import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
@@ -123,6 +123,11 @@ export interface RunDeclarativeOptions {
 	planned?: number;
 	/** No success snackbar: the caller reports the whole Update itself. */
 	silent?: boolean;
+	/**
+	 * Fire `wcProductsList.actionPerformed` for the rows that changed (the editor's language tools): the
+	 * rows are then marked edited and stay in a filter they left, as DataViews' own action callbacks do.
+	 */
+	announce?: boolean;
 }
 
 /** Id => name of the rows the list has loaded, for a failure notice (a tool may run on rows not on the page: those show as #id). */
@@ -197,6 +202,11 @@ export async function runDeclarativeAction( action: string, label: string, ids: 
 
 	if ( response.items.length ) {
 		patchItems( response.items );
+	}
+
+	// Marked edited before the refetch below, so the rows that left the filter stay with "No longer matches".
+	if ( ok.length && options.announce ) {
+		announceActionPerformed( action, response );
 	}
 
 	if ( ok.length ) {

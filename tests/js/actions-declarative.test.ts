@@ -1,4 +1,6 @@
+import { addAction, removeAction } from '@wordpress/hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ACTIONS } from '../../resources/extensions/hooks';
 import type { ActionResponse } from '../../resources/api/client';
 import { closeBatch, logSkipped, runAction } from '../../resources/api/client';
 import { isRowPending } from '../../resources/store/save-activity';
@@ -48,6 +50,23 @@ describe( 'runDeclarativeAction', () => {
 		options.actions[ 0 ]?.onClick();
 		expect( notify.remove ).toHaveBeenCalledWith( 'wc-pl-action-b1' );
 		expect( undoBatch ).toHaveBeenCalledWith( 'b1' );
+	} );
+
+	it( 'announces the changed rows (wcProductsList.actionPerformed) for an editor tool run, so they stay in a filter they left', async () => {
+		const performed = vi.fn();
+
+		addAction( ACTIONS.actionPerformed, 'test/performed', performed );
+		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 1, ok: true, changed: 1 }, { id: 2, ok: false, code: 'x', message: 'No.' } ] ) );
+
+		await expect( runDeclarativeAction( 'i18n_keep', 'Keep as is', [ 1, 2 ], {}, [ 'id' ], { inlineErrors: true, silent: true, announce: true } ) ).rejects.toThrow();
+		expect( performed ).toHaveBeenCalledWith( expect.objectContaining( { action: 'i18n_keep', ids: [ 1 ] } ) );
+
+		// The row menu's run announces in its own callback: not twice.
+		performed.mockClear();
+		vi.mocked( runAction ).mockResolvedValueOnce( response( [ { id: 1, ok: true, changed: 1 } ] ) );
+		await runDeclarativeAction( 'i18n_keep', 'Keep as is', [ 1 ], {}, [ 'id' ] );
+		expect( performed ).not.toHaveBeenCalled();
+		removeAction( ACTIONS.actionPerformed, 'test/performed' );
 	} );
 
 	it( 'says nothing changed, without Undo, when every item already had the values', async () => {

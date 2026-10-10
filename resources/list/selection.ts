@@ -31,7 +31,7 @@ import { CORE_REQUEST_FIELDS } from '../api/query';
 import { ACTIONS } from '../extensions/hooks';
 import { getSettings } from '../settings';
 import { findLoadedVariation } from '../hierarchy/use-hierarchy';
-import { subscribeRemoved } from '../store/products';
+import { subscribePatched, subscribeRemoved } from '../store/products';
 import { getItemId } from '../types';
 import type { BatchResult, ProductListItem, QueryParams } from '../types';
 
@@ -167,6 +167,25 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 		pageByIdRef.current = pageById;
 	} );
 
+	// A selected row the page shows again (a refetch, a page switch) is held as the page has it now, so it is
+	// not the copy from when it was selected once it is on another page again.
+	useEffect( () => {
+		setStored( ( current ) => {
+			let next: Stored | null = null;
+
+			for ( const [ id, row ] of pageById ) {
+				const held = current.get( id );
+
+				if ( held && held !== row ) {
+					next = next ?? new Map( current );
+					next.set( id, row );
+				}
+			}
+
+			return next ?? current;
+		} );
+	}, [ pageById ] );
+
 	const cancelSelectAll = useCallback( () => {
 		selectAllRef.current?.abort();
 		selectAllRef.current = null;
@@ -211,11 +230,31 @@ export function useSelection( pageRows: ProductListItem[], resetKey: string, opt
 		addAction( ACTIONS.deleted, namespace, ( ids: number[] ) => drop( Array.isArray( ids ) ? ids : [] ) );
 		// Rows dropped from the list for any reason (an editor found them trashed or deleted meanwhile, a restore out of the Trash tab).
 		const unsubscribe = subscribeRemoved( drop );
+		// A footer action or a save wrote rows of the selection: the stored rows (those on other pages) take the
+		// written values too, so the next action's eligibility and the editor's first values are not the old ones.
+		const unsubscribePatched = subscribePatched( ( patches ) => {
+			setStored( ( current ) => {
+				let next: Stored | null = null;
+
+				for ( const [ id, patch ] of patches ) {
+					const key = String( id );
+					const row = current.get( key );
+
+					if ( row ) {
+						next = next ?? new Map( current );
+						next.set( key, { ...row, ...patch } as ProductListItem );
+					}
+				}
+
+				return next ?? current;
+			} );
+		} );
 
 		return () => {
 			removeAction( ACTIONS.saved, namespace );
 			removeAction( ACTIONS.deleted, namespace );
 			unsubscribe();
+			unsubscribePatched();
 		};
 	}, [] );
 

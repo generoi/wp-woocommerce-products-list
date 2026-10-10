@@ -20,6 +20,9 @@ import type { ActionFactory } from './context';
 import { canDelete, errorMessage, idsOf, isRealRow, nameOf, realRows, summarize } from './context';
 import { notify } from './notices';
 
+/** The restore action's answer for a product that is not in the Trash (src/Actions/Restore.php). */
+const NOT_TRASHED_CODE = 'wc_products_list_not_trashed';
+
 /** Whether the set is small and harmless enough to trash without asking. */
 export function needsConfirm( rows: ProductListItem[] ): boolean {
 	return rows.length > 1 || rows.some( ( row ) => row.status === 'publish' );
@@ -84,11 +87,22 @@ export function trashRows( rows: ProductListItem[] ): Promise< void > {
 											invalidateProducts( { counts: true } );
 
 											const result = summarize( restored );
+											// A product restored another way meanwhile is not in the Trash: nothing to undo, not a failure.
+											const failed = result.failed.filter( ( failure ) => failure.code !== NOT_TRASHED_CODE );
+											const alreadyRestored = result.failed.length - failed.length;
 
-											if ( result.failed.length ) {
+											if ( failed.length ) {
 												recordFailedRows( restoreBatch, 'action', unansweredResults( restored.results ), { action: 'restore' } );
 												// Still in the Trash: named, with why, and the Trash tab to find them (they are not in this list).
-												notify.error( failureMessage( 'restore', result.failed, names ), { actions: failureNoticeActions( restoreBatch, result.failed, { inTrash: true } ) } );
+												notify.error( failureMessage( 'restore', failed, names ), { actions: failureNoticeActions( restoreBatch, failed, { inTrash: true } ) } );
+											} else if ( alreadyRestored && ! result.ok.length ) {
+												notify.info(
+													sprintf(
+														/* translators: %d: number of products */
+														_n( '%d product was already restored: there was nothing to undo.', '%d products were already restored: there was nothing to undo.', alreadyRestored, 'wp-woocommerce-products-list' ),
+														alreadyRestored
+													)
+												);
 											} else {
 												notify.success( __( 'Restored.', 'wp-woocommerce-products-list' ) );
 											}

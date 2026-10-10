@@ -11,7 +11,7 @@ import { FILTERS } from '../extensions/hooks';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { isArrayOpFieldId } from './bulk-array';
 import { isPlainObject, mergeFragments, readFieldValue } from './field-value';
-import { isNumericOp, numericKindOf, projectEdits } from './bulk-numeric';
+import { isNumericOp, numericKindOf, parseNumeric, projectEdits } from './bulk-numeric';
 import { resolveRowEdits } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { leafOf } from './visibility';
@@ -80,6 +80,14 @@ export function sameAsCurrent( field: ProductField, item: ProductListItem, value
 	return JSON.stringify( current ) === JSON.stringify( value );
 }
 
+/** Whether a numeric op's result equals the row's stored number ("151.20" and "151.2" are the same price). */
+export function sameNumberAsCurrent( field: ProductField, item: ProductListItem, value: unknown ): boolean {
+	const current = parseNumeric( readFieldValue( field, item ) );
+	const next = parseNumeric( value );
+
+	return current !== undefined && next !== undefined && current === next;
+}
+
 export function buildPayload( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): Record< string, unknown > {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 	const own = resolveRowEdits( item, edits, options );
@@ -119,9 +127,10 @@ export function buildPayload( item: ProductListItem, edits: Record< string, unkn
 			next = toSiteDateTime( next, field.type );
 		}
 
-		// A numeric op always changes something or was dropped by projectEdits;
-		// a plain value equal to the row's is a no-op the server would log nothing for.
-		if ( ! isNumericOp( own[ id ] ) && sameAsCurrent( field, item, next ) ) {
+		// A value equal to the row's is a no-op the server would log nothing for; a numeric
+		// op can land on the stored value too ("Change to" the same price, "regular − 20 %"
+		// where the sale already is that, a rounded result), compared as numbers.
+		if ( isNumericOp( own[ id ] ) ? sameNumberAsCurrent( field, item, next ) : sameAsCurrent( field, item, next ) ) {
 			continue;
 		}
 

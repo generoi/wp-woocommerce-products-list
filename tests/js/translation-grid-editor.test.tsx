@@ -124,10 +124,21 @@ describe( 'translation grid in bulk edit', () => {
 		const rows = [ withSe( 1, 'Produkt 1' ), withSe( 2, 'Produkt 2' ) ];
 		let stored = rows;
 
+		// The server trims each row to `_fields`: a re-read that does not ask for the translations gets none.
 		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
 			const ids = String( query.include ).split( ',' ).map( Number );
+			const asked = String( query._fields ?? '' ).split( ',' );
+			const trim = ( row: ProductListItem ) => {
+				if ( asked.some( ( key ) => key === 'i18n' || key.startsWith( 'i18n.' ) ) ) {
+					return row;
+				}
 
-			return { items: ids.map( ( id ) => stored.find( ( row ) => row.id === id ) ?? simple( id ) ), total: ids.length, totalPages: 1 };
+				const { i18n: _dropped, ...rest } = row as ProductListItem & { i18n?: unknown };
+
+				return rest as ProductListItem;
+			};
+
+			return { items: ids.map( ( id ) => trim( stored.find( ( row ) => row.id === id ) ?? simple( id ) ) ), total: ids.length, totalPages: 1 };
 		} );
 		batchProducts.mockResolvedValueOnce( {
 			update: [ { id: 1, error: { code: 'wc_products_list_conflict', message: 'Changed by someone else.', data: { status: 409, fields: [ 'i18n.se.name' ], current: { 'i18n.se.name': 'EXTERNAL' }, expected: { 'i18n.se.name': 'Produkt 1' } } } } ],

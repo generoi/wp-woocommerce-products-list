@@ -11,9 +11,32 @@ const EMPTY: ProductListItem[] = [];
 
 let current: ProductListItem[] = EMPTY;
 let visibleFieldIds: string[] = [];
+const listeners = new Set< () => void >();
 
 export function setCurrentRows( rows: ProductListItem[] ): void {
+	if ( rows === current ) {
+		return;
+	}
+
 	current = rows;
+	listeners.forEach( ( listener ) => listener() );
+}
+
+/**
+ * Be told when the rows on screen change (a parent expanded or collapsed, a
+ * page loaded), for `useSyncExternalStore` with `getCurrentRowsSnapshot`.
+ */
+export function subscribeCurrentRows( listener: () => void ): () => void {
+	listeners.add( listener );
+
+	return () => {
+		listeners.delete( listener );
+	};
+}
+
+/** The rows as last published, unfiltered and stable between changes (a `useSyncExternalStore` snapshot). */
+export function getCurrentRowsSnapshot(): ProductListItem[] {
+	return current;
 }
 
 /** The real rows on screen, in display order (no placeholder rows). */
@@ -23,7 +46,7 @@ export function getCurrentRows(): ProductListItem[] {
 
 /** Tests. */
 export function resetCurrentRows(): void {
-	current = EMPTY;
+	setCurrentRows( EMPTY );
 	visibleFieldIds = [];
 }
 

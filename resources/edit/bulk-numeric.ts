@@ -341,7 +341,8 @@ export function stockMayGoNegative( id: string, item: ProductListItem, current: 
 	return number !== undefined && number < 0;
 }
 
-export function validateNumericOp( op: NumericOp | undefined, kind: NumericKind, settings?: Settings ): string | null {
+/** `allowNegative`: the field takes negative values (menu order), so "Change to" a negative number is fine; an increase or decrease amount never is. */
+export function validateNumericOp( op: NumericOp | undefined, kind: NumericKind, settings?: Settings, allowNegative = false ): string | null {
 	if ( ! isPendingOp( op ) || ! op ) {
 		return null;
 	}
@@ -352,12 +353,12 @@ export function validateNumericOp( op: NumericOp | undefined, kind: NumericKind,
 		return __( 'Enter a number.', 'wp-woocommerce-products-list' );
 	}
 
-	if ( value < 0 ) {
+	if ( value < 0 && ! ( allowNegative && op.operation === 'set' ) ) {
 		return __( 'The value cannot be negative.', 'wp-woocommerce-products-list' );
 	}
 
 	if ( kind === 'integer' && ! Number.isInteger( value ) ) {
-		return __( 'Stock quantities are whole numbers.', 'wp-woocommerce-products-list' );
+		return __( 'Enter a whole number.', 'wp-woocommerce-products-list' );
 	}
 
 	return null;
@@ -468,7 +469,8 @@ function contextFor( item: ProductListItem, id: string, edits: Record< string, u
 			return stockMayGoNegative( id, item, current, settings ) ? { allowNegative: true } : {};
 		}
 
-		return {};
+		// Menu order goes below zero (WordPress sorts -1 first): a decrease is not clamped at zero.
+		return allowsNegative( id ) ? { allowNegative: true } : {};
 	}
 
 	const regularId = regularIdFor( id );
@@ -860,7 +862,7 @@ export function validateNumericOps( edits: Record< string, unknown >, fields: Pr
 			continue;
 		}
 
-		const message = validateNumericOp( value, kind, settings );
+		const message = validateNumericOp( value, kind, settings, allowsNegative( id ) );
 
 		if ( message ) {
 			errors.push( { field: id, message } );

@@ -98,4 +98,17 @@ describe( 'trashRows', () => {
 		expect( options.actions.map( ( action ) => action.label ) ).not.toContain( 'Select the 1 failed' );
 		setSettings( undefined );
 	} );
+
+	it( 'an Undo of a product already restored another way says there was nothing to undo, not that it is still in the Trash', async () => {
+		vi.mocked( runAction )
+			.mockResolvedValueOnce( { batch_id: 'trash-1', items: [], results: [ { id: 1, ok: true } ] } as ActionResponse )
+			.mockResolvedValueOnce( { batch_id: 'trash-1', items: [], results: [ { id: 1, ok: false, code: 'wc_products_list_not_trashed', message: 'The product is not in the trash.' } ] } as ActionResponse );
+
+		await trashRows( [ simple( 1 ) ] );
+
+		const undo = ( vi.mocked( notify.success ).mock.calls[ 0 ]?.[ 1 ] as { actions: Array< { onClick: () => void } > } ).actions[ 0 ]!;
+		undo.onClick();
+		await vi.waitFor( () => expect( notify.info ).toHaveBeenCalledWith( '1 product was already restored: there was nothing to undo.' ) );
+		expect( notify.error ).not.toHaveBeenCalled();
+	} );
 } );

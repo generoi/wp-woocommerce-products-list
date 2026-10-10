@@ -6,7 +6,7 @@ import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/
 import { knownRowIds, MAX_SELECT_ALL, SELECT_ALL_FIELDS, selectRows, useSelection } from '../../resources/list/selection';
 import type { FetchPage } from '../../resources/list/selection';
 import { setSettings } from '../../resources/settings';
-import { removeItems } from '../../resources/store/products';
+import { patchItems, removeItems } from '../../resources/store/products';
 import type { ProductListItem } from '../../resources/types';
 import { sampleSettings } from './settings.test';
 
@@ -58,6 +58,37 @@ describe( 'useSelection', () => {
 		expect( result.current.selection ).toEqual( [ '1', '2001' ] );
 		expect( result.current.rows[ 0 ] ).toBe( fresh[ 0 ] );
 		expect( result.current.offPageCount ).toBe( 0 );
+	} );
+
+	it( 'rows held for other pages take what a footer action or save wrote (patchItems), so the next action sees the new values', () => {
+		const { result, rerender } = renderHook( ( { rows } ) => useSelection( rows, 'all' ), { initialProps: { rows: page1 } } );
+
+		act( () => result.current.onPageSelectionChange( [ '1', '2' ] ) );
+		rerender( { rows: page2 } );
+		act( () => result.current.onPageSelectionChange( [ '4' ] ) );
+
+		// "Mark as featured" on the whole selection: its optimistic patch reaches every selected row.
+		act( () => patchItems( [ { id: 1, featured: true }, { id: 2, featured: true }, { id: 4, featured: true } ] ) );
+
+		const byId = new Map( result.current.rows.map( ( row ) => [ row.id, row ] ) );
+
+		expect( byId.get( 1 )?.featured ).toBe( true );
+		expect( byId.get( 2 )?.featured ).toBe( true );
+		expect( byId.get( 2 )?.name ).toBe( 'P2' );
+	} );
+
+	it( 'a selected row seen again on its page is held as the page has it now once the page changes', () => {
+		const { result, rerender } = renderHook( ( { rows } ) => useSelection( rows, 'all' ), { initialProps: { rows: page1 } } );
+
+		act( () => result.current.onPageSelectionChange( [ '1' ] ) );
+
+		// The page was refetched with the row changed, then the user went to page 2.
+		const fresh = page1.map( ( row ) => ( row.id === 1 ? { ...row, featured: true } : row ) );
+
+		rerender( { rows: fresh } );
+		rerender( { rows: page2 } );
+
+		expect( result.current.rows[ 0 ]?.featured ).toBe( true );
 	} );
 
 	it( 'set replaces the whole selection, dropping ids it cannot find a row for', () => {

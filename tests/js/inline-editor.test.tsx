@@ -636,6 +636,42 @@ describe( 'InlineEditor', () => {
 		expect( screen.queryByRole( 'button', { name: 'Update & next' } ) ).not.toBeInTheDocument();
 	} );
 
+	it( '"Update & next" follows the rows on screen: shown once a parent below is expanded, hidden again when it is collapsed', async () => {
+		setCurrentRows( [ simple( 1, { name: 'One' } ) ] );
+
+		renderEditor( [ simple( 1, { name: 'One' } ) ] );
+		await screen.findByText( 'One' );
+		expect( screen.queryByRole( 'button', { name: 'Update & next' } ) ).not.toBeInTheDocument();
+
+		act( () => setCurrentRows( [ simple( 1, { name: 'One' } ), simple( 2, { name: 'Two' } ) ] ) );
+		expect( await screen.findByRole( 'button', { name: 'Update & next' } ) ).toBeInTheDocument();
+
+		act( () => setCurrentRows( [ simple( 1, { name: 'One' } ) ] ) );
+		await waitFor( () => expect( screen.queryByRole( 'button', { name: 'Update & next' } ) ).not.toBeInTheDocument() );
+	} );
+
+	it( '"Update & next" closes cleanly when the next row left the screen while the save ran', async () => {
+		setCurrentRows( [ simple( 1, { name: 'One' } ), simple( 2, { name: 'Two' } ) ] );
+
+		let resolve: ( value: unknown ) => void = () => undefined;
+
+		saveEdits.mockImplementationOnce( () => new Promise( ( done ) => ( resolve = done ) ) );
+
+		const view = renderEditor( [ simple( 1, { name: 'One' } ) ] );
+
+		await screen.findByText( 'One' );
+		fireEvent.click( screen.getByLabelText( 'featured' ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Update & next' } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+
+		// The row after it is collapsed away before the save answers.
+		act( () => setCurrentRows( [ simple( 1, { name: 'One' } ) ] ) );
+		await act( async () => resolve( { updated: [ simple( 1, { featured: true } ) ], errors: [], batchId: 'b1', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } ) );
+
+		await waitFor( () => expect( view.close ).toHaveBeenCalled() );
+		expect( view.advance ).not.toHaveBeenCalled();
+	} );
+
 	it( 'a variation row gets the variation field set and a Variation badge in a bulk list', async () => {
 		const { getVariations } = await import( '../../resources/api/client' );
 

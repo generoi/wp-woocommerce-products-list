@@ -12,7 +12,7 @@ import type { ComponentType } from 'react';
 import type { DataFormControlProps } from '../dataviews';
 import type { Settings } from '../types';
 import type { FieldCurrency } from '../extensions/declarative';
-import { DONT_CHANGE, isNumericOp, parseShorthand, ROUNDING_ENDINGS, validateNumericOp, WHOLE_UNIT_ENDINGS } from './bulk-numeric';
+import { allowsNegative, DONT_CHANGE, isNumericOp, parseShorthand, ROUNDING_ENDINGS, validateNumericOp, WHOLE_UNIT_ENDINGS } from './bulk-numeric';
 import type { RoundMode } from './bulk-numeric';
 import type { NumericKind, NumericOp } from './bulk-numeric';
 
@@ -256,7 +256,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 		const list = useMemo( () => choices( kind, settings, salePrice, currency ), [] );
 		const sizers = useMemo( () => noteSizers( kind, salePrice, currency?.symbol ?? settings.currency.symbol, list ), [ list ] );
 		const idle = op.operation === 'dont_change';
-		const error = validateNumericOp( op, kind, settings );
+		const error = validateNumericOp( op, kind, settings, allowsNegative( field.id ) );
 		const help = options.reference ? `${ __( 'Default:', 'wp-woocommerce-products-list' ) } ${ options.reference }` : undefined;
 		// React's own ids: the two @wordpress/components runtimes (dataviews' inlined one
 		// and core's) each count `inspector-*-control-N` from zero and collide.

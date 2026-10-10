@@ -7,7 +7,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { buildTabs, toolTabIds } from '../../resources/edit/form-layouts';
 import { isBulkUnsupportedField } from '../../resources/edit/visibility';
 import { describe, expect, it, vi } from 'vitest';
-import { argOptions, argShown, isEditorHostedAction, LanguageTools, languageToolsFor, missingArg, previewTransform, toolIds } from '../../resources/edit/language-tools';
+import { argOptions, argShown, isEditorHostedAction, LanguageTools, languageToolsFor, missingArg, previewTransform, toolIds, type ToolDrafts } from '../../resources/edit/language-tools';
 import type { DeclarativeAction } from '../../resources/types';
 import { coreFields, editSettings, simple, variation } from './edit-fixtures';
 
@@ -263,6 +263,26 @@ describe( 'language tools', () => {
 		fireEvent.click( screen.getByRole( 'button', { name: 'Edit translated text: Svenska, apply now to 1 item…' } ) );
 		fireEvent.click( screen.getByRole( 'button', { name: 'Apply now to 1 item' } ) );
 		await waitFor( () => expect( onDirtyChange ).toHaveBeenLastCalledWith( 0 ) );
+	} );
+
+	it( 'show what was typed again when the tab is left and revisited, and keep counting it as unsaved meanwhile', () => {
+		const onDirtyChange = vi.fn();
+		const tools = editSettings( { actions: [ transformAction() ], languages: settings.languages } );
+		const drafts: ToolDrafts = new Map();
+		const props = { tabLabel: 'Svenska', items: [ simple( 1 ) ], settings: tools, run: async () => undefined, onDone: vi.fn(), onDirtyChange, drafts, stage: vi.fn() };
+		const view = render( <LanguageTools tabId="i18n:se" { ...props } /> );
+
+		fireEvent.click( screen.getByText( /^Svenska tools \(/ ) );
+		fireEvent.change( screen.getByLabelText( 'Find (find & replace)' ), { target: { value: 'x' } } );
+		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
+
+		// Another tab (General: no tools), then back.
+		view.unmount();
+		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
+		render( <LanguageTools tabId="i18n:se" { ...props } /> );
+		fireEvent.click( screen.getByText( /^Svenska tools \(/ ) );
+		expect( screen.getByLabelText( 'Find (find & replace)' ) ).toHaveValue( 'x' );
+		expect( onDirtyChange ).toHaveBeenLastCalledWith( 1 );
 	} );
 } );
 

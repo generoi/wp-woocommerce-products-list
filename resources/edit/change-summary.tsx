@@ -19,7 +19,7 @@ import { currentSellingPrice } from './row-rules';
 import type { RowEditOptions } from './row-rules';
 import { isVariableParent, readFieldValue } from './field-value';
 import { itemLabel } from './item-label';
-import { SCHEDULE_SALE_FIELD_ID, sameAsCurrent, toSiteDateTime } from './payload';
+import { SCHEDULE_SALE_FIELD_ID, sameAsCurrent, sameNumberAsCurrent, toSiteDateTime } from './payload';
 import { isInvalidDate } from './sale-schedule';
 import { fieldAppliesTo, isParentDerivedField, isSellableField, leafOf } from './visibility';
 
@@ -198,7 +198,8 @@ export function describeValue( field: ProductField, value: unknown, settings: Se
 		return describeSiteDateTime( value, settings );
 	}
 
-	if ( numericKindOf( field ) === 'money' ) {
+	// A market price (a language's SEK price) is money in its own currency whether or not it is bulk-editable.
+	if ( numericKindOf( field ) === 'money' || currencyOf( field ) ) {
 		return money( value, settings, currencyOf( field ) );
 	}
 
@@ -294,7 +295,8 @@ export function describeEdits(
 				const projected = projectEdits( item, editsForItem( item, edits, fields, options ), fields, settings );
 				const next = projected[ id ];
 
-				if ( next === undefined ) {
+				// A result equal to the stored value is not written (buildPayload drops it; the plan counts it as unchanged).
+				if ( next === undefined || sameNumberAsCurrent( field, item, next ) ) {
 					continue;
 				}
 
@@ -432,6 +434,25 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 	const rows = new Set( lines.flatMap( ( line ) => line.rowIds ) ).size;
 	// A line that reaches no row (a sale price change on rows that are all skipped) changes no field.
 	const changing = lines.filter( ( line ) => line.count > 0 ).length;
+	const unchangedNote =
+		unchanged > 0 ? (
+			<li className="wc-pl-edit__summary-count">
+				{ sprintf(
+					/* translators: %d: number of rows */
+					_n( '%d row already has these values and is left as it is.', '%d rows already have these values and are left as they are.', unchanged, 'wp-woocommerce-products-list' ),
+					unchanged
+				) }
+			</li>
+		) : null;
+
+	// Nothing reaches any row (every row skipped or already at the value): no "0 fields will change on 0 rows" list of changes that do not happen.
+	if ( changing === 0 ) {
+		return unchangedNote ? (
+			<div className="wc-pl-edit__summary-box" aria-live="polite">
+				<ul>{ unchangedNote }</ul>
+			</div>
+		) : null;
+	}
 
 	return (
 		<div className="wc-pl-edit__summary-box" aria-live="polite">
@@ -469,15 +490,7 @@ export function ChangeSummary( { edits, fields, targets, settings, applyToVariat
 						{ line.direction ? <DirectionNote direction={ line.direction } /> : null }
 					</li>
 				) ) }
-				{ unchanged > 0 ? (
-					<li className="wc-pl-edit__summary-count">
-						{ sprintf(
-							/* translators: %d: number of rows */
-							_n( '%d row already has these values and is left as it is.', '%d rows already have these values and are left as they are.', unchanged, 'wp-woocommerce-products-list' ),
-							unchanged
-						) }
-					</li>
-				) : null }
+				{ unchangedNote }
 			</ul>
 		</div>
 	);

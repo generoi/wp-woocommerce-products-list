@@ -55,6 +55,7 @@ function PriceInput( { data, field, onChange, hideLabelFromVision, validity, cur
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [ stored, settings.currency.decimalSeparator, settings.currency.decimals ] );
 
+	// A problem replaces the field's own help (a market price's "Default: 85,00 kr") while it lasts.
 	const message = validity?.custom?.type === 'invalid' ? validity.custom.message : validity?.min?.type === 'invalid' ? validity.min.message : undefined;
 
 	return (
@@ -64,7 +65,7 @@ function PriceInput( { data, field, onChange, hideLabelFromVision, validity, cur
 			label={ field.label }
 			hideLabelFromVision={ hideLabelFromVision }
 			placeholder={ field.placeholder }
-			help={ message }
+			help={ message ?? ( field.description || undefined ) }
 			inputMode="decimal"
 			aria-invalid={ message ? true : undefined }
 			className={ message ? 'wc-products-list__price-edit is-invalid' : 'wc-products-list__price-edit' }

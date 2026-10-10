@@ -156,6 +156,16 @@ describe( 'validateNumericOp', () => {
 		expect( validateNumericOp( op( 'increase', '-1' ), 'money', settings ) ).toMatch( /negative/ );
 		expect( validateNumericOp( op( 'set', '1.5' ), 'integer', settings ) ).toMatch( /whole/ );
 	} );
+
+	it( 'takes "Change to" a negative menu order (WordPress sorts -1 first) and writes it as typed', () => {
+		const menuOrder = field( 'menu_order', { type: 'integer', edit: { group: 'advanced', bulk: 'integer' }, rest: { fields: [ 'menu_order' ], applies: { product: true, variation: true } } } );
+
+		expect( validateNumericOp( op( 'set', '-2' ), 'integer', settings, true ) ).toBeNull();
+		// The amount of an increase or decrease is still a size, never negative.
+		expect( validateNumericOp( op( 'decrease', '-2' ), 'integer', settings, true ) ).toMatch( /negative/ );
+		expect( validateNumericOps( { menu_order: op( 'set', '-2' ) }, [ menuOrder ], settings ) ).toEqual( [] );
+		expect( projectEdits( simple( 1, { menu_order: 0 } ), { menu_order: op( 'set', '-2' ) }, [ menuOrder ], settings ).menu_order ).toBe( '-2' );
+	} );
 } );
 
 describe( 'numericKindOf', () => {
@@ -373,3 +383,10 @@ describe( 'parseNumeric with every separator pairing', () => {
 		expect( parseNumeric( 'abc', de ) ).toBeUndefined();
 	} );
 } );
+
+describe( 'a whole-number field', () => {
+	it( 'asks for a whole number without calling every integer field a stock quantity (menu order)', () => {
+		expect( validateNumericOp( { operation: 'set', value: '1.5' }, 'integer', undefined, true ) ).toBe( 'Enter a whole number.' );
+	} );
+} );
+

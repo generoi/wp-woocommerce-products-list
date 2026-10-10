@@ -212,6 +212,25 @@ export function patchItems( items: Array< Partial< ProductListItem > & { id: num
 
 	// Expanded variations live in the hierarchy's own store.
 	patchVariationRows( items );
+
+	patchedListeners.forEach( ( listener ) => listener( byId ) );
+}
+
+type PatchedListener = ( patches: ReadonlyMap< number, Partial< ProductListItem > > ) => void;
+
+const patchedListeners = new Set< PatchedListener >();
+
+/**
+ * Called with every patch `patchItems` merged (id → the changed keys), so
+ * rows held outside the caches (the selection's rows on other pages) take
+ * the same values as the list.
+ */
+export function subscribePatched( listener: PatchedListener ): () => void {
+	patchedListeners.add( listener );
+
+	return () => {
+		patchedListeners.delete( listener );
+	};
 }
 
 type RemovedListener = ( ids: number[] ) => void;

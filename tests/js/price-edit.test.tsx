@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { useState } from '@wordpress/element';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { PriceEdit } from '../../resources/fields/components/price-edit';
+import { createPriceEdit, PriceEdit } from '../../resources/fields/components/price-edit';
 import { setSettings } from '../../resources/settings';
 import type { ProductListItem } from '../../resources/types';
 import type { DataFormControlProps } from '../../resources/dataviews';
@@ -27,6 +27,19 @@ function Harness( { initial, message }: { initial: string; message?: string } ) 
 describe( 'PriceEdit', () => {
 	beforeEach( () => setSettings( sampleSettings() ) );
 	afterEach( () => setSettings( undefined ) );
+
+	it( 'a market price shows its "Default: …" help (the converted price the shop shows now), and a problem in its place', () => {
+		const MarketPriceEdit = createPriceEdit( { symbol: 'kr', decimals: 2 } );
+		const described = { ...field, id: 'i18n:se.regular_price', description: 'Default: 85,00 kr' } as unknown as Props[ 'field' ];
+		const data = { id: 1, regular_price: '' } as unknown as ProductListItem;
+		const view = render( <MarketPriceEdit data={ data } field={ described } onChange={ () => undefined } hideLabelFromVision={ false } /> );
+
+		expect( screen.getByText( 'Default: 85,00 kr' ) ).toBeInTheDocument();
+
+		view.rerender( <MarketPriceEdit data={ data } field={ described } onChange={ () => undefined } validity={ { custom: { type: 'invalid', message: 'Not a price.' } } as Props[ 'validity' ] } hideLabelFromVision={ false } /> );
+		expect( screen.getByText( 'Not a price.' ) ).toBeInTheDocument();
+		expect( screen.queryByText( 'Default: 85,00 kr' ) ).toBeNull();
+	} );
 
 	it( 'keeps the typed text while focused and formats it on blur', () => {
 		render( <Harness initial="" /> );
