@@ -221,8 +221,10 @@ export interface ChangedField {
 /**
  * The fields whose value changed after the form first showed it: values
  * the fetch brought in that differ from the list's, or a later reload.
- * `edited` maps the fields the user changed to their value now. `first` holds the value each field showed first; fields not in it yet are
- * added (a field shown for the first time is not "changed").
+ * `edited` maps the fields the user changed to their value now. `first` holds the value each field showed first on
+ * each row (keyed by field and row); rows not in it yet are added (a field shown for the first time is not "changed",
+ * and neither is a bulk edit's selection growing or shrinking: a row ticked in or taken out changes the merged value,
+ * not any row's).
  */
 export function changedSinceShown(
 	fields: ProductField[],
@@ -242,22 +244,29 @@ export function changedSinceShown(
 
 		const values = rows.map( ( row ) => readFieldValue( field, row ) );
 		const key = normalizeForCompare( values );
-		const before = first.get( field.id );
+		// Each row against what it showed first: rows new to the form are recorded, not compared.
+		const differing: Array< { slot: string; before: string } > = [];
 
-		if ( before === undefined ) {
-			first.set( field.id, key );
+		rows.forEach( ( row, index ) => {
+			const slot = firstShownSlot( field.id, row.id );
+			const now = normalizeForCompare( values[ index ] );
+			const before = first.get( slot );
 
-			continue;
-		}
+			if ( before === undefined ) {
+				first.set( slot, now );
+			} else if ( before !== now ) {
+				differing.push( { slot, before } );
+			}
+		} );
 
-		if ( before === key ) {
+		if ( differing.length === 0 ) {
 			continue;
 		}
 
 		// A variation's stored `parent` tax class is shown in view context (the list, a save's answer) as the parent's
 		// class: the same setting read two ways, not a change by someone else (the server's check agrees: Concurrency.php).
-		if ( field.id === 'tax_class' && rows.every( isVariation ) && ( values.every( ( value ) => value === 'parent' ) || before === normalizeForCompare( rows.map( () => 'parent' ) ) ) ) {
-			first.set( field.id, key );
+		if ( field.id === 'tax_class' && rows.every( isVariation ) && ( values.every( ( value ) => value === 'parent' ) || differing.every( ( entry ) => entry.before === normalizeForCompare( 'parent' ) ) ) ) {
+			rows.forEach( ( row, index ) => first.set( firstShownSlot( field.id, row.id ), normalizeForCompare( values[ index ] ) ) );
 
 			continue;
 		}
@@ -280,6 +289,11 @@ export function changedSinceShown(
 	}
 
 	return changed;
+}
+
+/** The key of a field's first-shown value on one row in `changedSinceShown`'s `first`. */
+function firstShownSlot( fieldId: string, rowId: number ): string {
+	return `${ fieldId }\u0000${ rowId }`;
 }
 
 function sameText( a: unknown, b: unknown ): boolean {

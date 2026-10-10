@@ -194,6 +194,18 @@ describe( 'changedSinceShown', () => {
 		expect( changedSinceShown( [ price ], [ row( 1, { regular_price: '15' } ) ], first, shown, new Map( [ [ 'regular_price', '15' ] ] ), loaded ) ).toEqual( [] );
 	} );
 
+	it( 'says nothing when a bulk edit\'s selection shrinks or grows, and still flags a row that changed', () => {
+		const first = new Map< string, string >();
+		const shown = new ShownValues();
+		const loaded = () => true;
+
+		expect( changedSinceShown( [ price ], [ row( 1, { regular_price: '14' } ), row( 2, { regular_price: '15' } ) ], first, shown, new Map(), loaded ) ).toEqual( [] );
+		// A row taken out (× in the item list, unticked in the list) or ticked in: no row's value changed.
+		expect( changedSinceShown( [ price ], [ row( 2, { regular_price: '15' } ) ], first, shown, new Map(), loaded ) ).toEqual( [] );
+		expect( changedSinceShown( [ price ], [ row( 2, { regular_price: '15' } ), row( 3, { regular_price: '9' } ) ], first, shown, new Map(), loaded ) ).toEqual( [] );
+		expect( changedSinceShown( [ price ], [ row( 2, { regular_price: '16' } ), row( 3, { regular_price: '9' } ) ], first, shown, new Map(), loaded ) ).toEqual( [ { id: 'regular_price', now: [ '16', '9' ], edited: false } ] );
+	} );
+
 	it( 'says nothing about a field before its value loaded', () => {
 		const first = new Map< string, string >();
 
