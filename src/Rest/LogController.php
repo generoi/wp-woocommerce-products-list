@@ -375,6 +375,8 @@ final class LogController
         // Source: a bulk edit that also staged an action (a language tool) is a bulk edit, so `action` is the source only when nothing else is (MIN() would pick it first).
         // The same rule as Revert::plan(): a batch is revertable when an ok row with a field is not a trash/restore/delete/duplicate/create row.
         $notRevertable = implode(',', array_map(static fn (string $action): string => "'".esc_sql($action)."'", Revert::NOT_REVERTABLE));
+        // A skipped row that a later ok row of the same batch wrote after all ("Revert anyway", "Subtract the change instead") left nothing out.
+        $superseded = self::supersededCondition('l');
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $total = (int) $wpdb->get_var($this->prepare("SELECT COUNT(DISTINCT batch_id) FROM {$table} WHERE {$where}", $values));
         // The page's batches first, from the two columns the order needs; the
@@ -391,18 +393,18 @@ final class LogController
                 SUM(status <> 'skipped') AS row_count, COUNT(DISTINCT IF(status <> 'skipped', object_id, NULL)) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
                 SUM(action NOT IN ({$notRevertable}) AND object_type <> 'term' AND status = 'ok' AND field <> '') AS updates,
                 SUM(status = 'error') AS errors,
-                COUNT(DISTINCT IF(status = 'skipped', object_id, NULL)) AS skipped_count,
+                COUNT(DISTINCT IF(status = 'skipped' AND NOT {$superseded}, object_id, NULL)) AS skipped_count,
                 COUNT(DISTINCT IF(object_type = 'product' AND status <> 'skipped', object_id, NULL)) AS product_count,
                 COUNT(DISTINCT IF(object_type = 'variation' AND status <> 'skipped', object_id, NULL)) AS variation_count,
                 COUNT(DISTINCT IF(object_type = 'variation' AND status <> 'skipped', parent_id, NULL)) AS parent_count,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', action, NULL) ORDER BY action SEPARATOR ',') AS actions,
                 MAX(reverts) AS reverts,
                 MIN(IF(action NOT IN ('update', 'create'), id, NULL)) AS action_row,
-                GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context), JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
+                GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context) AND NOT {$superseded}, JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields,
-                GROUP_CONCAT(DISTINCT IF(status = 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS skipped_fields,
+                GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND NOT {$superseded}, field, NULL) ORDER BY field SEPARATOR ',') AS skipped_fields,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped' AND source <> 'action' AND action IN ('update', 'create'), field, NULL) ORDER BY field SEPARATOR ',') AS update_fields
-             FROM {$table} WHERE ({$where}) AND batch_id IN ({$in})
+             FROM {$table} AS l WHERE ({$where}) AND batch_id IN ({$in})
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC",
             array_merge($values, $pageIds)
         ), ARRAY_A);
@@ -595,9 +597,10 @@ final class LogController
         // only for the rest (skipped and left-out reasons). A 24k-row batch
         // no longer loads every row into PHP.
         [$revertable, $values] = self::revertableCondition();
+        $superseded = self::supersededCondition('l');
         // phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
         $counts = $wpdb->get_row($wpdb->prepare(
-            "SELECT COUNT(*) AS n, SUM(status <> 'skipped') AS changes, SUM(status = 'error') AS failed, COUNT(DISTINCT user_id) AS users, COUNT(DISTINCT IF(status = 'skipped', object_id, NULL)) AS left_out FROM {$table} WHERE batch_id = %s",
+            "SELECT COUNT(*) AS n, SUM(status <> 'skipped') AS changes, SUM(status = 'error') AS failed, COUNT(DISTINCT user_id) AS users, COUNT(DISTINCT IF(status = 'skipped' AND NOT {$superseded}, object_id, NULL)) AS left_out FROM {$table} AS l WHERE batch_id = %s",
             $batchId
         ), ARRAY_A);
 
@@ -610,7 +613,7 @@ final class LogController
             array_merge([$batchId], $values)
         ), ARRAY_A);
         $others = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id, IF(status = 'skipped', context, NULL) AS skip_context FROM {$table} WHERE batch_id = %s AND NOT ({$revertable}) ORDER BY id ASC",
+            "SELECT id, object_id, object_type, parent_id, action, status, field, user_id, batch_id, IF(status = 'skipped', context, NULL) AS skip_context, IF(status = 'skipped' AND {$superseded}, 1, 0) AS superseded FROM {$table} AS l WHERE batch_id = %s AND NOT ({$revertable}) ORDER BY id ASC",
             array_merge([$batchId], $values)
         ), ARRAY_A);
         // phpcs:enable
@@ -641,6 +644,21 @@ final class LogController
             'reverted_by' => $this->revertedBy([$batchId])[$batchId] ?? null,
             'state' => BatchState::state($batchId),
         ]);
+    }
+
+    /**
+     * SQL for "this skipped row was written after all": a later ok row of
+     * the same batch, object and field (a revert's "Revert anyway" or
+     * "Subtract the change instead" posts the conflicts again under the same
+     * revert batch). Such an item was not left out. `$alias` is the outer
+     * table's alias; the probe goes through `object_created`, so a batch
+     * with thousands of skipped rows costs one short index range per row.
+     */
+    public static function supersededCondition(string $alias): string
+    {
+        $table = Table::name();
+
+        return "EXISTS (SELECT 1 FROM {$table} AS w FORCE INDEX (object_created) WHERE w.object_id = {$alias}.object_id AND w.batch_id = {$alias}.batch_id AND w.field = {$alias}.field AND {$alias}.field <> '' AND w.status = 'ok' AND w.id > {$alias}.id)";
     }
 
     /**
@@ -705,7 +723,7 @@ final class LogController
         $objects = [];
 
         foreach ($rows as $row) {
-            if (($row['status'] ?? '') !== Logger::STATUS_SKIPPED) {
+            if (($row['status'] ?? '') !== Logger::STATUS_SKIPPED || ! empty($row['superseded'])) {
                 continue;
             }
 

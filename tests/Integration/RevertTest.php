@@ -505,12 +505,24 @@ class RevertTest extends RestTestCase
         $this->assertSame([], $plan['skipped']);
         $this->assertSame(1, $plan['left_out']);
 
-        // Forced: the batch's old values win over the later change.
-        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['force' => true]));
+        // Forced, as History's "Revert 1 anyway" posts it (the conflicts, under the same revert batch):
+        // the batch's old values win over the later change.
+        $revertBatch = $data['batch_id'];
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['force' => true, 'ids' => [$a->get_id()], 'revert_batch_id' => $revertBatch]));
         $results = array_column($data['results'], null, 'id');
+        $this->assertSame($revertBatch, $data['batch_id']);
         $this->assertTrue($results[$a->get_id()]['ok']);
         $this->assertSame('189', wc_get_product($a->get_id())->get_regular_price());
         $this->assertSame('', wc_get_product($a->get_id())->get_sale_price());
+
+        // Written after all: History no longer counts A as left out of the revert batch.
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertSame(0, $batches[$revertBatch]['skipped']);
+        $this->assertSame([], $batches[$revertBatch]['skipped_reasons']);
+        $this->assertSame(2, $batches[$revertBatch]['objects']);
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$revertBatch));
+        $this->assertSame(0, $plan['left_out']);
+        $this->assertSame([], $plan['left_out_reasons']);
     }
 
     public function test_a_relative_revert_takes_a_restock_off_and_keeps_a_sale_made_since(): void
