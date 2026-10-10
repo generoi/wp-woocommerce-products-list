@@ -168,6 +168,9 @@ export function createDateTimeControl( settings: Pick< Settings, 'timezone' >, o
 						onBlur={ ( event: FocusEvent< HTMLInputElement > ) => {
 							if ( event.target.validity?.badInput || event.target.value !== dateValue ) {
 								store( 'date' );
+							} else if ( isInvalidDate( stored ) ) {
+								// A half-typed date cleared segment by segment ends as "" without a change event: read both inputs again.
+								store( 'time' );
 							}
 						} }
 					/>
@@ -182,7 +185,9 @@ export function createDateTimeControl( settings: Pick< Settings, 'timezone' >, o
 						value={ timeValue }
 						onChange={ () => store( 'time' ) }
 						onBlur={ ( event: FocusEvent< HTMLInputElement > ) => {
-							if ( event.target.validity?.badInput || event.target.value !== timeValue ) {
+							// Clearing a time segment by segment passes through a half-typed time (stored as invalid) and ends as ""
+							// without a change event, so an invalid stored value is read again when the field is left.
+							if ( event.target.validity?.badInput || event.target.value !== timeValue || isInvalidDate( stored ) ) {
 								store( 'time' );
 							}
 						} }

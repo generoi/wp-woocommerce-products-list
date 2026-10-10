@@ -128,4 +128,49 @@ describe( 'DateTimeControl', () => {
 		fireEvent.change( date, { target: { value: '2026-12-01' } } );
 		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '2026-12-01T23:59:00' } );
 	} );
+	it( 'a time cleared segment by segment (half-typed on the way, no change event at the end) is read again when the field is left', () => {
+		const Control = createDateTimeControl( settings, { problem: ( data, id ) => ( typeof data[ id ] === 'string' && ( data[ id ] as string ).startsWith( 'invalid-date:' ) ? 'Enter a complete date' : null ) } );
+		const fields = coreFields();
+		const to = fields.find( ( entry ) => entry.id === 'date_on_sale_to' )!;
+		const item = simple( 1, { date_on_sale_to: '2026-10-20T18:30:00' } );
+		const merged = mergeItems( [ item ], fields );
+		const formField = toFormFields( [ { ...to, label: 'Sale to' } ], { bulk: false, items: [ item ], base: merged.data, mixed: merged.mixed, settings } )[ 0 ]!;
+		const changes: Array< Record< string, unknown > > = [];
+
+		function Harness() {
+			const [ data, setData ] = useState< Record< string, unknown > >( merged.data );
+
+			return (
+				<Control
+					data={ data }
+					field={ formField as DataFormControlProps< Record< string, unknown > >[ 'field' ] }
+					onChange={ ( next: Record< string, unknown > ) => {
+						changes.push( next );
+						setData( ( previous ) => ( { ...previous, ...next } ) );
+					} }
+					hideLabelFromVision={ false }
+				/>
+			);
+		}
+
+		render( <Harness /> );
+
+		const date = screen.getByLabelText( 'Sale to' ) as HTMLInputElement;
+		const time = screen.getByLabelText( 'Sale to, time (optional)' ) as HTMLInputElement;
+		let bad = true;
+
+		Object.defineProperty( time, 'validity', { configurable: true, get: () => ( { badInput: bad } ) } );
+
+		// Backspace on the hour: "--:30" reads as "" with badInput.
+		fireEvent.change( time, { target: { value: '' } } );
+		expect( String( changes.at( -1 )?.date_on_sale_to ) ).toMatch( /^invalid-date:/ );
+		expect( screen.getByText( 'Enter a complete date' ) ).toBeInTheDocument();
+
+		// Backspace on the minute: "--:--" is still "", now without badInput, and the browser fires no change.
+		bad = false;
+		fireEvent.blur( time );
+		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '2026-10-20T23:59:59' } );
+		expect( screen.queryByText( 'Enter a complete date' ) ).toBeNull();
+		expect( date.value ).toBe( '2026-10-20' );
+	} );
 } );
