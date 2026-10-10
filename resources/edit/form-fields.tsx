@@ -136,6 +136,12 @@ function stringElements( elements: Option[] | undefined ): Option[] | undefined 
 
 const INTEGER_PATTERN = /^-?\d+$/;
 
+/**
+ * Number fields whose empty value is a value of its own (no weight, no low stock threshold of the product's own).
+ * DataViews' number controls report an emptied input as `undefined`, which reads as "untouched".
+ */
+const CLEARABLE_NUMBER_LEAVES: ReadonlySet< string > = new Set( [ 'weight', 'low_stock_amount' ] );
+
 /** A free-text field rendered by DataForm's text control: no options, no custom control, no numeric op. */
 export function isPlainTextField( field: ProductField ): boolean {
 	return ( field.type === 'text' || field.type === undefined ) && ! field.Edit && ! hasOptionList( field ) && numericKindOf( field ) === null;
@@ -220,6 +226,11 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 		if ( scheduleId && ids.has( scheduleId ) ) {
 			formField.isVisible = ( data ) => data[ scheduleId ] === true;
+		}
+
+		// A quick edit that empties the weight or the low stock threshold clears it (payload.ts sends what wc/v3 clears with).
+		if ( ! kind && ! field.Edit && ( field.type === 'number' || field.type === 'integer' ) && CLEARABLE_NUMBER_LEAVES.has( leaf ) ) {
+			formField.setValue = ( { value } ) => ( { [ field.id ]: value === undefined || value === null ? '' : value } );
 		}
 
 		// Our own datetime-local input: named after the field for assistive technology

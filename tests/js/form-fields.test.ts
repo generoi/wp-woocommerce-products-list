@@ -215,3 +215,25 @@ describe( 'mixed text fields in bulk', () => {
 		expect( isPlainTextField( fields.find( ( field ) => field.id === 'featured' )! ) ).toBe( false );
 	} );
 } );
+
+describe( 'clearing a number in a quick edit', () => {
+	it( 'an emptied weight or low stock threshold is an edit that clears it', async () => {
+		const { createWeightField } = await import( '../../resources/fields/shipping' );
+		const { createLowStockAmountField } = await import( '../../resources/fields/low-stock-amount' );
+		const { buildPayload } = await import( '../../resources/edit/payload' );
+		const { effectiveEdits } = await import( '../../resources/edit/use-edit-state' );
+		const fields = [ createWeightField( settings ), createLowStockAmountField( settings ) ];
+		const item = simple( 1, { weight: '0.25', low_stock_amount: 2, manage_stock: true, stock_quantity: 3 } );
+		const merged = mergeItems( [ item ], fields );
+		const { get } = formFor( fields, [ item ], false );
+
+		// DataViews' number controls report an emptied input as undefined.
+		const edits = { ...get( 'weight' ).setValue!( { item: merged.data, value: undefined } ), ...get( 'low_stock_amount' ).setValue!( { item: merged.data, value: undefined } ) };
+		const effective = effectiveEdits( edits, merged.data, merged.mixed );
+
+		expect( effective ).toEqual( { weight: '', low_stock_amount: '' } );
+		// wc/v3 clears the weight with '' and the low stock threshold with null ('' would be stored as 0).
+		expect( buildPayload( item, effective, fields, settings ) ).toEqual( { weight: '', low_stock_amount: null } );
+		expect( buildPayload( item, { low_stock_amount: 5 }, fields, settings ) ).toEqual( { low_stock_amount: 5 } );
+	} );
+} );
