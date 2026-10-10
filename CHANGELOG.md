@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 - 2026-10-10
+
+Clash-prevention fixes from audit rounds 8-10: attribute-term translations (gds-woo-i18n) are locked, clash-checked and logged; row actions write their History row from the change's own hook; a variation's tax class `parent` no longer fails validation or causes a false conflict.
 
 - Quick and bulk edit of variations offer "Same as parent" for the tax class (stored as `parent`, every variation's default): a variation that was never given a class of its own no longer fails validation, and the list and the conflict text show it as "Same as parent". The clash guard and the log read a variation's tax class as stored (`parent`), not as the parent's class, so an unrelated edit is no longer a false conflict and a revert puts `parent` back.
 - A refused list-mode write to a route that is not a product route (a term translation) is no longer also logged as product rows keyed by that route's `id`.
