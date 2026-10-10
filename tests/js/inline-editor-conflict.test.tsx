@@ -107,4 +107,27 @@ describe( 'InlineEditor after a conflict', () => {
 		fireEvent.click( screen.getByRole( 'button', { name: 'Overwrite with my values' } ) );
 		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 2 ) );
 	} );
+
+	it( 'shows the conflicting prices in the shop format, as the rest of the editor does', async () => {
+		const row = simple( 1, { stock_quantity: 12, manage_stock: true } );
+		const priced = { ...CONFLICT, data: { status: 409, id: 1, fields: [ 'regular_price' ], current: { regular_price: '21' }, expected: { regular_price: '25' } } };
+
+		saveEdits.mockResolvedValueOnce( { updated: [], errors: [ priced ], batchId: 'b1', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 } );
+		const { container } = render( <InlineEditor host={ hostFor( [ row ] ) } /> );
+
+		await screen.findByRole( 'heading', { name: /Quick edit/ } );
+		const stock = await waitFor( () => {
+			const input = container.querySelector< HTMLInputElement >( 'input[type="number"]' );
+
+			expect( input ).not.toBeNull();
+
+			return input!;
+		} );
+
+		fireEvent.change( stock, { target: { value: '13' } } );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Update' } ) );
+		await waitFor( () => expect( saveEdits ).toHaveBeenCalledTimes( 1 ) );
+
+		expect( ( await screen.findAllByText( /21,00\s€ \(was 25,00\s€ when loaded\)/ ) ).length ).toBeGreaterThan( 0 );
+	} );
 } );

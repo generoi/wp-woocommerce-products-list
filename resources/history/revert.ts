@@ -270,12 +270,19 @@ export async function revertWholeBatch( batchId: string, options: Omit< RunRever
 	return { ...outcome, plan };
 }
 
-function shown( value: unknown ): string {
+/** A stored scalar in the shop's format ("21,00 €" for a price), as the rest of History shows it. */
+export type ConflictValueFormat = ( key: string, value: string ) => string;
+
+function shown( value: unknown, key = '', format?: ConflictValueFormat ): string {
 	if ( value === null || value === undefined || value === '' ) {
 		return '—';
 	}
 
-	return typeof value === 'object' ? JSON.stringify( value ) : String( value );
+	if ( typeof value === 'object' ) {
+		return JSON.stringify( value );
+	}
+
+	return format ? format( key, String( value ) ) : String( value );
 }
 
 /**
@@ -283,7 +290,7 @@ function shown( value: unknown ): string {
  * kept" (the value the batch left → the value now, which the revert kept).
  * `label` maps a field key to its label when the server sent none.
  */
-export function describeConflict( result: ActionResult, label: ( key: string ) => string = ( key ) => key ): string {
+export function describeConflict( result: ActionResult, label: ( key: string ) => string = ( key ) => key, format?: ConflictValueFormat ): string {
 	const name = result.name || `#${ result.id }`;
 	const keys = result.fields ?? [];
 	const parts = keys.map( ( key, index ) => {
@@ -294,8 +301,8 @@ export function describeConflict( result: ActionResult, label: ( key: string ) =
 				/* translators: 1: field label, 2: value the batch left, 3: value now (kept) */
 				__( '%1$s %2$s → %3$s kept', 'wp-woocommerce-products-list' ),
 				fieldLabel,
-				shown( result.batch[ key ] ),
-				shown( result.current[ key ] )
+				shown( result.batch[ key ], key, format ),
+				shown( result.current[ key ], key, format )
 			);
 		}
 

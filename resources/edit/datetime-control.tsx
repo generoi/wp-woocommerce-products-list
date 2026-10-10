@@ -42,6 +42,9 @@ export function toInputDateTime( value: unknown ): string {
 	return match ? `${ match[ 1 ] }T${ match[ 2 ] }` : '';
 }
 
+/** A stored site-time value's time: `HH:mm` and its seconds. */
+const STORED_LOCAL_TIME = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}):(\d{2})$/;
+
 const INPUT_DATE = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?)?$/;
 
 /** Whether a date field is the end of a range (`…date_on_sale_to`): a date without a time then means the end of that day. */
@@ -128,7 +131,14 @@ export function createDateTimeControl( settings: Pick< Settings, 'timezone' >, o
 			}
 
 			// Emptying the date clears the field (the time shown is only the day's default).
-			const next = source === 'date' && date.value === '' && ! date.validity?.badInput ? '' : readDateTimeInputs( date, time, end );
+			let next = source === 'date' && date.value === '' && ! date.validity?.badInput ? '' : readDateTimeInputs( date, time, end );
+			// A date changed under a time the user left alone keeps the stored time to the second: the time input shows
+			// only minutes, so a whole-day end (23:59:59) read back from it would otherwise end the sale at 23:59:00.
+			const kept = typeof stored === 'string' ? STORED_LOCAL_TIME.exec( stored ) : null;
+
+			if ( source === 'date' && kept && time.value === timeValue && time.value === kept[ 1 ] && next.endsWith( `T${ kept[ 1 ] }:00` ) ) {
+				next = `${ next.slice( 0, -2 ) }${ kept[ 2 ] }`;
+			}
 
 			if ( next !== ( typeof stored === 'string' ? stored : '' ) ) {
 				onChange( { [ field.id ]: next } );

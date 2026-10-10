@@ -12,8 +12,19 @@ import { restoreFocus } from './focus';
 import type { FocusOrigin } from './focus';
 import { describeConflict, runRevert } from '../history/revert';
 import { historyNoticeAction } from './failed-rows';
+import { formatLogValue } from '../history/log-fields';
 import { invalidateLog } from '../history/use-log';
+import { getSettings } from '../settings';
 import { invalidateProducts } from '../store/products';
+
+/** The settings when the page printed them (prices then show in the shop's format), else null (raw values). */
+function settingsOrNull(): ReturnType< typeof getSettings > | null {
+	try {
+		return getSettings();
+	} catch {
+		return null;
+	}
+}
 
 /** The id of the "Reverting…" notice of a batch; one per batch, replaced as it progresses. */
 export function undoNoticeId( batchId: string ): string {
@@ -57,7 +68,8 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 
 		if ( outcome.conflicts.length ) {
 			// Which item and which field, with the value it kept: "Pelsi Black 37-38: Stock quantity 10 → 9 kept".
-			const shown = outcome.conflicts.slice( 0, 3 ).map( ( conflict ) => describeConflict( conflict ) );
+			const settings = settingsOrNull();
+			const shown = outcome.conflicts.slice( 0, 3 ).map( ( conflict ) => describeConflict( conflict, undefined, ( key, value ) => formatLogValue( key, value, settings ) ) );
 			const more = outcome.conflicts.length - shown.length;
 
 			notify.error(

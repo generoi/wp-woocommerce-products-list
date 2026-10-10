@@ -51,6 +51,7 @@ import { getVariationsOfParents } from './variations-read';
 import { DONT_CHANGE, hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary, describeSiteDateTime, describeValue } from './change-summary';
 import { formatPrice } from '../fields/currency';
+import { formatLogValue } from '../history/log-fields';
 import type { EditorHost } from './editor-context';
 import { measureEditorReady } from './editor-panel';
 import { editorConflictMessage, fieldOfErrorCode, isConflictCode, isGoneCode, isServerLoggedCode } from './errors';
@@ -713,8 +714,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// A guard still waiting on the discard confirm: the editor is gone, so leaving is fine.
 			leaveRequestRef.current?.resolve( true );
 
-			// After the list has re-rendered the row the editor stood in for.
-			setTimeout( () => restoreFocus( origin ), 0 );
+			// After the list has re-rendered the row the editor stood in for. Not while another editor is open in the panel
+			// (the pencil of another row, Update & next): keyboard focus is that editor's, never the previous row's.
+			setTimeout( () => {
+				if ( ! document.querySelector( 'form.wc-pl-edit' ) ) {
+					restoreFocus( origin );
+				}
+			}, 0 );
 		},
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- once, for the session the editor opened with
 		[]
@@ -938,14 +944,20 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		focusedRef.current = true;
 
-		const root = rootRef.current;
+		// A variation is quick-edited for its price (its status is a toggle seldom touched): the regular price first.
+		const variationQuick = mode === 'quick' && items.length === 1 && isVariation( items[ 0 ]! );
+		const focusFirst = () => {
+			const root = rootRef.current;
 
-		if ( root && ( ! root.contains( document.activeElement ) || document.activeElement === root ) ) {
-			// A variation is quick-edited for its price (its status is a toggle seldom touched): the regular price first.
-			const variationQuick = mode === 'quick' && items.length === 1 && isVariation( items[ 0 ]! );
+			if ( mountedRef.current && root && ( ! root.contains( document.activeElement ) || document.activeElement === root ) ) {
+				focusFirstControl( formRef.current, variationQuick ? 'input[id^="wc-pl-price-regular_price-"]:not([disabled])' : undefined );
+			}
+		};
 
-			focusFirstControl( formRef.current, variationQuick ? 'input[id^="wc-pl-price-regular_price-"]:not([disabled])' : undefined );
-		}
+		focusFirst();
+		// A form wide enough for two columns lays its cards out again right after this render (useFormColumns measures it
+		// before paint), which replaces the field just focused and drops focus on <body>: focus it again once that is done.
+		setTimeout( focusFirst, 0 );
 
 		// Opening took this long, from the click (performance entry `wc-products-list:editor-ready`).
 		measureEditorReady();
@@ -1436,7 +1448,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				() => controls[ 0 ] ?? null,
 				( control ) => {
 					if ( mountedRef.current && ! focusControl( control ) && ! focusFirstInvalidControl( formRef.current ) ) {
-						focusWithin( rootRef.current, '.wc-pl-edit__errors' );
+						revealNotice( rootRef.current, '.wc-pl-edit__errors' );
 					}
 				}
 			);
@@ -2113,7 +2125,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 							message = __( 'It was deleted meanwhile and was left out.', 'wp-woocommerce-products-list' );
 						} else if ( isConflictCode( error.code ) ) {
 							// What the other change stored, next to the form that still holds the user's values.
-							message = editorConflictMessage( error.data, ( path ) => fieldLabels[ path ] ?? path, bulk );
+							message = editorConflictMessage( error.data, ( path ) => fieldLabels[ path ] ?? path, bulk, ( path, value ) => formatLogValue( path, value, settings ) );
 						}
 
 						return {
@@ -2213,12 +2225,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				// The rows now hold this save's values: "changed by someone else" counts from here.
 				firstShownRef.current.clear();
 
-				// A failure leaves the editor open: keyboard focus goes to its report (never to <body>).
+				// A failure leaves the editor open: keyboard focus goes to its report (never to <body>), scrolled out from under the sticky buttons.
 				if ( failed ) {
 					setTimeout( () => {
 						const root = rootRef.current;
 
-						if ( mountedRef.current && root && ! focusWithin( root, '.wc-pl-edit__errors' ) && ! root.contains( document.activeElement ) ) {
+						if ( mountedRef.current && root && ! revealNotice( root, '.wc-pl-edit__errors' ) && ! root.contains( document.activeElement ) ) {
 							focusFirstControl( formRef.current );
 						}
 					}, 0 );

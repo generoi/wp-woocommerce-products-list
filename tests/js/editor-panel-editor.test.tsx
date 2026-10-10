@@ -134,4 +134,45 @@ describe( 'the editor in the panel', () => {
 		fireEvent.click( section.querySelector( 'summary' )! );
 		await waitFor( () => expect( section.open ).toBe( false ) );
 	} );
+
+	it( 'opening another row keeps focus on the new editor\'s first field when its form takes two columns, not on the previous row in the list', async () => {
+		// A panel wide enough for two columns: the form re-lays its cards out right after it first renders (measured before paint).
+		const rect = HTMLElement.prototype.getBoundingClientRect;
+		HTMLElement.prototype.getBoundingClientRect = function ( this: HTMLElement ) {
+			return this.classList.contains( 'wc-pl-edit__form' ) ? ( { ...rect.call( this ).toJSON?.(), width: 900, height: 600, top: 0, left: 0, right: 900, bottom: 600, x: 0, y: 0 } as DOMRect ) : rect.call( this );
+		};
+
+		try {
+			const one = hostFor( { mode: 'quick', id: 1, origin: { element: null, rowIndex: 0, label: null } }, [ simple( 1, { name: 'Product 1' } ) ] );
+			const view = render(
+				<EditorHostProvider value={ one }>
+					<List />
+				</EditorHostProvider>
+			);
+			const panel = () => screen.getByRole( 'region', { name: /^Quick edit/ } );
+
+			await waitFor( () => expect( panel().querySelector( '.wc-pl-edit__form.is-wide' ) ).not.toBeNull() );
+			await waitFor( () => expect( panel().contains( document.activeElement ) && document.activeElement?.tagName ).toBe( 'INPUT' ) );
+
+			// The pencil of row 2 while row 1 is open: a new editor replaces the old one in the same panel.
+			const two = hostFor( { mode: 'quick', id: 2, origin: { element: null, rowIndex: 1, label: null } }, [ simple( 2, { name: 'Product 2' } ) ] );
+
+			view.rerender(
+				<EditorHostProvider value={ two }>
+					<List />
+				</EditorHostProvider>
+			);
+
+			await screen.findByRole( 'region', { name: 'Quick edit: Product 2' } );
+			await waitFor( () => expect( panel().querySelector( '.wc-pl-edit__form.is-wide input' ) ).not.toBeNull() );
+			await act( async () => {
+				await new Promise( ( resolve ) => setTimeout( resolve, 50 ) );
+			} );
+
+			expect( document.activeElement ).not.toBe( screen.getByRole( 'button', { name: 'Actions 1' } ) );
+			expect( panel().contains( document.activeElement ) && document.activeElement?.tagName ).toBe( 'INPUT' );
+		} finally {
+			HTMLElement.prototype.getBoundingClientRect = rect;
+		}
+	} );
 } );

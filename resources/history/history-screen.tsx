@@ -164,6 +164,8 @@ function RevertPreview( { batchId, options, exclude }: { batchId: string; option
 function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPerformed }: RenderModalProps< T > ) {
 	const settings = getSettings();
 	const fieldOptions = useContext( FieldOptionsContext );
+	// "Changed since" values in the shop's format, as the rest of History shows them.
+	const conflictFormat = ( key: string, value: string ) => formatLogValue( key, value, settings );
 	const row = items[ 0 ];
 	const [ busy, setBusy ] = useState( false );
 	const [ error, setError ] = useState< string | null >( null );
@@ -407,7 +409,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 							{ sprintf(
 								/* translators: %s: one item changed since the batch, e.g. "Pelsi 38: Stock quantity 10 → 9 kept" */
 								__( 'Changed since: %s', 'wp-woocommerce-products-list' ),
-								describeConflict( check.example, ( key ) => logFieldLabel( key, fieldOptions ) )
+								describeConflict( check.example, ( key ) => logFieldLabel( key, fieldOptions ), conflictFormat )
 							) }
 						</p>
 					) : null }
@@ -435,7 +437,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 					</p>
 					<ul>
 						{ outcome.conflicts.slice( 0, 10 ).map( ( conflict ) => (
-							<li key={ conflict.id }>{ describeConflict( conflict, ( key ) => logFieldLabel( key, fieldOptions ) ) }</li>
+							<li key={ conflict.id }>{ describeConflict( conflict, ( key ) => logFieldLabel( key, fieldOptions ), conflictFormat ) }</li>
 						) ) }
 					</ul>
 					{ outcome.conflicts.length > 10 ? (

@@ -407,6 +407,9 @@ describe( 'InlineEditor', () => {
 	} );
 
 	it( 'a failed save keeps keyboard focus inside the editor, on the report', async () => {
+		const scroll = vi.fn();
+
+		Element.prototype.scrollIntoView = scroll;
 		saveEdits.mockResolvedValueOnce( {
 			updated: [],
 			errors: [ { id: 1, code: 'product_invalid_sku', message: 'This SKU is already used by another product.' } ],
@@ -430,8 +433,11 @@ describe( 'InlineEditor', () => {
 		await screen.findByText( '1 problem' );
 		await waitFor( () => expect( editorForm( view.container ).contains( document.activeElement ) ).toBe( true ) );
 		expect( document.activeElement?.closest( '.wc-pl-edit__errors' ) ).not.toBeNull();
+		// The report sits at the end of the form: it is scrolled out from under the sticky Update / Cancel bar.
+		expect( scroll.mock.contexts.some( ( context ) => ( context as Element ).classList?.contains( 'wc-pl-edit__errors' ) ) ).toBe( true );
 		expect( screen.getByRole( 'button', { name: 'Retry 1 failed' } ) ).toBeInTheDocument();
 		expect( view.close ).not.toHaveBeenCalled();
+		delete ( Element.prototype as { scrollIntoView?: unknown } ).scrollIntoView;
 	} );
 
 	it( 'lists the problems of this Update attempt, not the previous one', async () => {

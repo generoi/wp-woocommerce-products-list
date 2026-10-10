@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import { useState } from '@wordpress/element';
 import { getSettings as getDateSettings, setSettings as setDateSettings } from '@wordpress/date';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDateTimeControl, fromInputDateTime, readDateTimeInputs, toInputDateTime } from '../../resources/edit/datetime-control';
@@ -79,5 +80,52 @@ describe( 'DateTimeControl', () => {
 
 		fireEvent.change( input, { target: { value: '' } } );
 		expect( onChange ).toHaveBeenLastCalledWith( { date_on_sale_from: '' } );
+	} );
+
+	it( 'a sale end date typed without a time ends at 23:59:59, also after more change events while the year is typed', () => {
+		const Control = createDateTimeControl( settings );
+		const fields = coreFields();
+		const to = fields.find( ( entry ) => entry.id === 'date_on_sale_to' )!;
+		const item = simple( 1, { date_on_sale_to: '' } );
+		const merged = mergeItems( [ item ], fields );
+		const formField = toFormFields( [ { ...to, label: 'Sale to' } ], { bulk: false, items: [ item ], base: merged.data, mixed: merged.mixed, settings } )[ 0 ]!;
+		const changes: Array< Record< string, unknown > > = [];
+
+		function Harness() {
+			const [ data, setData ] = useState< Record< string, unknown > >( merged.data );
+
+			return (
+				<Control
+					data={ data }
+					field={ formField as DataFormControlProps< Record< string, unknown > >[ 'field' ] }
+					onChange={ ( next: Record< string, unknown > ) => {
+						changes.push( next );
+						setData( ( previous ) => ( { ...previous, ...next } ) );
+					} }
+					hideLabelFromVision={ false }
+				/>
+			);
+		}
+
+		render( <Harness /> );
+
+		const date = screen.getByLabelText( 'Sale to' ) as HTMLInputElement;
+		const time = screen.getByLabelText( 'Sale to, time (optional)' ) as HTMLInputElement;
+
+		// Typing 30.11.2026: the browser fires a change for each complete date on the way (year 0002, 0020, 0202, 2026).
+		fireEvent.change( date, { target: { value: '0002-11-30' } } );
+		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '0002-11-30T23:59:59' } );
+		expect( time.value ).toBe( '23:59' );
+		fireEvent.change( date, { target: { value: '0202-11-30' } } );
+		fireEvent.change( date, { target: { value: '2026-11-30' } } );
+		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '2026-11-30T23:59:59' } );
+
+		// A time the user sets is theirs, to the minute, and stays so when the date changes after it.
+		fireEvent.change( time, { target: { value: '23:59' } } );
+		fireEvent.change( time, { target: { value: '18:00' } } );
+		fireEvent.change( time, { target: { value: '23:59' } } );
+		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '2026-11-30T23:59:00' } );
+		fireEvent.change( date, { target: { value: '2026-12-01' } } );
+		expect( changes.at( -1 ) ).toEqual( { date_on_sale_to: '2026-12-01T23:59:00' } );
 	} );
 } );

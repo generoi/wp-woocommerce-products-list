@@ -58,7 +58,10 @@ export function conflictDataOf( data: unknown ): ConflictData | null {
 	return fields.length ? { fields, current, expected: asRecord( record.expected ) } : null;
 }
 
-function shownValue( value: unknown, path = '' ): string {
+/** A stored scalar in the shop's format ("21,00 €" for a price), as the editor's other notes show it. */
+export type ConflictValueFormat = ( path: string, value: string ) => string;
+
+function shownValue( value: unknown, path = '', format?: ConflictValueFormat ): string {
 	// A variation's tax class `parent` is WooCommerce's stored value for "use the parent's".
 	if ( path === 'tax_class' && value === 'parent' ) {
 		return __( 'Same as parent', 'wp-woocommerce-products-list' );
@@ -68,14 +71,18 @@ function shownValue( value: unknown, path = '' ): string {
 		return '—';
 	}
 
-	return typeof value === 'object' ? JSON.stringify( value ) : String( value );
+	if ( typeof value === 'object' ) {
+		return JSON.stringify( value );
+	}
+
+	return format ? format( path, String( value ) ) : String( value );
 }
 
 /**
  * The other change, field by field: "Regular price 30 (was 12 when loaded)".
  * `label` maps a field path to its label.
  */
-export function describeConflictValues( conflict: ConflictData, label: ( path: string ) => string = ( path ) => path ): string {
+export function describeConflictValues( conflict: ConflictData, label: ( path: string ) => string = ( path ) => path, format?: ConflictValueFormat ): string {
 	return conflict.fields
 		.map( ( path ) =>
 			path in conflict.expected
@@ -83,14 +90,14 @@ export function describeConflictValues( conflict: ConflictData, label: ( path: s
 						/* translators: 1: field label, 2: the value stored now, 3: the value when the editor loaded it */
 						__( '%1$s %2$s (was %3$s when loaded)', 'wp-woocommerce-products-list' ),
 						label( path ),
-						shownValue( conflict.current[ path ], path ),
-						shownValue( conflict.expected[ path ], path )
+						shownValue( conflict.current[ path ], path, format ),
+						shownValue( conflict.expected[ path ], path, format )
 				  )
 				: sprintf(
 						/* translators: 1: field label, 2: the value stored now */
 						__( '%1$s %2$s', 'wp-woocommerce-products-list' ),
 						label( path ),
-						shownValue( conflict.current[ path ], path )
+						shownValue( conflict.current[ path ], path, format )
 				  )
 		)
 		.join( '; ' );
@@ -101,13 +108,13 @@ export function describeConflictValues( conflict: ConflictData, label: ( path: s
  * the other change stored, and that the form still holds the user's values,
  * which only an explicit overwrite writes (never a plain retry).
  */
-export function editorConflictMessage( data: unknown, label: ( path: string ) => string, bulk: boolean ): string {
+export function editorConflictMessage( data: unknown, label: ( path: string ) => string, bulk: boolean, format?: ConflictValueFormat ): string {
 	const conflict = conflictDataOf( data );
 	const stored = conflict
 		? sprintf(
 				/* translators: %s: the fields with the values stored now, e.g. "Regular price 30 (was 12 when loaded)" */
 				__( 'Someone else changed it since it was loaded: %s. Nothing was saved for it.', 'wp-woocommerce-products-list' ),
-				describeConflictValues( conflict, label )
+				describeConflictValues( conflict, label, format )
 		  )
 		: __( 'Someone else changed it since it was loaded. Nothing was saved for it.', 'wp-woocommerce-products-list' );
 

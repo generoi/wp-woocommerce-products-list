@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
+import { formatLogValue } from '../../resources/history/log-fields';
+import { editSettings } from './edit-fixtures';
 import { describeBatchScope, isRevertableRow, itemsLeftToRevert, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
 import type { LogRow } from '../../resources/api/client';
 
@@ -177,6 +179,13 @@ describe( 'conflict reports', () => {
 		expect( describeConflict( conflict ) ).toBe( 'Pelsi Black 37-38: Stock quantity 10 → 9 kept' );
 		// An older server without labels or values: the mapped label alone.
 		expect( describeConflict( { id: 3, ok: false, code: 'conflict', fields: [ 'sale_price' ] }, () => 'Sale price' ) ).toBe( '#3: Sale price' );
+	} );
+
+	it( 'shows the values in the shop format when given History\'s formatter (a price as "18,00 €", not "18")', () => {
+		const settings = editSettings();
+		const priced = { id: 40968, ok: false, code: 'conflict', name: 'S1', fields: [ 'regular_price' ], labels: [ 'Regular price' ], current: { regular_price: '18' }, batch: { regular_price: '16.50' } };
+
+		expect( describeConflict( priced, undefined, ( key, value ) => formatLogValue( key, value, settings ) ) ).toMatch( /^S1: Regular price 16,50\s€ → 18,00\s€ kept$/ );
 	} );
 
 	it( 'offers a relative revert only for the conflicts the server marks relative, and posts relative: true for them', async () => {
