@@ -48,7 +48,7 @@ import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, 
 import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown-values';
 import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
-import { hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
+import { DONT_CHANGE, hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
 import { ChangeSummary, describeSiteDateTime, describeValue } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
@@ -1167,6 +1167,21 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const openKey = [ ...openedIds ].sort().join( '|' );
 	const pendingKey = Object.keys( pendingEdits ).sort().join( '|' );
 	const formColumns = useFormColumns( formRef );
+	// A narrow panel scrolls the tab strip sideways: the open tab (one picked from the problem list too) is kept in view.
+	useEffect( () => {
+		const button = typeof document === 'undefined' ? null : document.getElementById( `wc-pl-edit-tab-${ tab.id }` );
+		const strip = button?.parentElement;
+
+		if ( ! button || ! strip || strip.scrollWidth <= strip.clientWidth ) {
+			return;
+		}
+
+		if ( button.offsetLeft < strip.scrollLeft ) {
+			strip.scrollLeft = button.offsetLeft;
+		} else if ( button.offsetLeft + button.offsetWidth > strip.scrollLeft + strip.clientWidth ) {
+			strip.scrollLeft = button.offsetLeft + button.offsetWidth - strip.clientWidth;
+		}
+	}, [ tab.id ] );
 	const form = useMemo(
 		() =>
 			buildInlineForm( visibleFields, tab, items, settings, {
@@ -2666,23 +2681,61 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				? 'managed'
 				: null
 			: null;
-	const canZeroStock = visibleFields.some( ( field ) => field.id === 'stock_quantity' ) && ! isPendingOp( isNumericOp( state.data.stock_quantity ) ? state.data.stock_quantity : undefined );
+	const quantityShown = visibleFields.some( ( field ) => field.id === 'stock_quantity' );
+	const quantityOp = isNumericOp( state.data.stock_quantity ) ? state.data.stock_quantity : undefined;
+	const canZeroStock = quantityShown && ! isPendingOp( quantityOp );
+	const zeroedStock = quantityShown && quantityOp?.operation === 'set' && quantityOp.value === '0';
+	// The value box of Stock quantity, where "Set Stock quantity to 0" puts focus: what changed, and where to keep typing.
+	const focusQuantity = () => {
+		const label = controlLabels.stock_quantity ?? 'stock_quantity';
+
+		setTimeout( () => {
+			if ( mountedRef.current ) {
+				whenControlShown( () => controlForField( formRef.current, `${ label }: ${ __( 'value', 'wp-woocommerce-products-list' ) }` ) ?? controlForField( formRef.current, label ), ( control ) => mountedRef.current && focusControl( control ) );
+			}
+		}, 0 );
+	};
+	// One button that turns into its own Undo: focus never drops to the page when it is pressed.
+	const zeroButton =
+		canZeroStock || zeroedStock ? (
+			<Button
+				variant="secondary"
+				size="compact"
+				disabled={ saving }
+				accessibleWhenDisabled
+				onClick={ () => {
+					if ( zeroedStock ) {
+						onChange( { stock_quantity: { ...DONT_CHANGE } } );
+
+						return;
+					}
+
+					onChange( { stock_quantity: { operation: 'set', value: '0' } } );
+					focusQuantity();
+				} }
+			>
+				{ zeroedStock ? __( 'Undo', 'wp-woocommerce-products-list' ) : __( 'Set Stock quantity to 0', 'wp-woocommerce-products-list' ) }
+			</Button>
+		) : null;
 	const statusNote =
 		statusDeadEnd === 'parents' ? (
-			<p className="wc-pl-edit__status-note">
-				{ __( 'Stock status: a variable product takes it from its variations. To mark sizes in or out of stock, expand the products in the list and select their variations.', 'wp-woocommerce-products-list' ) }
-			</p>
+			<Notice status="info" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__status-note">
+				{ __( 'Stock status: a variable product takes it from its variations. To mark sizes in or out of stock, use Select all variations in the selection bar, then Bulk edit.', 'wp-woocommerce-products-list' ) }
+			</Notice>
 		) : statusDeadEnd === 'managed' ? (
-			<p className="wc-pl-edit__status-note">
-				{ statusRows.some( isVariableParent )
-					? __( 'Stock status: the other items manage stock, so their quantity decides it, and variable products take it from their variations. To sell them out, set Stock quantity to 0.', 'wp-woocommerce-products-list' )
-					: __( 'Stock status: these items manage stock, so their quantity decides it. To sell them out, set Stock quantity to 0.', 'wp-woocommerce-products-list' ) }{ ' ' }
-				{ canZeroStock ? (
-					<Button variant="link" disabled={ saving } onClick={ () => onChange( { stock_quantity: { operation: 'set', value: '0' } } ) }>
-						{ __( 'Set Stock quantity to 0', 'wp-woocommerce-products-list' ) }
-					</Button>
+			<Notice status="info" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__status-note">
+				<p>
+					{ statusRows.some( isVariableParent )
+						? __( 'Stock status follows the stock quantity (a variable product’s follows its variations). To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' )
+						: __( 'Stock status follows the stock quantity. To mark these items out of stock, set Stock quantity to 0.', 'wp-woocommerce-products-list' ) }
+				</p>
+				{ zeroButton ? (
+					<p className="wc-pl-edit__status-note-action">
+						{ zeroButton }{ ' ' }
+						<span role="status">{ zeroedStock ? __( 'Stock quantity is set to 0 above.', 'wp-woocommerce-products-list' ) : '' }</span>
+					</p>
 				) : null }
-			</p>
+			</Notice>
 		) : null;
 	const stockNotice =
 		stockGated.length > 0 && ! loading ? (

@@ -75,8 +75,8 @@ function hint( op: NumericOp, salePrice: boolean ): string | null {
 
 	if ( op.operation === 'regular_minus' ) {
 		return op.percent
-			? __( 'Each row’s regular price minus this percent, rounded to the store’s price decimals. Rows without a regular price are skipped.', 'wp-woocommerce-products-list' )
-			: __( 'Each row’s regular price minus this amount. Rows without a regular price are skipped.', 'wp-woocommerce-products-list' );
+			? __( 'Rounded to the store’s price decimals. Rows without a regular price are skipped.', 'wp-woocommerce-products-list' )
+			: __( 'Rows without a regular price are skipped.', 'wp-woocommerce-products-list' );
 	}
 
 	if ( salePrice && op.operation === 'decrease' ) {
@@ -104,6 +104,11 @@ export function resolvedShorthand( text: string, op: NumericOp, kind: NumericKin
 		return null;
 	}
 
+	return readsAs( op, kind, symbol );
+}
+
+/** "Reads as: Regular price minus 20%": an operation and its value in words. */
+function readsAs( op: NumericOp, kind: NumericKind, symbol: string ): string {
 	const names: Record< NumericOp[ 'operation' ], string > = {
 		dont_change: '',
 		set: __( 'Change to', 'wp-woocommerce-products-list' ),
@@ -117,6 +122,24 @@ export function resolvedShorthand( text: string, op: NumericOp, kind: NumericKin
 	return `${ __( 'Reads as:', 'wp-woocommerce-products-list' ) } ${ names[ op.operation ] } ${ value }${ unit }`;
 }
 
+/**
+ * Every text the note can show for this control (the idle hint; each operation read back with its note), each as
+ * [bold "Reads as" part, rest]: laid in the note's slot unseen, they make it as tall as the longest at the width it
+ * has, so typing "r-20%" or picking an operation never moves the fields below.
+ */
+export function noteSizers( kind: NumericKind, salePrice: boolean, symbol: string, operations: Array< Pick< NumericOp, 'operation' | 'percent' > > ): Array< [ string, string ] > {
+	return [
+		[ '', shorthandHint( kind, salePrice ) ],
+		...operations
+			.filter( ( entry ) => entry.operation !== 'dont_change' )
+			.map( ( entry ): [ string, string ] => {
+				const sample: NumericOp = { operation: entry.operation, value: kind === 'money' ? '9999.99' : '9999', ...( entry.percent ? { percent: true } : {} ) };
+
+				return [ readsAs( sample, kind, symbol ), hint( sample, salePrice ) ?? '' ];
+			} ),
+	];
+}
+
 /** What the idle note says: the value box takes shorthand. */
 export function shorthandHint( kind: NumericKind, salePrice: boolean ): string {
 	if ( kind !== 'money' ) {
@@ -124,7 +147,7 @@ export function shorthandHint( kind: NumericKind, salePrice: boolean ): string {
 	}
 
 	return salePrice
-		? __( 'Type a price to change to it, +5% / -10% / +2 to change each item’s sale price, or r-20% for its regular price minus 20%.', 'wp-woocommerce-products-list' )
+		? __( 'Type a price, +5% / -10% / +2 to change each sale price, or r-20% for the regular price minus 20%.', 'wp-woocommerce-products-list' )
 		: __( 'Type a price to change to it, or +5%, -10%, +2 to change each item by that much.', 'wp-woocommerce-products-list' );
 }
 
@@ -231,6 +254,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 		const [ draft, setDraft ] = useState< { text: string; op: string } | null >( null );
 		const chosenRef = useRef( false );
 		const list = useMemo( () => choices( kind, settings, salePrice, currency ), [] );
+		const sizers = useMemo( () => noteSizers( kind, salePrice, currency?.symbol ?? settings.currency.symbol, list ), [ list ] );
 		const idle = op.operation === 'dont_change';
 		const error = validateNumericOp( op, kind, settings );
 		const help = options.reference ? `${ __( 'Default:', 'wp-woocommerce-products-list' ) } ${ options.reference }` : undefined;
@@ -251,7 +275,7 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 				id={ `${ baseId }-op` }
 				label={ field.label }
 				hideLabelFromVision={ hideLabelFromVision }
-				help={ error ?? help }
+				help={ help }
 				className={ `wc-pl-bulk-numeric${ salePrice ? ' wc-pl-bulk-numeric--sale' : '' }${ error ? ' wc-pl-bulk-numeric--invalid' : '' }` }
 			>
 				{ /* The operation on a row of its own: "Regular price minus (%)" is read in full, not cut to "Regular pr…". */ }
@@ -284,6 +308,8 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 						id={ `${ baseId }-value` }
 						aria-label={ `${ field.label }: ${ __( 'value', 'wp-woocommerce-products-list' ) }` }
 						className="wc-pl-bulk-numeric__value"
+						aria-invalid={ error ? true : undefined }
+						aria-describedby={ error ? `${ baseId }-note` : undefined }
 						type="text"
 						inputMode="decimal"
 						placeholder={ idle ? options.placeholder ?? '' : '' }
@@ -335,10 +361,19 @@ export function createBulkNumericControl( options: BulkNumericControlOptions ): 
 				) : null }
 				{ /* One slot two lines high for what the typed value reads as and the operation's note: neither moves the fields below. */ }
 				<Text variant="muted" className="wc-pl-bulk-numeric__note">
-					<span className="wc-pl-bulk-numeric__resolved" aria-live="polite">
-						{ resolved ?? '' }
+					{ /* A half-typed value's problem ("Enter a number.") takes the note's place: it shows at once, and moves nothing. */ }
+					<span className={ `wc-pl-bulk-numeric__note-text${ error ? ' is-error' : '' }` } id={ `${ baseId }-note` }>
+						<span className="wc-pl-bulk-numeric__resolved" aria-live="polite">
+							{ resolved ?? '' }
+						</span>
+						{ error ?? note ?? ( idle ? shorthandHint( kind, salePrice ) : '' ) }
 					</span>
-					{ note ?? ( idle ? shorthandHint( kind, salePrice ) : '' ) }
+					{ sizers.map( ( [ bold, rest ], index ) => (
+						<span key={ index } className="wc-pl-bulk-numeric__note-sizer" aria-hidden="true">
+							<span className="wc-pl-bulk-numeric__resolved">{ bold }</span>
+							{ rest }
+						</span>
+					) ) }
 				</Text>
 			</BaseControl>
 		);

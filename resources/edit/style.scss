@@ -15,20 +15,26 @@
 		border-radius: 4px;
 	}
 
-	// The language tabs wrap onto a second line in the panel rather than scroll it sideways, and stay in
-	// view at the top of the panel's scrolling body while the form scrolls under them.
+	// The language tabs stay on one line (a second row would read as a sub-level): a narrow panel scrolls the
+	// strip itself sideways, never the panel. They stay in view at the top of the panel's scrolling body while
+	// the form scrolls under them.
 	&__tabs {
 		position: sticky;
 		// The panel body's 16px top padding: the strip sits flush with the top of the scrolling area.
 		top: -16px;
 		z-index: 2;
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		gap: 0 4px;
+		overflow-x: auto;
+		overflow-y: hidden;
+		scrollbar-width: thin;
 		background: #fff;
 		border-bottom: 1px solid var( --wp-components-color-gray-300, #ddd );
 
 		[role='tab'] {
+			flex-shrink: 0;
+			white-space: nowrap;
 			border-radius: 0;
 			border-bottom: 2px solid transparent;
 			margin-bottom: -1px;
@@ -400,7 +406,7 @@
 		--wp-ui-card-padding: 12px;
 	}
 
-	// A narrow panel (the drawer): tighter tabs, so the languages fit on fewer rows.
+	// A narrow panel (the drawer): tighter tabs, so more languages fit before the strip scrolls.
 	.wc-pl-edit__tabs.is-narrow [role='tab'] {
 		padding-inline: 6px;
 	}
@@ -436,13 +442,18 @@
 		}
 	}
 
+	// Why Stock status is not offered in a bulk edit, and the button that does it instead: a notice of normal size.
 	.wc-pl-edit__status-note {
-		margin: 0;
-		font-size: 12px;
-		color: var( --wp-components-color-foreground-muted, #757575 );
+		p {
+			margin: 0;
+		}
 
-		.components-button.is-link {
-			font-size: 12px;
+		.wc-pl-edit__status-note-action {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 8px;
+			margin-top: 8px;
 		}
 	}
 
@@ -725,19 +736,28 @@
 	}
 }
 
-// What the typed value reads as, then the operation's note: one slot two lines high whether or not there is
-// anything to say, so neither appearing moves the fields below.
+// What the typed value reads as, then the operation's note: one slot as tall as the longest text it can show at
+// the width it has (every one is laid in the same cell, unseen: noteSizers), so typing a value or picking an
+// operation never moves the fields below.
 .wc-pl-bulk-numeric__note {
-	display: block;
-	min-height: calc( 2 * 1.4em );
+	display: grid;
 	margin-top: 4px;
 	font-size: 12px;
 	line-height: 1.4;
+
+	> * {
+		grid-area: 1 / 1;
+		min-width: 0;
+	}
 }
 
-// A sale price's "Reads as: Regular price minus 20 %" and its note run to three lines in a column: room for them.
-.wc-pl-bulk-numeric--sale .wc-pl-bulk-numeric__note {
-	min-height: calc( 3 * 1.4em );
+.wc-pl-bulk-numeric__note-text.is-error {
+	color: var( --wp-components-color-foreground-error, #cc1818 );
+}
+
+.wc-pl-bulk-numeric__note-sizer {
+	visibility: hidden;
+	pointer-events: none;
 }
 
 .wc-pl-bulk-numeric__resolved {
@@ -853,7 +873,8 @@
 
 .wc-pl-editor-panel {
 	position: fixed;
-	top: var( --wp-admin--admin-bar--height, 32px );
+	// Under the admin bar; under its lowest item when it wraps onto a second row (editor-panel.tsx).
+	top: var( --wc-pl-admin-bar-bottom, var( --wp-admin--admin-bar--height, 32px ) );
 	right: 0;
 	bottom: 0;
 	z-index: 9991;
@@ -889,7 +910,7 @@
 
 	// The admin bar is taller, and scrolls away, on a phone-sized screen.
 	@media ( max-width: 782px ) {
-		top: var( --wp-admin--admin-bar--height, 46px );
+		top: var( --wc-pl-admin-bar-bottom, var( --wp-admin--admin-bar--height, 46px ) );
 	}
 
 	// The left edge: drag (or arrow keys) to resize.
@@ -1058,13 +1079,16 @@ html.wc-pl-panel-resizing {
 	// Side by side the panel is a card like the list: same 8px gap under the admin bar, same border and
 	// radius, the list's 15px gutter on the right (the list sits 16px left of it).
 	.wc-pl-editor-panel {
-		top: calc( var( --wp-admin--admin-bar--height, 32px ) + 8px );
+		top: calc( var( --wc-pl-admin-bar-bottom, var( --wp-admin--admin-bar--height, 32px ) ) + 8px );
 		right: 15px;
 		bottom: 8px;
 		width: min( var( --wc-pl-panel-width ), calc( 100% - 15px ) );
 		border: 1px solid #dcdcde;
 		border-radius: 4px;
+		// Clipped, not a scroll container: bringing a focused field into view (scrollIntoView) scrolls the body only,
+		// never the panel itself, which would slide the header and footer up out of place.
 		overflow: hidden;
+		overflow: clip;
 	}
 
 	// While editing, the list keeps only what the work needs: the header links (History, Add new)

@@ -105,15 +105,27 @@ describe( 'bulk stock status', () => {
 
 		expect( screen.queryByLabelText( 'stock_status' ) ).not.toBeInTheDocument();
 
-		const note = await screen.findByText( /these items manage stock, so their quantity decides it/ );
+		const notes = await screen.findAllByText( /Stock status follows the stock quantity\. To mark these items out of stock/ );
 
-		expect( note.closest( '.dataforms-layouts-card__field' )?.textContent ).toMatch( /Inventory/ );
+		expect( notes.some( ( note ) => /Inventory/.test( note.closest( '.dataforms-layouts-card__field' )?.textContent ?? '' ) ) ).toBe( true );
 
 		fireEvent.click( screen.getByRole( 'button', { name: 'Set Stock quantity to 0' } ) );
 
 		await waitFor( () => expect( ( screen.getByLabelText( 'stock_quantity: operation' ) as HTMLSelectElement ).value ).toBe( 'set' ) );
 		expect( ( screen.getByLabelText( 'stock_quantity: value' ) as HTMLInputElement ).value ).toBe( '0' );
+		// Focus lands on the value it set (never on <body>), and the button became its own Undo.
+		await waitFor( () => expect( document.activeElement ).toBe( screen.getByLabelText( 'stock_quantity: value' ) ) );
 		expect( screen.queryByRole( 'button', { name: 'Set Stock quantity to 0' } ) ).not.toBeInTheDocument();
+		expect( screen.getByText( 'Stock quantity is set to 0 above.' ) ).toBeInTheDocument();
+
+		const undo = screen.getByRole( 'button', { name: 'Undo' } );
+
+		undo.focus();
+		fireEvent.click( undo );
+
+		await waitFor( () => expect( ( screen.getByLabelText( 'stock_quantity: operation' ) as HTMLSelectElement ).value ).toBe( 'dont_change' ) );
+		// The same button again, still focused.
+		expect( document.activeElement ).toBe( screen.getByRole( 'button', { name: 'Set Stock quantity to 0' } ) );
 	} );
 
 	it( 'says where a variable product\'s stock status is set when only variable products are selected', async () => {
@@ -124,24 +136,25 @@ describe( 'bulk stock status', () => {
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
 		await screen.findByLabelText( 'tax_status' );
 
-		expect( await screen.findByText( /a variable product takes it from its variations/ ) ).toBeInTheDocument();
+		expect( ( await screen.findAllByText( /a variable product takes it from its variations\. To mark sizes in or out of stock, use Select all variations/ ) ).length ).toBeGreaterThan( 0 );
 	} );
 } );
 
-describe( 'a stock edit on items that do not manage stock', () => {
-	it( 'says so in the Inventory card and next to the greyed-out Update', async () => {
+describe( 'a bulk edit of items that do not manage stock', () => {
+	it( 'shows quantity, backorders and threshold only once Manage stock is ticked, as quick edit does', async () => {
 		const rows = [ variable( 81, { manage_stock: false } ), variable( 82, { manage_stock: false } ) ];
 
 		answerLists( rows );
 		render( <InlineEditor host={ hostFor( rows ) } /> );
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
 
-		fireEvent.change( await screen.findByLabelText( 'stock_quantity: value' ), { target: { value: '5' } } );
+		const manage = await screen.findByLabelText( 'manage_stock' );
 
-		// The notice's text, and its copy in the spoken live region.
-		const warnings = await screen.findAllByText( /2 of the 2 rows do not manage stock/ );
+		expect( screen.queryByLabelText( 'stock_quantity: value' ) ).not.toBeInTheDocument();
+		expect( screen.getByText( /None of these items manages stock\. Tick it to set the stock quantity/ ) ).toBeInTheDocument();
 
-		expect( warnings.some( ( warning ) => /Inventory/.test( warning.closest( '.dataforms-layouts-card__field' )?.textContent ?? '' ) ) ).toBe( true );
-		expect( await screen.findByText( /Nothing to update: none of these items manages stock/ ) ).toBeInTheDocument();
+		fireEvent.click( manage );
+
+		expect( await screen.findByLabelText( 'stock_quantity: value' ) ).toBeInTheDocument();
 	} );
 } );

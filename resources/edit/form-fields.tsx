@@ -156,6 +156,7 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
 	const onlyVariableParents = rows.length > 0 && rows.every( isVariableParent );
 	const someVariableParents = rows.some( isVariableParent );
+	const noRowManagesStock = rows.length > 0 && ! rows.some( managesStock );
 
 	return fields.map( ( field ) => {
 		const state = mixed[ field.id ];
@@ -291,6 +292,18 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		// (WooCommerce ignores them otherwise). A bulk edit keeps them, for the rows that do manage stock.
 		if ( ! bulk && field.id === leaf && isStockGatedEdit( field.id ) && ids.has( 'manage_stock' ) ) {
 			formField.isVisible = ( data ) => data.manage_stock === true;
+		}
+
+		// A bulk edit of rows none of which manages stock: the same, so a quantity is never typed for rows that would all
+		// skip it, nor is the shared "Do not allow" read as a change about to be made. Ticking Manage stock shows them.
+		if ( bulk && noRowManagesStock && field.id === leaf && isStockGatedEdit( field.id ) && ids.has( 'manage_stock' ) ) {
+			formField.isVisible = ( data ) => data.manage_stock === true;
+		}
+
+		if ( bulk && noRowManagesStock && field.id === 'manage_stock' ) {
+			const none = __( 'None of these items manages stock. Tick it to set the stock quantity, backorders and low stock threshold.', 'wp-woocommerce-products-list' );
+
+			formField.description = typeof formField.description === 'string' && formField.description ? `${ formField.description } ${ none }` : formField.description ?? none;
 		}
 
 		if ( ! bulk && field.id === 'manage_stock' ) {

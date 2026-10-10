@@ -560,6 +560,35 @@ export function EditorPanel( { host }: { host: EditorHost } ) {
 
 	useEditedRowMark( host.session.mode === 'quick' ? host.session.id : null );
 
+	// A toolbar with many items (a site badge, a cache menu) wraps onto a second row in a mid-width window and would
+	// cover the panel's Close button: the panel starts under the toolbar's lowest item instead.
+	useLayoutEffect( () => {
+		const panel = panelRef.current;
+		const bar = document.getElementById( 'wpadminbar' );
+
+		if ( ! panel || ! bar ) {
+			return;
+		}
+
+		const fit = () => {
+			const fixed = window.getComputedStyle( bar ).position === 'fixed';
+			const items = Array.from( bar.querySelectorAll< HTMLElement >( '.ab-top-menu > li' ) ).filter( ( item ) => item.offsetParent !== null );
+			const own = bar.getBoundingClientRect().bottom;
+			const lowest = Math.max( own, ...items.map( ( item ) => item.getBoundingClientRect().bottom ) );
+
+			if ( fixed && lowest > own + 1 ) {
+				panel.style.setProperty( '--wc-pl-admin-bar-bottom', `${ Math.ceil( lowest ) }px` );
+			} else {
+				panel.style.removeProperty( '--wc-pl-admin-bar-bottom' );
+			}
+		};
+
+		fit();
+		window.addEventListener( 'resize', fit );
+
+		return () => window.removeEventListener( 'resize', fit );
+	}, [] );
+
 	// F6 moves focus between the list and the panel, as between the regions of the block editor.
 	useEffect( () => {
 		const onKeyDown = ( event: globalThis.KeyboardEvent ) => {

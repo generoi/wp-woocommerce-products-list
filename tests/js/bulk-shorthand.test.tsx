@@ -4,8 +4,11 @@ import { describe, expect, it } from 'vitest';
 import type { DataFormControlProps } from '../../resources/dataviews';
 import { DONT_CHANGE, parseShorthand } from '../../resources/edit/bulk-numeric';
 import type { NumericOp } from '../../resources/edit/bulk-numeric';
-import { createBulkNumericControl, opFromInput, resolvedShorthand } from '../../resources/edit/bulk-numeric-control';
+import { createBulkNumericControl, noteSizers, opFromInput, resolvedShorthand } from '../../resources/edit/bulk-numeric-control';
 import { editSettings } from './edit-fixtures';
+
+/** The note's unseen sizing copies (noteSizers): not what the user reads. */
+const UNSEEN = '[aria-hidden="true"], [aria-hidden="true"] *, script, style';
 
 describe( 'parseShorthand', () => {
 	it( 'reads signs and percent into the operation', () => {
@@ -90,11 +93,11 @@ describe( 'BulkNumericControl shorthand', () => {
 		fireEvent.change( input, { target: { value: '-5' } } );
 
 		expect( select.value ).toBe( 'decrease' );
-		expect( screen.getByText( /^Reads as: Decrease by 5/ ) ).toBeTruthy();
+		expect( screen.getByText( /^Reads as: Decrease by 5/, { ignore: UNSEEN } ) ).toBeTruthy();
 
 		// A bare number in the chosen operation needs no explanation.
 		fireEvent.change( input, { target: { value: '7' } } );
-		expect( screen.queryByText( /^Reads as:/ ) ).toBeNull();
+		expect( screen.queryByText( /^Reads as:/, { ignore: UNSEEN } ) ).toBeNull();
 	} );
 } );
 
@@ -104,5 +107,16 @@ describe( 'resolvedShorthand', () => {
 		expect( resolvedShorthand( '+10%', { operation: 'increase', value: '10', percent: true }, 'money', false, '€' ) ).toBe( 'Reads as: Increase by 10%' );
 		expect( resolvedShorthand( '+3', { operation: 'increase', value: '3' }, 'integer', false, '€' ) ).toBe( 'Reads as: Increase by 3' );
 		expect( resolvedShorthand( '12', { operation: 'set', value: '12' }, 'money', false, '€' ) ).toBeNull();
+	} );
+} );
+
+describe( 'noteSizers', () => {
+	it( 'holds every text the sale price note can show, so the slot is as tall as the longest', () => {
+		const texts = noteSizers( 'money', true, '€', [ { operation: 'dont_change' }, { operation: 'set' }, { operation: 'regular_minus', percent: true }, { operation: 'decrease' } ] ).map( ( [ bold, rest ] ) => `${ bold } ${ rest }`.trim() );
+
+		expect( texts ).toHaveLength( 4 );
+		expect( texts[ 0 ] ).toMatch( /r-20%/ );
+		expect( texts ).toContain( 'Reads as: Regular price minus 9999.99% Rounded to the store’s price decimals. Rows without a regular price are skipped.' );
+		expect( texts.some( ( text ) => text.startsWith( 'Reads as: Decrease by 9999.99 €' ) ) ).toBe( true );
 	} );
 } );

@@ -148,7 +148,7 @@ describe( 'buildInlineForm', () => {
 		expect( all[ 'group:inventory' ] ).toBe( 'Inventory' );
 	} );
 
-	it( 'ends the shorter column with the collapsed settings: the main one in a bulk edit with long organization fields', () => {
+	it( 'keeps Shipping, Tax and Advanced in the side column in a bulk edit too, however long Organization gets', () => {
 		const bulkFields = [
 			...registryFields().filter( ( entry ) => ! [ 'name', 'slug', 'sku', 'short_description', 'description', 'notes' ].includes( entry.id ) ),
 			edit( 'tags', 'organization', 41, { type: 'array' } ),
@@ -160,8 +160,8 @@ describe( 'buildInlineForm', () => {
 		const [ row ] = buildInlineForm( bulkFields.filter( ( entry ) => ! entry.id.startsWith( 'stock_' ) && ! [ 'backorders', 'low_stock_amount', 'sold_individually', 'date_on_sale_from', 'date_on_sale_to' ].includes( entry.id ) ), general, [ simple( 1 ), simple( 2 ) ], settings, { columns: 2, bulk: true } ).fields as FormField[];
 		const [ main, side ] = row!.children as FormField[];
 
-		expect( ( main!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:pricing', 'group:inventory', 'group:shipping', 'group:tax', 'group:advanced' ] );
-		expect( ( side!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:visibility', 'group:organization' ] );
+		expect( ( main!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:pricing', 'group:inventory' ] );
+		expect( ( side!.children as FormField[] ).map( ( card ) => card.id ) ).toEqual( [ 'group:visibility', 'group:organization', 'group:shipping', 'group:tax', 'group:advanced' ] );
 	} );
 
 	it( 'keeps Pricing with only the apply-to-variations control, first in the card', () => {
