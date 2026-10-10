@@ -117,6 +117,13 @@ describe( 'reference help text', () => {
 		expect( referenceText( text, 'short', settings ) ).toBe( 'short' );
 	} );
 
+	it( 'formats a market price that takes no bulk op in its own currency', () => {
+		// gds-woo-i18n's market prices: `bulk: false` (they change in bulk through "Adjust market prices"), in SEK.
+		const market = { ...field( 'i18n:se.regular_price', { edit: { group: 'i18n:se', bulk: false } } ), currency: { code: 'SEK', symbol: 'kr', decimals: 2 } };
+
+		expect( referenceText( market, '159', settings ) ).toBe( '159,00 kr' );
+	} );
+
 	it( 'reaches the form field description as "Default: …"', () => {
 		const fields = coreFields();
 		const item = simple( 1, { i18n: { se: { name: { value: '', source: '<b>Saga</b>' } } } } );

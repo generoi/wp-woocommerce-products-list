@@ -45,13 +45,18 @@ vi.mock( '../../resources/api/client', () => ( {
 	newBatchId: vi.fn( () => 'batch-shared' ),
 	runAction: vi.fn(),
 	closeBatch: vi.fn( async () => undefined ),
+	batchProducts: vi.fn(),
+	toRow: ( row: unknown ) => row,
 } ) );
-vi.mock( '../../resources/edit/save', () => ( { saveEdits: vi.fn() } ) );
+vi.mock( '../../resources/edit/save', () => ( { saveEdits: vi.fn(), saveFields: () => [ 'id', 'i18n' ] } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn() } ) );
 
 const { InlineEditor } = await import( '../../resources/edit/inline-editor' );
 const client = await import( '../../resources/api/client' );
 const listProducts = client.listProducts as unknown as ReturnType< typeof vi.fn >;
+const batchProducts = client.batchProducts as unknown as ReturnType< typeof vi.fn >;
+const store = await import( '../../resources/store/products' );
+const patchItems = store.patchItems as unknown as ReturnType< typeof vi.fn >;
 
 const seName = {
 	...coreFields().find( ( field ) => field.id === 'name' )!,
@@ -113,5 +118,53 @@ describe( 'translation grid in bulk edit', () => {
 		expect( await screen.findByRole( 'button', { name: 'Apply 1 language change' } ) ).toBeInTheDocument();
 		expect( screen.queryByText( 'Also saved with Update:' ) ).toBeNull();
 		expect( document.querySelector( '.wc-pl-edit__staged' ) ).toBeNull();
+	} );
+
+	it( 'shows the stored translation in the list after the grid is refused for a change made by someone else', async () => {
+		const rows = [ withSe( 1, 'Produkt 1' ), withSe( 2, 'Produkt 2' ) ];
+		let stored = rows;
+
+		listProducts.mockImplementation( async ( query: Record< string, unknown > ) => {
+			const ids = String( query.include ).split( ',' ).map( Number );
+
+			return { items: ids.map( ( id ) => stored.find( ( row ) => row.id === id ) ?? simple( id ) ), total: ids.length, totalPages: 1 };
+		} );
+		batchProducts.mockResolvedValueOnce( {
+			update: [ { id: 1, error: { code: 'wc_products_list_conflict', message: 'Changed by someone else.', data: { status: 409, fields: [ 'i18n.se.name' ], current: { 'i18n.se.name': 'EXTERNAL' }, expected: { 'i18n.se.name': 'Produkt 1' } } } } ],
+		} );
+
+		const host: EditorHost = {
+			session: { mode: 'bulk', origin: null, initialTab: 'i18n:se' } as never,
+			fields,
+			items: rows,
+			offPageCount: 0,
+			wholeList: false,
+			close: vi.fn(),
+			advance: vi.fn(),
+			removeItem: vi.fn(),
+			setGuard: vi.fn(),
+		};
+
+		render( <InlineEditor host={ host } /> );
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+
+		fireEvent.click( await screen.findByText( /Translate product by product/ ) );
+		const details = screen.getByText( /Translate product by product/ ).closest( 'details' ) as HTMLDetailsElement;
+
+		details.open = true;
+		fireEvent( details, new Event( 'toggle' ) );
+
+		await waitFor( () => expect( document.querySelectorAll( 'input[data-grid-col="name"]' ).length ).toBe( 2 ) );
+		fireEvent.change( document.querySelectorAll< HTMLInputElement >( 'input[data-grid-col="name"]' )[ 0 ]!, { target: { value: 'Produkt ett' } } );
+
+		// Someone else saves the Swedish name meanwhile.
+		stored = [ withSe( 1, 'EXTERNAL' ), rows[ 1 ]! ];
+		patchItems.mockClear();
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Apply 1 language change' } ) );
+
+		await waitFor( () => expect( batchProducts ).toHaveBeenCalledTimes( 1 ) );
+		await waitFor( () =>
+			expect( patchItems.mock.calls.flat( 2 ).some( ( row ) => ( row as { id: number; i18n?: { se?: { name?: string } } } ).id === 1 && ( row as { i18n?: { se?: { name?: string } } } ).i18n?.se?.name === 'EXTERNAL' ) ).toBe( true )
+		);
 	} );
 } );

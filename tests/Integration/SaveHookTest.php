@@ -772,4 +772,48 @@ class SaveHookTest extends RestTestCase
         $this->assertLessThanOrEqual(2, $featuredTransient);
         $this->assertCount(10, $this->rows());
     }
+
+    private function imageWithThumbnail(string $name): int
+    {
+        $id = self::factory()->attachment->create_object(['file' => '2026/10/'.$name.'.jpg', 'post_mime_type' => 'image/jpeg']);
+        wp_update_attachment_metadata($id, [
+            'width' => 2000,
+            'height' => 2000,
+            'file' => '2026/10/'.$name.'.jpg',
+            'sizes' => ['thumbnail' => ['file' => $name.'-150x150.jpg', 'width' => 150, 'height' => 150, 'mime-type' => 'image/jpeg']],
+        ]);
+
+        return $id;
+    }
+
+    public function test_a_saved_row_comes_back_with_the_thumbnail_the_list_reads(): void
+    {
+        $product = $this->simpleProduct(['image_id' => $this->imageWithThumbnail('boot')]);
+        $parent = $this->variableProduct(['38']);
+        $variation = wc_get_product($parent->get_children()[0]);
+        $variation->set_image_id($this->imageWithThumbnail('size'));
+        $variation->save();
+
+        // products/batch: WooCommerce builds each update item from its body alone, so no query param reaches it.
+        $response = $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'name' => 'Renamed']]], [], ['fields' => 'id,name,images']);
+        $this->assertStatus(200, $response);
+        $this->assertStringEndsWith('boot-150x150.jpg', $this->data($response)['update'][0]['images'][0]['src']);
+
+        // A single save.
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'Renamed again']);
+        $this->assertStatus(200, $response);
+        $this->assertStringEndsWith('boot-150x150.jpg', $this->data($response)['images'][0]['src']);
+
+        // The cross-parent variations batch.
+        $response = $this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [['id' => $variation->get_id(), 'parent_id' => $parent->get_id(), 'regular_price' => '12']]]);
+        $this->assertStatus(200, $response);
+        $this->assertStringEndsWith('size-150x150.jpg', $this->data($response)['update'][0]['image']['src']);
+
+        // An explicit size is kept, and outside the list WooCommerce's own default stays.
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'Full'], [], ['image_size' => 'full']);
+        $this->assertStringEndsWith('boot.jpg', $this->data($response)['images'][0]['src']);
+
+        $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'Elsewhere'], [ListMode::HEADER => '', ListMode::BATCH_HEADER => '']);
+        $this->assertStringEndsWith('boot.jpg', $this->data($response)['images'][0]['src']);
+    }
 }

@@ -425,6 +425,24 @@ final class Saves
     }
 
     /**
+     * The saved row comes back with the image size the list reads
+     * everywhere (`image_size=thumbnail`). WooCommerce falls back to `full`
+     * when the request names none, and a batch builds each update item from
+     * its body alone, so even a query param on `products/batch` never
+     * reaches the item: the list would swap a saved row's 150 px thumbnail
+     * for the original file. A size the request names is kept.
+     */
+    private static function thumbnailImages(WP_REST_Request $request): void
+    {
+        if ($request['image_size'] !== null && $request['image_size'] !== '') {
+            return;
+        }
+
+        // A query param, not set_param(): that would land in the body, which the recorder reads as the written fields.
+        $request->set_query_params(['image_size' => 'thumbnail'] + $request->get_query_params());
+    }
+
+    /**
      * `woocommerce_rest_pre_insert_{product,product_variation}_object` at
      * 10, after the guard (`guardInsert()`) and the extensions' own
      * filters: the recorder's snapshot and `wc_products_list/save`.
@@ -439,6 +457,7 @@ final class Saves
         }
 
         self::forwardFields($request);
+        self::thumbnailImages($request);
 
         // WooCommerce's variations controller skips a falsy `menu_order`
         // (`if ( $request['menu_order'] )`), so a bulk "change to 0" or the

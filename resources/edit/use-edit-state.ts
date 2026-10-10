@@ -71,9 +71,10 @@ const NO_EDITS: Record< string, unknown > = {};
  * @param resetKey Identifies the selection the edits belong to; when it
  *                 changes (the modal is reused for other rows) the edits are
  *                 dropped, so nothing typed for one product reaches another.
+ * @param applyToVariations The variable parents stand for their variations on the sellable fields.
  */
-export function useEditState( items: ProductListItem[], fields: ProductField[], resetKey = '' ): EditState {
-	const merged = useMemo( () => mergeItems( items, fields ), [ items, fields ] );
+export function useEditState( items: ProductListItem[], fields: ProductField[], resetKey = '', applyToVariations = false ): EditState {
+	const merged = useMemo( () => mergeItems( items, fields, { applyToVariations } ), [ items, fields, applyToVariations ] );
 	const [ rawEdits, setRawEdits ] = useState< Record< string, unknown > >( {} );
 	const [ lastKey, setLastKey ] = useState( resetKey );
 

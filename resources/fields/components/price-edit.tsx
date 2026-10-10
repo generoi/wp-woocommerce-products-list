@@ -12,14 +12,36 @@
  * than the one an edit would be based on (the save's expected value).
  */
 import { useEffect, useId, useRef, useState } from '@wordpress/element';
+import type { ComponentType } from 'react';
 import { InputControl } from '../../ui';
 import { getSettings } from '../../settings';
 import type { ProductListItem, Settings } from '../../types';
 import type { DataFormControlProps } from '../../dataviews';
 import { parsePrice } from '../currency';
 
-export function PriceEdit( { data, field, onChange, hideLabelFromVision, validity }: DataFormControlProps< ProductListItem > ) {
-	const settings = getSettings();
+/** The currency a price is in when it is not the shop's (a language's market price in SEK): its symbol and decimals. */
+export interface PriceEditCurrency {
+	symbol: string;
+	decimals: number;
+}
+
+export function PriceEdit( props: DataFormControlProps< ProductListItem > ) {
+	return <PriceInput { ...props } />;
+}
+
+/**
+ * The control for a price in another currency (a language's market price): the shop's notation with that currency's
+ * symbol and decimals, as the list shows it ("149,50 kr"), not the stored dot-decimal string.
+ */
+export function createPriceEdit( currency: PriceEditCurrency ): ComponentType< DataFormControlProps< ProductListItem > > {
+	return function MarketPriceEdit( props: DataFormControlProps< ProductListItem > ) {
+		return <PriceInput { ...props } currency={ currency } />;
+	};
+}
+
+function PriceInput( { data, field, onChange, hideLabelFromVision, validity, currency }: DataFormControlProps< ProductListItem > & { currency?: PriceEditCurrency } ) {
+	const shop = getSettings();
+	const settings = currency ? { ...shop, currency: { ...shop.currency, symbol: currency.symbol, decimals: currency.decimals } } : shop;
 	const stored = field.getValue( { item: data } );
 	const [ text, setText ] = useState( () => toInput( stored, settings ) );
 	const focusedRef = useRef( false );

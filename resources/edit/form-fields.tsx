@@ -18,6 +18,7 @@ import type { DataFormControlProps, Field, Option } from '../dataviews';
 import { formatMoney } from '../extensions/declarative';
 import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
+import { toInput } from '../fields/components/price-edit';
 import type { ProductField, ProductListItem, Settings } from '../types';
 import { isSalePriceField, numericKindOf } from './bulk-numeric';
 import { createBulkNumericControl } from './bulk-numeric-control';
@@ -99,9 +100,14 @@ function displayValue( value: unknown ): string {
 	return typeof value === 'object' ? '' : String( value );
 }
 
+/** A money field: a core price, or an extension's price column (it carries its currency, also when it takes no bulk op). */
+function isMoneyField( field: ProductField ): boolean {
+	return numericKindOf( field ) === 'money' || ( field as { currency?: FieldCurrency } ).currency !== undefined;
+}
+
 /** Reference text for the help line: money formatted, HTML stripped, long text cut. */
 export function referenceText( field: ProductField, reference: string, settings: Settings ): string {
-	if ( numericKindOf( field ) === 'money' ) {
+	if ( isMoneyField( field ) ) {
 		// A language's price column is in that market's currency (SEK), not the shop's.
 		const currency = ( field as { currency?: FieldCurrency } ).currency;
 
@@ -183,7 +189,7 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		};
 
 		// Texts only: a language's price is in that market's currency, its default in the shop's.
-		const edited = reference !== null && leaf !== field.id && numericKindOf( field ) === null && Object.prototype.hasOwnProperty.call( editedDefaults, leaf ) ? editedDefaults[ leaf ] : undefined;
+		const edited = reference !== null && leaf !== field.id && ! isMoneyField( field ) && Object.prototype.hasOwnProperty.call( editedDefaults, leaf ) ? editedDefaults[ leaf ] : undefined;
 
 		if ( typeof edited === 'string' && edited !== '' ) {
 			formField.description = sprintf(
@@ -323,7 +329,11 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		}
 
 		if ( kind ) {
-			const shared = isMixed ? state?.placeholder : displayValue( base[ field.id ] );
+			const fieldCurrency = ( field as { currency?: FieldCurrency } ).currency;
+			const current = displayValue( base[ field.id ] );
+			// A shared price in the notation the input takes ("15,50"), not the stored one ("15.5").
+			const shown = kind === 'money' && current !== '' ? toInput( current, fieldCurrency ? { currency: { ...settings.currency, decimals: fieldCurrency.decimals } } : settings ) : current;
+			const shared = isMixed ? state?.placeholder : shown;
 
 			formField.type = undefined;
 			formField.isValid = undefined;

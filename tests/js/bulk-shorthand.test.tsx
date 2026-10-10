@@ -5,7 +5,10 @@ import type { DataFormControlProps } from '../../resources/dataviews';
 import { DONT_CHANGE, parseShorthand } from '../../resources/edit/bulk-numeric';
 import type { NumericOp } from '../../resources/edit/bulk-numeric';
 import { createBulkNumericControl, noteSizers, opFromInput, resolvedShorthand } from '../../resources/edit/bulk-numeric-control';
-import { editSettings } from './edit-fixtures';
+import type { ComponentType } from 'react';
+import { toFormFields } from '../../resources/edit/form-fields';
+import { mergeItems } from '../../resources/edit/merge';
+import { coreFields, editSettings, simple } from './edit-fixtures';
 
 /** The note's unseen sizing copies (noteSizers): not what the user reads. */
 const UNSEEN = '[aria-hidden="true"], [aria-hidden="true"] *, script, style';
@@ -118,5 +121,19 @@ describe( 'noteSizers', () => {
 		expect( texts[ 0 ] ).toMatch( /r-20%/ );
 		expect( texts ).toContain( 'Reads as: Regular price minus 9999.99% Rounded to the store’s price decimals. Rows without a regular price are skipped.' );
 		expect( texts.some( ( text ) => text.startsWith( 'Reads as: Decrease by 9999.99 €' ) ) ).toBe( true );
+	} );
+} );
+
+describe( 'BulkNumericControl shared price', () => {
+	it( 'shows the shared current price in the notation the box takes ("15,50"), not the stored "15.5"', () => {
+		const fields = coreFields().filter( ( entry ) => entry.id === 'regular_price' );
+		const items = [ simple( 1, { regular_price: '15.5' } ), simple( 2, { regular_price: '15.5' } ) ];
+		const merged = mergeItems( items, fields );
+		const formField = toFormFields( fields, { bulk: true, items, base: merged.data, mixed: merged.mixed, settings: editSettings() } )[ 0 ]!;
+		const Edit = formField.Edit as ComponentType< DataFormControlProps< Record< string, unknown > > >;
+
+		render( <Edit data={ {} } field={ { id: 'regular_price', label: 'Regular price' } as DataFormControlProps< Record< string, unknown > >[ 'field' ] } onChange={ () => {} } hideLabelFromVision={ false } /> );
+
+		expect( ( screen.getByLabelText( 'Regular price: value' ) as HTMLInputElement ).placeholder ).toBe( '15,50' );
 	} );
 } );

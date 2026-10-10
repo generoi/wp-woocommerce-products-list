@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { addAction, removeAction } from '@wordpress/hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { ACTIONS } from '../../resources/extensions/hooks';
+import { setSettings } from '../../resources/settings';
 import {
 	actionFromDeclarative,
 	actionsFromSettings,
@@ -345,15 +346,27 @@ describe( 'fieldFromDeclarative', () => {
 		expect( fieldFromDeclarative( makeField( { id: 'name_se', type: 'text' } ), settings ).currency ).toBeUndefined();
 	} );
 
-	it( 'gives price fields a currency-suffixed text control, locale parsing on write and validation', () => {
+	it( 'gives price fields a currency-suffixed price control in the shop notation, locale parsing on write and validation', () => {
 		const field = fieldFromDeclarative(
 			makeField( { id: 'i18n:se.regular_price', type: 'price', path: 'i18n.se.regular_price.value', reference: 'i18n.se.regular_price.source', writePath: 'i18n.se.regular_price', bulk: 'money' } ),
 			settings
 		);
-		const edit = field.Edit as { control: string; suffix: () => JSX.Element };
+		const Edit = field.Edit as unknown as ( props: Record< string, unknown > ) => JSX.Element;
+		const formField = { id: field.id, label: 'Regular price (SEK)', getValue: ( { item }: { item: Record< string, unknown > } ) => item[ field.id ], setValue: ( { value }: { value: unknown } ) => ( { [ field.id ]: value } ) };
 
-		expect( edit.control ).toBe( 'text' );
-		expect( render( createElement( edit.suffix ) ).container.textContent ).toBe( 'kr' );
+		setSettings( settings );
+
+		try {
+			// A stored market price shows with the shop's decimal separator and the market's symbol, as the list shows it.
+			const shown = render( createElement( Edit, { data: { [ field.id ]: '149.50' }, field: formField, onChange: () => undefined, hideLabelFromVision: false } ) );
+
+			expect( ( shown.getByLabelText( 'Regular price (SEK)' ) as HTMLInputElement ).value ).toBe( '149,50' );
+			expect( shown.container.textContent ).toContain( 'kr' );
+			shown.unmount();
+		} finally {
+			setSettings( undefined );
+		}
+
 		expect( field.edit ).toMatchObject( { bulk: 'money', tab: 'i18n:se' } );
 
 		expect( field.rest.write?.( '12,50', product() ) ).toEqual( { i18n: { se: { regular_price: '12.50' } } } );

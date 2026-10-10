@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mergeItems, mergeReference, mergeValues, MIXED_LABEL, MIXED_VALUE } from '../../resources/edit/merge';
-import { coreFields, field, placeholder, simple, variation } from './edit-fixtures';
+import { coreFields, field, placeholder, simple, variable, variation } from './edit-fixtures';
 
 describe( 'mergeValues', () => {
 	it( 'keeps a shared value', () => {
@@ -101,5 +101,21 @@ describe( 'mergeItems', () => {
 		expect( data.stock_quantity ).toBe( 3 );
 		expect( mixed.stock_quantity?.isMixed ).toBe( false );
 		expect( mixed.name?.isMixed ).toBe( true );
+	} );
+
+	it( 'leaves a selected variable parent out of a price it does not take (its variations sell)', () => {
+		const rows = [ variable( 1, { regular_price: '', name: 'V1' } ), simple( 2, { regular_price: '15.90' } ), simple( 3, { regular_price: '15.90' } ) ];
+		const { data, mixed } = mergeItems( rows, fields );
+
+		expect( data.regular_price ).toBe( '15.90' );
+		expect( mixed.regular_price?.isMixed ).toBe( false );
+		// A field the parent takes still merges over it.
+		expect( mixed.name?.isMixed ).toBe( true );
+	} );
+
+	it( 'keeps the variable parent in a price applied to its variations', () => {
+		const rows = [ variable( 1, { regular_price: '' } ), simple( 2, { regular_price: '15.90' } ) ];
+
+		expect( mergeItems( rows, fields, { applyToVariations: true } ).mixed.regular_price?.isMixed ).toBe( true );
 	} );
 } );

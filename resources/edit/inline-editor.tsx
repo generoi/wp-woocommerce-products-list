@@ -474,25 +474,54 @@ export const REVEAL_SETTLE_MS = 1500;
  * it still has the focus.
  */
 function keepNoticeInView( notice: HTMLElement ): void {
-	const view = notice.ownerDocument.defaultView;
+	const doc = notice.ownerDocument;
+	const view = doc.defaultView;
 	const form = notice.closest( 'form' ) ?? notice.parentElement;
 
 	if ( ! view || typeof view.ResizeObserver !== 'function' || ! form ) {
 		return;
 	}
 
+	const stillRevealed = () => notice.isConnected && doc.activeElement === notice;
 	const observer = new view.ResizeObserver( () => {
-		if ( ! notice.isConnected || notice.ownerDocument.activeElement !== notice ) {
-			observer.disconnect();
+		if ( ! stillRevealed() ) {
+			stop();
 
 			return;
 		}
 
 		notice.scrollIntoView( { block: 'center', inline: 'nearest' } );
 	} );
+	// A tab in the background lays out (and reports resizes) only once it is shown again: the moment starts then, with a
+	// scroll for what grew meanwhile, so the user does not come back to the report under the buttons.
+	const onVisible = () => {
+		if ( doc.visibilityState !== 'visible' ) {
+			return;
+		}
+
+		doc.removeEventListener( 'visibilitychange', onVisible );
+
+		if ( ! stillRevealed() ) {
+			stop();
+
+			return;
+		}
+
+		notice.scrollIntoView( { block: 'center', inline: 'nearest' } );
+		view.setTimeout( stop, REVEAL_SETTLE_MS );
+	};
+	function stop() {
+		observer.disconnect();
+		doc.removeEventListener( 'visibilitychange', onVisible );
+	}
 
 	observer.observe( form );
-	view.setTimeout( () => observer.disconnect(), REVEAL_SETTLE_MS );
+
+	if ( doc.visibilityState === 'hidden' ) {
+		doc.addEventListener( 'visibilitychange', onVisible );
+	} else {
+		view.setTimeout( stop, REVEAL_SETTLE_MS );
+	}
 }
 
 
@@ -853,7 +882,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const sellableOps = ! bulk && applyToVariations && variableParents.length > 0;
 	const priceOps = bulk || sellableOps;
 	// The edits belong to this editor: ticking another row into a bulk edit keeps what was typed.
-	const state = useEditState( items, editFields, mode );
+	const state = useEditState( items, editFields, mode, applyToVariations );
 	const editFieldsById = useMemo( () => new Map( editFields.map( ( field ) => [ field.id, field ] ) ), [ editFields ] );
 	// What each field showed when the user started editing it: its writes' expected values come from there (shown-values.ts).
 	const shownRef = useRef< ShownValues | null >( null );
@@ -1376,8 +1405,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		} );
 	}, [ loading, plannedCount, variationsReady, retryTargets, plannedEdits, editFields, settings, applyToVariations, rowOptions ] );
 
+	// The rows a stock edit reaches: not the variations there only for their selected parent (they take the price and sale edits alone).
+	const stockRows = useMemo( () => targetsForValidation.filter( ( item ) => ! item._placeholder && ! viaParentIds?.has( item.id ) ), [ targetsForValidation, viaParentIds ] );
 	// Rows a stock edit would be dropped for, before the "turn on Manage stock" option is applied.
-	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( targetsForValidation, plannedEdits ) : [] ), [ plannedCount, targetsForValidation, plannedEdits ] );
+	const stockGated = useMemo( () => ( plannedCount ? stockGatedRows( stockRows, plannedEdits ) : [] ), [ plannedCount, stockRows, plannedEdits ] );
 	const stockEnableable = useMemo( () => stockGated.filter( canEnableStock ), [ stockGated ] );
 	// Rows whose current sale the edits replace (bulk, or all of a product's variations: a quick edit of one row shows the field itself).
 	const existingSales = useMemo( () => ( priceOps && plannedCount ? rowsWithExistingSale( targetsForValidation, plannedEdits ) : { rows: [], active: 0 } ), [ priceOps, plannedCount, targetsForValidation, plannedEdits ] );
@@ -1630,6 +1661,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 
 			const returned = saveFields( allFields, Object.fromEntries( Array.from( keys, ( key ) => [ key, true ] ) ) );
+			// Rows a translation was refused on because someone else saved it meanwhile: the list shows what is stored now.
+			const refused: number[] = [];
 
 			await runConcurrently(
 				parts.map( ( part ) => async () => {
@@ -1641,6 +1674,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						for ( const entry of response.update ?? [] ) {
 							if ( isBatchItemError( entry ) ) {
 								errors.push( { id: entry.id, message: entry.error.message } );
+
+								if ( isConflictCode( entry.error.code ) ) {
+									refused.push( entry.id );
+								}
 							} else {
 								saved.push( entry.id );
 								patches.push( toRow( entry ) );
@@ -1656,6 +1693,21 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				} ),
 				3
 			);
+
+			if ( refused.length ) {
+				const stale = rows.filter( ( row ) => refused.includes( row.id ) );
+				const gridTabs = new Set( Array.from( keys, ( key ) => key.slice( 0, key.indexOf( '.' ) ) ) );
+				const wanted = Array.from( new Set( Array.from( gridTabs ).flatMap( ( entry ) => editFetchFields( allFields, stale, mode, { tab: entry } ) ) ) ).sort();
+
+				try {
+					const { items: full, missing: gone, trashed } = await hydrateSelection( stale, wanted );
+					const goneSet = new Set( [ ...gone, ...trashed ] );
+
+					patchItems( full.filter( ( row ) => ! goneSet.has( row.id ) ) );
+				} catch {
+					// The refusal is shown either way; the list catches up on its next load.
+				}
+			}
 		}
 
 		// The tabs whose values a tool changed load again if the editor stays open.
@@ -2541,7 +2593,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		if ( variations.status === 'loaded' ) {
-			const range = variationPriceRange( Array.from( variations.byParent.values() ).flat(), settings );
+			// After a partial failure only the variations the retry sends are left to change (the saved ones are done, and
+			// their loaded prices are the ones from before the save).
+			const byParent = failedIds ? retryTargets.prefetched : variations.byParent;
+			const rows = Array.from( byParent.values() ).flat();
+			const parentCount = failedIds ? Array.from( byParent.values() ).filter( ( list ) => list.length > 0 ).length : variableParents.length;
+
+			if ( failedIds && rows.length === 0 ) {
+				return <span className="wc-pl-edit__note">{ __( 'The variations were saved: a retry changes none of them.', 'wp-woocommerce-products-list' ) }</span>;
+			}
+
+			const range = variationPriceRange( rows, settings );
+			const count = failedIds ? rows.length : variations.count;
 
 			return (
 				<span className="wc-pl-edit__note">
@@ -2551,13 +2614,13 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						__( 'Prices will change on %1$s of %2$s.', 'wp-woocommerce-products-list' ),
 						sprintf(
 							/* translators: %d: number of variations */
-							_n( '%d variation', '%d variations', variations.count, 'wp-woocommerce-products-list' ),
-							variations.count
+							_n( '%d variation', '%d variations', count, 'wp-woocommerce-products-list' ),
+							count
 						),
 						sprintf(
 							/* translators: %d: number of variable products */
-							_n( '%d variable product', '%d variable products', variableParents.length, 'wp-woocommerce-products-list' ),
-							variableParents.length
+							_n( '%d variable product', '%d variable products', parentCount, 'wp-woocommerce-products-list' ),
+							parentCount
 						)
 					) }
 				</span>
@@ -2582,7 +2645,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		} ),
 		// The note is rebuilt every render; what it shows follows these.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk ]
+		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk, failedIds, retryTargets ]
 	);
 
 	// wc/v3's batch routes need edit_others_products (woocommerce_rest_cannot_batch);
@@ -2690,7 +2753,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// Edits typed, yet nothing reaches any row: why, next to the greyed-out Update, not only in a note up the form.
 	const nothingReason =
 		! saving && ! loading && nothingToWrite && pendingCount > 0 && stagedCount === 0 && ! failedIds
-			? stockGated.length > 0 && stockGated.length === targetsForValidation.filter( ( item ) => ! item._placeholder ).length
+			? stockGated.length > 0 && stockGated.length === stockRows.length
 				? stockGated.length === 1
 					? __( 'Nothing to update: the stock changes need "Manage stock" on (see Inventory).', 'wp-woocommerce-products-list' )
 					: __( 'Nothing to update: none of these items manages stock, so the stock changes are skipped (see Inventory).', 'wp-woocommerce-products-list' )
@@ -2731,7 +2794,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	);
 
 
-	const stockGatedTotal = targetsForValidation.filter( ( item ) => ! item._placeholder ).length;
+	const stockGatedTotal = stockRows.length;
 	// A bulk stock status that no selected row would take (they manage stock, or are variable products): say why, and
 	// what does it instead, rather than a field that ends in "Nothing to update".
 	const statusField = editFields.find( ( field ) => field.id === 'stock_status' );

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EditorHost } from '../../resources/edit/editor-context';
 import type { EditorSession } from '../../resources/edit/editor-session';
 import type { ProductListItem } from '../../resources/types';
-import { coreFields, editSettings, simple, variation } from './edit-fixtures';
+import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
 
 // These render the whole editor (DataForm and @wordpress/components): under a loaded CI box (tsc and
 // eslint in parallel) one render can pass vitest's 5 s default, which is not a failure of the editor.
@@ -495,6 +495,55 @@ describe( 'InlineEditor', () => {
 		}
 	} );
 
+	it( 'a report revealed in a background tab is scrolled into view again when the tab is shown (its layout settles only then)', async () => {
+		const { revealNotice, REVEAL_SETTLE_MS } = await import( '../../resources/edit/inline-editor' );
+		const scroll = vi.fn();
+		const disconnect = vi.fn();
+		let visibility: DocumentVisibilityState = 'hidden';
+
+		class FakeResizeObserver {
+			observe() {}
+
+			disconnect() {
+				disconnect();
+			}
+		}
+
+		vi.useFakeTimers();
+		vi.stubGlobal( 'ResizeObserver', FakeResizeObserver );
+		Element.prototype.scrollIntoView = scroll;
+		const visibilitySpy = vi.spyOn( document, 'visibilityState', 'get' ).mockImplementation( () => visibility );
+
+		const form = document.createElement( 'form' );
+		const notice = document.createElement( 'div' );
+
+		notice.className = 'wc-pl-edit__errors';
+		form.appendChild( notice );
+		document.body.appendChild( form );
+
+		try {
+			expect( revealNotice( form, '.wc-pl-edit__errors' ) ).toBe( true );
+			expect( scroll ).toHaveBeenCalledTimes( 1 );
+
+			// Hidden, the form does not lay out: the moment does not run out before the user sees it.
+			vi.advanceTimersByTime( REVEAL_SETTLE_MS * 4 );
+			expect( disconnect ).not.toHaveBeenCalled();
+
+			visibility = 'visible';
+			document.dispatchEvent( new Event( 'visibilitychange' ) );
+			expect( scroll ).toHaveBeenCalledTimes( 2 );
+
+			vi.advanceTimersByTime( REVEAL_SETTLE_MS );
+			expect( disconnect ).toHaveBeenCalled();
+		} finally {
+			visibilitySpy.mockRestore();
+			form.remove();
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+			delete ( Element.prototype as { scrollIntoView?: unknown } ).scrollIntoView;
+		}
+	} );
+
 	it( 'lists the problems of this Update attempt, not the previous one', async () => {
 		const priced = coreFields()
 			.filter( ( field ) => [ 'name', 'regular_price', 'sale_price', 'stock_quantity', 'manage_stock' ].includes( field.id ) )
@@ -924,5 +973,99 @@ describe( 'InlineEditor, round 6', () => {
 		await waitFor( () => expect( document.activeElement?.closest( '.wc-pl-edit__errors' ) ).not.toBeNull() );
 		expect( saveEdits ).not.toHaveBeenCalled();
 		await waitFor( () => expect( screen.getByLabelText( 'stock_quantity: value' ) ).toHaveAttribute( 'aria-invalid', 'true' ) );
+	} );
+} );
+
+describe( 'InlineEditor, stock notice with "Also apply to the variations"', () => {
+	it( 'counts only the selected rows a stock edit reaches, not the variations added for the prices', async () => {
+		const { getVariations, listProducts } = await import( '../../resources/api/client' );
+		const rows = [ simple( 1, { name: 'Managed', manage_stock: true, stock_quantity: 4 } ), simple( 2, { name: 'Loose', manage_stock: false, stock_quantity: null } ), variable( 5, { name: 'Parent' } ) ];
+		const listMock = listProducts as unknown as ReturnType< typeof vi.fn >;
+		const variationsMock = getVariations as unknown as ReturnType< typeof vi.fn >;
+		const originalList = listMock.getMockImplementation();
+
+		listMock.mockImplementation( async ( query: Record< string, unknown > ) => ( {
+			items: String( query.include )
+				.split( ',' )
+				.map( ( id ) => rows.find( ( row ) => row.id === Number( id ) )! ),
+			total: rows.length,
+			totalPages: 1,
+		} ) );
+		variationsMock.mockImplementation( async ( parentId: number ) => ( {
+			items: [ variation( 51, parentId, { manage_stock: false, stock_quantity: null } ), variation( 52, parentId ) ],
+			total: 2,
+			totalPages: 1,
+		} ) );
+
+		const stockFields = coreFields().filter( ( field ) => [ 'regular_price', 'stock_quantity', 'manage_stock' ].includes( field.id ) );
+
+		renderEditor( rows, { fields: stockFields as typeof fields } );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 3 items' } );
+		fireEvent.click( await screen.findByLabelText( /Also apply to the variations/ ) );
+		await waitFor( () => expect( variationsMock ).toHaveBeenCalled() );
+
+		fireEvent.change( screen.getByLabelText( 'regular_price: operation' ), { target: { value: 'set' } } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '20' } } );
+		fireEvent.change( screen.getByLabelText( 'stock_quantity: operation' ), { target: { value: 'set' } } );
+		fireEvent.change( screen.getByLabelText( 'stock_quantity: value' ), { target: { value: '10' } } );
+
+		// Loose and the variable parent do not manage stock; variation 51 does not either, but a stock edit never reaches it.
+		expect( ( await screen.findAllByText( /2 of the 3 rows do not manage stock/ ) ).length ).toBeGreaterThan( 0 );
+		expect( screen.queryByText( /of the 5 rows/ ) ).not.toBeInTheDocument();
+
+		listMock.mockImplementation( originalList! );
+		variationsMock.mockImplementation( async () => ( { items: [], total: 0, totalPages: 1 } ) );
+	} );
+} );
+
+describe( 'InlineEditor, "Also apply to the variations" note after a partial failure', () => {
+	it( 'says the retry changes no variation once they all saved, instead of the old range and count', async () => {
+		const { getVariations, listProducts } = await import( '../../resources/api/client' );
+		const rows = [ simple( 1, { name: 'Loose', regular_price: '15.90' } ), variable( 5, { name: 'Parent' } ) ];
+		const listMock = listProducts as unknown as ReturnType< typeof vi.fn >;
+		const variationsMock = getVariations as unknown as ReturnType< typeof vi.fn >;
+		const originalList = listMock.getMockImplementation();
+
+		listMock.mockImplementation( async ( query: Record< string, unknown > ) => ( {
+			items: String( query.include )
+				.split( ',' )
+				.map( ( id ) => rows.find( ( row ) => row.id === Number( id ) )! ),
+			total: rows.length,
+			totalPages: 1,
+		} ) );
+		variationsMock.mockImplementation( async ( parentId: number ) => ( {
+			items: [ variation( 51, parentId, { regular_price: '7.90' } ), variation( 52, parentId, { regular_price: '9.90' } ) ],
+			total: 2,
+			totalPages: 1,
+		} ) );
+		saveEdits.mockResolvedValueOnce( {
+			updated: [ variation( 51, 5, { regular_price: '20' } ), variation( 52, 5, { regular_price: '20' } ) ],
+			errors: [ { id: 1, code: 'internal_server_error', message: 'Server error.' } ],
+			batchId: 'b1',
+			unchanged: 0,
+			stockSkipped: 0,
+			saleSkipped: 0,
+			replacedSales: 0,
+		} );
+
+		const priceFields = coreFields().filter( ( field ) => [ 'regular_price' ].includes( field.id ) );
+
+		renderEditor( rows, { fields: priceFields as typeof fields } );
+
+		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+		fireEvent.click( await screen.findByLabelText( /Also apply to the variations/ ) );
+		expect( ( await screen.findAllByText( /Prices will change on 2 variations of 1 variable product/ ) ).length ).toBeGreaterThan( 0 );
+
+		fireEvent.change( screen.getByLabelText( 'regular_price: operation' ), { target: { value: 'set' } } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '20' } } );
+		fireEvent.click( await screen.findByRole( 'button', { name: /^Update/ } ) );
+
+		await screen.findByRole( 'button', { name: 'Retry 1 failed' } );
+		expect( ( await screen.findAllByText( /a retry changes none of them/ ) ).length ).toBeGreaterThan( 0 );
+		expect( screen.queryByText( /Prices will change on 2 variations/ ) ).not.toBeInTheDocument();
+
+		listMock.mockImplementation( originalList! );
+		variationsMock.mockImplementation( async () => ( { items: [], total: 0, totalPages: 1 } ) );
 	} );
 } );

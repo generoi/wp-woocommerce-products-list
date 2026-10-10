@@ -9,6 +9,7 @@ import { doAction } from '@wordpress/hooks';
 import { __, sprintf } from '@wordpress/i18n';
 import { DataForm } from '../dataviews';
 import { ACTIONS } from './hooks';
+import { createPriceEdit } from '../fields/components/price-edit';
 import type {
 	DataViewRenderFieldProps,
 	EditConfig,
@@ -255,16 +256,13 @@ function stripTags( html: string ): string {
 		.trim();
 }
 
-function editControlFor( def: DeclarativeFieldInput, currency: FieldCurrency ): EditConfig | undefined {
+function editControlFor( def: DeclarativeFieldInput, currency: FieldCurrency ): EditConfig | ProductField[ 'Edit' ] | undefined {
 	switch ( def.type ) {
 		case 'html':
 			return { control: 'textarea', rows: 4 };
-		case 'price': {
-			const suffix = () =>
-				createElement( 'span', { className: 'wc-products-list-currency-suffix', 'aria-hidden': 'true' }, currency.symbol );
-
-			return { control: 'text', suffix };
-		}
+		case 'price':
+			// The shop's notation with the field's currency ("149,50" kr), as the core price fields and the list show it.
+			return createPriceEdit( currency ) as ProductField[ 'Edit' ];
 		default:
 			return undefined;
 	}

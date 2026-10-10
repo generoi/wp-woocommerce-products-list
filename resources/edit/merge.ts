@@ -9,7 +9,8 @@
 import { __ } from '@wordpress/i18n';
 import type { ProductField, ProductListItem } from '../types';
 import { hasArrayOp } from './bulk-array';
-import { isEmptyValue, isPlainObject, normalizeForCompare, readFieldValue } from './field-value';
+import { isEmptyValue, isPlainObject, isVariableParent, normalizeForCompare, readFieldValue } from './field-value';
+import { isParentDerivedField, isSellableField } from './visibility';
 
 export interface MixedState {
 	isMixed: boolean;
@@ -98,13 +99,29 @@ export function mergeValues( values: unknown[] ): { value: unknown; isMixed: boo
 	return { value: mixedFallback( sample ), isMixed: true };
 }
 
-export function mergeItems( items: ProductListItem[], fields: ProductField[] ): MergedItems {
+export interface MergeOptions {
+	/** The variable parents stand for their variations on the sellable fields ("Also apply to the variations"). */
+	applyToVariations?: boolean;
+}
+
+/**
+ * Whether a field skips the variable parents of a selection (visibility.ts): a sellable field unless it is applied
+ * to their variations, and a field WooCommerce derives from the variations. Their own empty value is not one the
+ * field reaches, so it must not make the shared value of the other rows "Mixed".
+ */
+function skipsVariableParents( field: ProductField, applyToVariations: boolean ): boolean {
+	return ( isSellableField( field ) && ! applyToVariations ) || isParentDerivedField( field );
+}
+
+export function mergeItems( items: ProductListItem[], fields: ProductField[], options: MergeOptions = {} ): MergedItems {
 	const rows = items.filter( ( item ) => ! item._placeholder );
+	const takers = rows.filter( ( item ) => ! isVariableParent( item ) );
 	const data: Record< string, unknown > = {};
 	const mixed: Record< string, MixedState > = {};
 
 	for ( const field of fields ) {
-		const values = rows.map( ( item ) => readFieldValue( field, item ) );
+		const reached = takers.length > 0 && takers.length < rows.length && skipsVariableParents( field, options.applyToVariations === true ) ? takers : rows;
+		const values = reached.map( ( item ) => readFieldValue( field, item ) );
 		const { value, isMixed } = mergeValues( values );
 
 		// A list field with a bulk op starts empty: the picked terms are added to / removed from each row's own list.
