@@ -54,14 +54,16 @@ export class TranslationStore {
 
 	/** The stored value an edit was typed over (undefined: the field is not edited). */
 	originalOf( id: number, fieldId: string ): string | undefined {
-		return this.originals.get( id )?.get( fieldId );
+		return this.edits.get( id )?.has( fieldId ) ? this.originals.get( id )?.get( fieldId ) : undefined;
 	}
 
 	/**
 	 * Record a value typed over `stored` (the value the row holds now). The
 	 * first stored value of an edit is kept as its base; a value equal to that
 	 * base (typed back to what was shown) or to the stored one (nothing to
-	 * write) takes the edit out again.
+	 * write) takes the edit out again. The base itself stays until the edits
+	 * are cleared: the input still shows the text typed over that base, so a
+	 * later keystroke must expect it, never a value a reload brought meanwhile.
 	 */
 	set( id: number, fieldId: string, value: string, stored: string ): void {
 		const before = this.count();
@@ -69,20 +71,19 @@ export class TranslationStore {
 		const bases = this.originals.get( id ) ?? new Map< string, string >();
 		const base = bases.get( fieldId ) ?? stored;
 
+		bases.set( fieldId, base );
+		this.originals.set( id, bases );
+
 		if ( value === base || value === stored ) {
 			row.delete( fieldId );
-			bases.delete( fieldId );
 		} else {
 			row.set( fieldId, value );
-			bases.set( fieldId, base );
 		}
 
 		if ( row.size ) {
 			this.edits.set( id, row );
-			this.originals.set( id, bases );
 		} else {
 			this.edits.delete( id );
-			this.originals.delete( id );
 		}
 
 		if ( this.count() !== before ) {
@@ -102,7 +103,11 @@ export class TranslationStore {
 
 	/** The stored values a product's edits were typed over, by field id (what the save expects to find). */
 	originalsOf( id: number ): Record< string, string > {
-		return Object.fromEntries( this.originals.get( id ) ?? [] );
+		const row = this.edits.get( id );
+		const bases = this.originals.get( id );
+
+		// Only the fields this Update writes: a field typed back to its original sends nothing and expects nothing.
+		return Object.fromEntries( Array.from( bases ?? [] ).filter( ( [ fieldId ] ) => row?.has( fieldId ) ) );
 	}
 
 	/** Drop the given products' edits (saved), or all of them. */

@@ -72,9 +72,15 @@ describe( 'translation grid text', () => {
 		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'A' } );
 		expect( store.originalOf( 1, 'i18n:se.name' ) ).toBe( 'A' );
 
-		// Typed back to what was shown: taken out (nothing of the user's to write), and the base with it.
+		// Typed back to what was shown: taken out (nothing of the user's to write), but the base stays: the input
+		// still shows the user's text over A, so the next keystroke expects A and Update refuses it (B is stored now).
 		store.set( 1, 'i18n:se.name', 'A', 'B' );
 		expect( store.count() ).toBe( 0 );
+		expect( store.originalsOf( 1 ) ).toEqual( {} );
+		store.set( 1, 'i18n:se.name', 'A y', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'A' } );
+		// Saved (or discarded): the next edit starts from the value stored then.
+		store.clear( [ 1 ] );
 		store.set( 1, 'i18n:se.name', 'B y', 'B' );
 		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'B' } );
 		// Typed to the value stored now: nothing to write either.

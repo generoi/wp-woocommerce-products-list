@@ -213,3 +213,25 @@ describe( 'translationWriteItem: the translation grid', () => {
 		expect( store.originalsOf( 8 ) ).toEqual( {} );
 	} );
 } );
+
+describe( 'translation grid base after typing back to the original', () => {
+	it( 'keeps the shown value as the expected one when a reload brought a newer stored value meanwhile', async () => {
+		const { TranslationStore } = await import( '../../resources/edit/translation-grid' );
+		const store = new TranslationStore();
+
+		// Shown 'A'; the user types 'AB', then back to 'A' (no edit), then a reload brings 'B' from another user.
+		store.set( 1, 'i18n.se.name', 'AB', 'A' );
+		store.set( 1, 'i18n.se.name', 'A', 'A' );
+		expect( store.count() ).toBe( 0 );
+		expect( store.originalsOf( 1 ) ).toEqual( {} );
+
+		// The input still shows the user's text over 'A': the next keystroke must expect 'A', not 'B'.
+		store.set( 1, 'i18n.se.name', 'AC', 'B' );
+		expect( store.get( 1, 'i18n.se.name' ) ).toBe( 'AC' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n.se.name': 'A' } );
+
+		store.clear( [ 1 ] );
+		store.set( 1, 'i18n.se.name', 'BC', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n.se.name': 'B' } );
+	} );
+} );
