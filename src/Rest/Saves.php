@@ -448,6 +448,7 @@ final class Saves
         }
 
         self::unfilteredName($product, $request);
+        self::sanitizedSlug($product, $request);
 
         // POC: in `revisions` mode the field log stays quiet (docs/revisions.md).
         if (History::logs()) {
@@ -501,6 +502,30 @@ final class Saves
         if (current_user_can('unfiltered_html')) {
             $product->set_name($request['name']);
         }
+    }
+
+    /**
+     * WooCommerce's controller hands `slug` to the product as typed, and
+     * Polylang for WooCommerce then writes the requested slug to the post
+     * as is (its shared-slug support, `prepare_response`), so "My Slug Ä"
+     * was stored with the space and the capitals, a permalink WordPress
+     * never makes. Clean it as wp_insert_post() (the classic editor) does,
+     * on the request too, so that later write stores the same slug.
+     */
+    private static function sanitizedSlug(WC_Product $product, WP_REST_Request $request): void
+    {
+        if ($product instanceof \WC_Product_Variation || ! isset($request['slug']) || ! is_string($request['slug'])) {
+            return;
+        }
+
+        $slug = sanitize_title($request['slug']);
+
+        if ($slug === $request['slug']) {
+            return;
+        }
+
+        $product->set_slug($slug);
+        $request->set_param('slug', $slug);
     }
 
     /**

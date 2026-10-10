@@ -471,6 +471,37 @@ class SaveHookTest extends RestTestCase
         $this->assertSame(wp_filter_post_kses('A & <script>x</script>B'), get_post($product->get_id())->post_title);
     }
 
+    public function test_a_typed_slug_is_stored_cleaned_like_the_classic_editor(): void
+    {
+        global $wpdb;
+
+        $product = $this->simpleProduct(['name' => 'Plain']);
+
+        // Polylang for WooCommerce (shared slugs) writes the requested slug to the post after the save, as the request carries it.
+        $polylang = static function ($response, $object, WP_REST_Request $request) use ($wpdb) {
+            if (! empty($request['slug'])) {
+                $wpdb->update($wpdb->posts, ['post_name' => $request['slug']], ['ID' => $object->get_id()]);
+                clean_post_cache($object->get_id());
+            }
+
+            return $response;
+        };
+        add_filter('woocommerce_rest_prepare_product_object', $polylang, 10, 3);
+
+        try {
+            $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['slug' => 'My Slug Ä']);
+            $this->assertStatus(200, $response);
+            $this->assertSame('my-slug-a', get_post($product->get_id())->post_name);
+
+            // A clean slug is passed on unchanged.
+            $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['slug' => 'clean-slug']);
+            $this->assertStatus(200, $response);
+            $this->assertSame('clean-slug', get_post($product->get_id())->post_name);
+        } finally {
+            remove_filter('woocommerce_rest_prepare_product_object', $polylang, 10);
+        }
+    }
+
     public function test_a_generated_batch_id_groups_rows_when_the_header_is_missing(): void
     {
         global $wpdb;

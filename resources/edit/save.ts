@@ -56,8 +56,20 @@ function changesStatus( edits: Record< string, unknown > ): boolean {
 }
 
 /**
+ * Fields WooCommerce clears on its own when a save writes the key: a
+ * virtual item loses its shipping data (weight, dimensions, shipping
+ * class), turning stock management off empties the quantity, backorders
+ * and low stock threshold.
+ */
+const SIDE_EFFECTS: Record< string, string[] > = {
+	virtual: [ 'weight', 'dimensions', 'shipping_class' ],
+	manage_stock: [ 'stock_quantity', 'stock_status', 'backorders', 'low_stock_amount' ],
+};
+
+/**
  * The wc/v3 keys a save asks back: the base row keys, the visible columns'
- * fields and the fields of the edited keys. The server trims each returned
+ * fields, the fields of the edited keys and what WooCommerce changes
+ * with them (`SIDE_EFFECTS`). The server trims each returned
  * row to them and builds nothing else (every batch sub-request gets the
  * list as its `_fields`): a status change on 100 variable products returns
  * no price ranges, galleries or translations. Every registered field when
@@ -72,8 +84,15 @@ export function saveFields( fields: ProductField[], edits: Record< string, unkno
 
 	for ( const id of Object.keys( edits ) ) {
 		// A bulk list op ('categories__op') and the schedule toggle name their field.
+		const field = id.split( '.' )[ 0 ]?.replace( /__op$/, '' ) ?? id;
+
 		wanted.add( id.replace( /__op$/, '' ) );
-		wanted.add( id.split( '.' )[ 0 ] ?? id );
+		wanted.add( field );
+
+		// What WooCommerce changes with it comes back too, or the row keeps the old value and the next editor calls it someone else's change.
+		for ( const companion of SIDE_EFFECTS[ field ] ?? [] ) {
+			wanted.add( companion );
+		}
 	}
 
 	return rowFields( fields.filter( ( field ) => wanted.has( field.id ) ) );

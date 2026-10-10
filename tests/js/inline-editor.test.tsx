@@ -440,6 +440,61 @@ describe( 'InlineEditor', () => {
 		delete ( Element.prototype as { scrollIntoView?: unknown } ).scrollIntoView;
 	} );
 
+	it( 'a revealed report is scrolled into view again while the form above it still grows (the rows reload after a failed save)', async () => {
+		const { revealNotice, REVEAL_SETTLE_MS } = await import( '../../resources/edit/inline-editor' );
+		const scroll = vi.fn();
+		const callbacks: Array< () => void > = [];
+		const disconnect = vi.fn();
+
+		class FakeResizeObserver {
+			constructor( callback: () => void ) {
+				callbacks.push( callback );
+			}
+
+			observe() {}
+
+			disconnect() {
+				disconnect();
+			}
+		}
+
+		vi.useFakeTimers();
+		vi.stubGlobal( 'ResizeObserver', FakeResizeObserver );
+		Element.prototype.scrollIntoView = scroll;
+
+		const form = document.createElement( 'form' );
+		const notice = document.createElement( 'div' );
+
+		notice.className = 'wc-pl-edit__errors';
+		form.appendChild( notice );
+		document.body.appendChild( form );
+
+		try {
+			expect( revealNotice( form, '.wc-pl-edit__errors' ) ).toBe( true );
+			expect( scroll ).toHaveBeenCalledTimes( 1 );
+
+			// The text editors and term lists render again and push the report down: it follows.
+			callbacks.forEach( ( callback ) => callback() );
+			expect( scroll ).toHaveBeenCalledTimes( 2 );
+
+			// Once the user moved on, the page no longer scrolls for it.
+			const other = document.createElement( 'input' );
+
+			form.appendChild( other );
+			other.focus();
+			callbacks.forEach( ( callback ) => callback() );
+			expect( scroll ).toHaveBeenCalledTimes( 2 );
+
+			vi.advanceTimersByTime( REVEAL_SETTLE_MS );
+			expect( disconnect ).toHaveBeenCalled();
+		} finally {
+			form.remove();
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+			delete ( Element.prototype as { scrollIntoView?: unknown } ).scrollIntoView;
+		}
+	} );
+
 	it( 'lists the problems of this Update attempt, not the previous one', async () => {
 		const priced = coreFields()
 			.filter( ( field ) => [ 'name', 'regular_price', 'sale_price', 'stock_quantity', 'manage_stock' ].includes( field.id ) )

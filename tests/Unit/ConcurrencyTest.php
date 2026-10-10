@@ -59,6 +59,13 @@ class ConcurrencyTest extends TestCase
         $this->assertSame(['stock_quantity'], Recorder::watched(['stock_quantity']));
     }
 
+    public function test_making_an_item_virtual_watches_the_shipping_data_woocommerce_clears_with_it(): void
+    {
+        // The wc/v3 controllers empty the weight, dimensions and shipping class of a virtual item: logged, a revert puts them back.
+        $this->assertSame(['virtual', 'weight', 'dimensions', 'shipping_class'], Recorder::watched(['virtual']));
+        $this->assertSame(['weight'], Recorder::watched(['weight']));
+    }
+
     public function test_the_plan_writes_products_first_then_variations_by_parent(): void
     {
         $this->assertSame([5, 1, 3, 2, 4], LogController::writeOrder([

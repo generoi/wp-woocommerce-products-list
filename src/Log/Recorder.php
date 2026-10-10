@@ -65,6 +65,14 @@ final class Recorder
     public const STOCK_COMPANIONS = ['stock_quantity', 'backorders', 'low_stock_amount'];
 
     /**
+     * What WooCommerce's controllers clear when a save makes the item
+     * virtual ("virtual products do not need shipping data": weight,
+     * dimensions, shipping class), so the log holds the old values and a
+     * revert puts them back.
+     */
+    public const VIRTUAL_COMPANIONS = ['weight', 'dimensions', 'shipping_class'];
+
+    /**
      * wc/v3 keys the product and variation controllers write. Arrays among
      * them (categories, images, dimensions) are one field, not leaves.
      */
@@ -187,8 +195,9 @@ final class Recorder
 
     /**
      * The paths a save is diffed on: the request's own, plus the
-     * companions of a sale key it writes (`SALE_KEYS`) and of
-     * `manage_stock` (`STOCK_COMPANIONS`).
+     * companions of a sale key it writes (`SALE_KEYS`), of
+     * `manage_stock` (`STOCK_COMPANIONS`) and of `virtual`
+     * (`VIRTUAL_COMPANIONS`).
      *
      * @param  array<int, string>  $paths
      * @return array<int, string>
@@ -203,6 +212,10 @@ final class Recorder
 
         if (in_array('manage_stock', $paths, true)) {
             $watched = array_merge($watched, self::STOCK_COMPANIONS);
+        }
+
+        if (in_array('virtual', $paths, true)) {
+            $watched = array_merge($watched, self::VIRTUAL_COMPANIONS);
         }
 
         return array_values(array_unique($watched));

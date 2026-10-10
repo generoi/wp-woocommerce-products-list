@@ -457,9 +457,42 @@ export function revealNotice( root: HTMLElement | null, selector: string ): bool
 
 	if ( typeof notice.scrollIntoView === 'function' ) {
 		notice.scrollIntoView( { block: 'center', inline: 'nearest' } );
+		keepNoticeInView( notice );
 	}
 
 	return notice.ownerDocument.activeElement === notice;
+}
+
+/** How long a revealed notice follows the form's re-layout (ms). */
+export const REVEAL_SETTLE_MS = 1500;
+
+/**
+ * After a failed save the form above the notice is still settling when the
+ * notice is revealed (the rows reload, the text editors and term lists
+ * render again), and growing pushed it back under the sticky buttons:
+ * scroll it into view again on each resize of the form for a moment, while
+ * it still has the focus.
+ */
+function keepNoticeInView( notice: HTMLElement ): void {
+	const view = notice.ownerDocument.defaultView;
+	const form = notice.closest( 'form' ) ?? notice.parentElement;
+
+	if ( ! view || typeof view.ResizeObserver !== 'function' || ! form ) {
+		return;
+	}
+
+	const observer = new view.ResizeObserver( () => {
+		if ( ! notice.isConnected || notice.ownerDocument.activeElement !== notice ) {
+			observer.disconnect();
+
+			return;
+		}
+
+		notice.scrollIntoView( { block: 'center', inline: 'nearest' } );
+	} );
+
+	observer.observe( form );
+	view.setTimeout( () => observer.disconnect(), REVEAL_SETTLE_MS );
 }
 
 

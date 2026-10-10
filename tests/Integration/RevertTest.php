@@ -984,6 +984,27 @@ class RevertTest extends RestTestCase
         $this->assertSame(2, $variation->get_low_stock_amount());
     }
 
+    public function test_reverting_virtual_turned_on_puts_the_cleared_shipping_data_back(): void
+    {
+        $product = $this->simpleProduct();
+        $product->set_weight('0.25');
+        $product->set_length('10');
+        $product->save();
+
+        // WooCommerce's controller empties the shipping data of a virtual product.
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [['id' => $product->get_id(), 'virtual' => true]]], [Logger::SOURCE_HEADER => 'quick']));
+        $this->assertSame('', wc_get_product($product->get_id())->get_weight());
+        $this->assertEqualsCanonicalizing(['virtual', 'weight', 'dimensions'], array_column($this->rows($this->batchId()), 'field'));
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+
+        $product = wc_get_product($product->get_id());
+        $this->assertFalse($product->get_virtual());
+        $this->assertSame('0.25', $product->get_weight());
+        $this->assertSame('10', $product->get_length());
+    }
+
     public function test_a_relative_stock_write_keeps_a_sale_made_meanwhile_and_is_logged(): void
     {
         $product = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 10]);
