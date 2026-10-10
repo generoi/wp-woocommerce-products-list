@@ -1082,7 +1082,9 @@ final class LogController
     /**
      * The latest revert of each of these batches: `{batch_id, created_at,
      * created_at_gmt, user}` by the reverted batch's id. One query on the
-     * indexed `reverts` column.
+     * indexed `reverts` column. Only a revert that wrote something counts:
+     * one whose every item was left alone (changed since, open in the
+     * product editor) put nothing back, so the batch is not "reverted".
      *
      * @param  array<int, mixed>  $batchIds
      * @return array<string, array{batch_id: string, created_at: string, created_at_gmt: string, user: array{id: int, name: string}}>
@@ -1100,7 +1102,7 @@ final class LogController
         $table = Table::name();
         $placeholders = implode(',', array_fill(0, count($batchIds), '%s'));
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT reverts, batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id FROM {$table} WHERE reverts IN ({$placeholders}) GROUP BY reverts, batch_id ORDER BY created_at DESC", $batchIds), ARRAY_A);
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT reverts, batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id FROM {$table} WHERE reverts IN ({$placeholders}) AND status = 'ok' GROUP BY reverts, batch_id ORDER BY created_at DESC", $batchIds), ARRAY_A);
         $rows = is_array($rows) ? $rows : [];
         $users = $this->users(array_column($rows, 'user_id'));
         $byBatch = [];

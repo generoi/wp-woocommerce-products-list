@@ -525,6 +525,34 @@ class RevertTest extends RestTestCase
         $this->assertSame([], $plan['left_out_reasons']);
     }
 
+    public function test_a_revert_that_put_nothing_back_does_not_mark_the_batch_reverted(): void
+    {
+        $a = $this->simpleProduct(['sku' => 'A']);
+
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', [
+            'update' => [['id' => $a->get_id(), 'regular_price' => '150']],
+        ], [Logger::SOURCE_HEADER => 'quick']));
+
+        // Changed again since (another edit): the Undo leaves the only item alone.
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/'.$a->get_id(), ['regular_price' => '160'], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertFalse($data['results'][0]['ok']);
+        $this->assertSame('160', wc_get_product($a->get_id())->get_regular_price());
+
+        // Nothing was put back: History does not say "Reverted by …", nor does the revert confirm warn "already reverted".
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertNull($batches[$this->batchId()]['reverted_by']);
+        $this->assertSame($this->batchId(), $batches[$data['batch_id']]['reverts']);
+        $this->assertNull($this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$this->batchId()))['reverted_by']);
+        $rows = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $this->batchId()]))['items'];
+        $this->assertNull($rows[0]['reverted_by']);
+
+        // "Revert 1 anyway" under the same revert batch writes it: now the batch was reverted.
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert', ['force' => true, 'ids' => [$a->get_id()], 'revert_batch_id' => $data['batch_id']]));
+        $batches = array_column($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'], null, 'batch_id');
+        $this->assertSame($data['batch_id'], $batches[$this->batchId()]['reverted_by']['batch_id']);
+    }
+
     public function test_a_relative_revert_takes_a_restock_off_and_keeps_a_sale_made_since(): void
     {
         $parent = $this->variableProduct(['37', '38']);
