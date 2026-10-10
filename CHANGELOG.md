@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 - 2026-10-10
+
+Fixes for the last three errors of the verification on 0.3.4.
+
+- Bulk edit, "Adjust market prices": the preview warns when the new market regular price would be at or below the market sale price (the language's own or the converted one), for every selected item and the variations of selected variable products, as quick edit does. A language tab now loads its market prices in bulk edit too; a sale price that is not loaded is no longer taken for "no sale".
+- A staged language tool refused on several items names each of them in the problem list and the snackbar, not only the first.
+- The "Svenska: Name" fallback (the default-language name in italics) shows a name stored with "&amp;" (saved by a shop manager) as "&". Display only: stored and expected values are unchanged.
+- A quick edit refused by WooCommerce (a duplicate SKU) writes one error row to the History log, not a second empty "SKU — → —" row.
+
 ## 0.3.4 - 2026-10-10
 
 Fixes for the last errors of the final verification on 0.3.3.
