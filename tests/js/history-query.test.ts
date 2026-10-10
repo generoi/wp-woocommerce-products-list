@@ -3,7 +3,7 @@
  * key such as `i18n_transform`) and searches by product name on both views.
  */
 import { describe, expect, it } from 'vitest';
-import { batchQueryFromView, describeBatchChanges, describeSkipped } from '../../resources/history/batch-fields';
+import { batchQueryFromView, describeBatchChanges, describeBatchObjects, describeSkipped } from '../../resources/history/batch-fields';
 import { NOT_REVERTABLE_ACTIONS } from '../../resources/history/batch-scope';
 import { actionLabel, actionOptions, logQueryFromView, SOURCE_OPTIONS } from '../../resources/history/log-fields';
 import type { DeclarativeAction } from '../../resources/types';
@@ -42,5 +42,15 @@ describe( 'History batch names', () => {
 		expect( describeBatchChanges( { fields: [], actions: [ 'i18n_transform' ], summary: null }, [], settings ) ).toBe( 'Edit translated text' );
 		expect( describeSkipped( { skipped: 5, skipped_reasons: [ 'unchanged' ] } ) ).toBe( '5 skipped (already had the value)' );
 		expect( describeSkipped( { skipped: 1 } ) ).toBe( '1 skipped' );
+	} );
+
+	it( 'names a batch refused on every item after the fields it was about, never "— on 0 items"', () => {
+		const refused = { fields: [], actions: [], skipped_fields: [ 'regular_price' ], objects: 0, skipped: 2 };
+
+		expect( describeBatchChanges( refused, [], settings ) ).toBe( 'regular_price' );
+		expect( describeBatchObjects( refused ) ).toBe( '2 items, none written' );
+		expect( describeBatchObjects( { ...refused, skipped: 1 } ) ).toBe( '1 item, not written' );
+		// A batch that wrote something keeps its own counts.
+		expect( describeBatchObjects( { objects: 3, products: 3, skipped: 1 } ) ).toBe( '3 products' );
 	} );
 } );

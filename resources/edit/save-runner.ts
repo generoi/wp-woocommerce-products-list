@@ -233,6 +233,11 @@ export interface SaveOptions extends RowEditOptions {
 	keepBatchOpen?: boolean;
 	/** Rows the caller writes under the batch after this save (added to the planned header). */
 	plannedExtra?: number;
+	/**
+	 * The row a write's `_wcpl_expect` is read from (expect.ts): the editor passes the values each field showed when the
+	 * user started editing it (shown-values.ts), never values loaded afterwards; the row itself when missing.
+	 */
+	expectBase?( item: ProductListItem ): ProductListItem;
 }
 
 export interface Prepared {
@@ -700,7 +705,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 				for ( const group of lane ) {
 					try {
 						const response = await across(
-							group.map( ( entry ) => ( { ...writeItem( entry.target.item, entry.payload ), parent_id: parentIdOf( entry.target.item ) } ) ),
+							group.map( ( entry ) => ( { ...writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ), parent_id: parentIdOf( entry.target.item ) } ) ),
 							requestOptions
 						);
 
@@ -721,7 +726,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 				patchSoon( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 				try {
-					const response = await deps.batchVariations( parentId, group.map( ( entry ) => writeItem( entry.target.item, entry.payload ) ), requestOptions );
+					const response = await deps.batchVariations( parentId, group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {
@@ -746,7 +751,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 		await runConcurrently(
 			chunk( parents, size ).map( ( group ) => async () => {
 				try {
-					const response = await deps.batchProducts( group.map( ( entry ) => writeItem( entry.target.item, entry.payload ) ), requestOptions );
+					const response = await deps.batchProducts( group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {

@@ -400,6 +400,7 @@ final class LogController
                 MIN(IF(action NOT IN ('update', 'create'), id, NULL)) AS action_row,
                 GROUP_CONCAT(DISTINCT IF(status = 'skipped' AND JSON_VALID(context), JSON_UNQUOTE(JSON_EXTRACT(context, '$.reason')), NULL) SEPARATOR ',') AS skipped_reasons,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS fields,
+                GROUP_CONCAT(DISTINCT IF(status = 'skipped', field, NULL) ORDER BY field SEPARATOR ',') AS skipped_fields,
                 GROUP_CONCAT(DISTINCT IF(status <> 'skipped' AND source <> 'action' AND action IN ('update', 'create'), field, NULL) ORDER BY field SEPARATOR ',') AS update_fields
              FROM {$table} WHERE ({$where}) AND batch_id IN ({$in})
              GROUP BY batch_id ORDER BY created_at DESC, last_id DESC",
@@ -436,6 +437,8 @@ final class LogController
                 'skipped' => (int) $row['skipped_count'],
                 // Why: the `reason` of the skipped rows (`unchanged`, `trashed`, `no_stock_management`, ...).
                 'skipped_reasons' => array_values(array_filter(explode(',', (string) $row['skipped_reasons']), static fn (string $reason): bool => $reason !== '' && $reason !== 'null')),
+                // The fields of those rows: a batch refused on every item still says what it was about.
+                'skipped_fields' => array_values(array_filter(explode(',', (string) ($row['skipped_fields'] ?? '')), static fn (string $field): bool => $field !== '')),
                 'revertable' => (int) $row['updates'] > 0 && (int) $row['user_count'] <= 1,
                 'reverts' => (string) $row['reverts'] !== '' ? (string) $row['reverts'] : null,
                 'reverted_by' => $revertedBy[(string) $row['batch_id']] ?? null,

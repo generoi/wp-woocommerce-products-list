@@ -75,6 +75,36 @@ describe( 'PriceEdit', () => {
 		expect( ( screen.getByLabelText( 'Regular price' ) as HTMLInputElement ).value ).toBe( '7,00' );
 	} );
 
+	/** A form whose base value changes from outside (the editor's load landing) while the user may have typed. */
+	function LiveHarness( { base }: { base: string } ) {
+		const [ edit, setEdit ] = useState< string | undefined >( undefined );
+		const data = { id: 1, regular_price: edit ?? base } as unknown as ProductListItem;
+
+		return <PriceEdit data={ data } field={ field } onChange={ ( patch ) => setEdit( String( ( patch as { regular_price: unknown } ).regular_price ) ) } hideLabelFromVision={ false } />;
+	}
+
+	it( 'shows a newer stored value at once while focused but untouched (never a price an edit would not be based on)', () => {
+		const { rerender } = render( <LiveHarness base="14" /> );
+		const input = screen.getByLabelText( 'Regular price' ) as HTMLInputElement;
+
+		fireEvent.focus( input );
+		expect( input.value ).toBe( '14,00' );
+		rerender( <LiveHarness base="16" /> );
+		expect( input.value ).toBe( '16,00' );
+	} );
+
+	it( 'keeps what the user typed when the stored value changes underneath', () => {
+		const { rerender } = render( <LiveHarness base="14" /> );
+		const input = screen.getByLabelText( 'Regular price' ) as HTMLInputElement;
+
+		fireEvent.focus( input );
+		fireEvent.change( input, { target: { value: '15' } } );
+		rerender( <LiveHarness base="16" /> );
+		expect( input.value ).toBe( '15' );
+		fireEvent.blur( input );
+		expect( input.value ).toBe( '15,00' );
+	} );
+
 	it( 'marks the input invalid when the form reports a problem', () => {
 		render( <Harness initial="10" message="The sale price must be lower than the regular price." /> );
 		const input = screen.getByLabelText( 'Regular price' );

@@ -25,7 +25,7 @@
 import { Button, Notice, ProgressBar, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { CheckboxControl } from '../ui/checkbox-control';
 import { outcomeNoticeId } from '../ui/notices';
-import { createPortal, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { createPortal, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
@@ -37,17 +37,19 @@ import { getSettings } from '../settings';
 import { patchItems, removeItems } from '../store/products';
 import { getCurrentRows } from '../store/rows';
 import { beginSaveJob, finishSaveJob } from '../store/save-activity';
-import type { ProductListItem, QuickEditTab, Settings } from '../types';
+import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import { rowFields } from '../actions/context';
 import { runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { carriesViewText, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, rootKeysOf, tabFetchFields } from './hydrate';
+import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown-values';
+import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
 import { hasLoadRelativeOps, isNumericOp, isPendingOp, lowersPrice, parseNumeric, projectWarnings, validateBulkNumericEdits, validateNumericOps } from './bulk-numeric';
-import { ChangeSummary, describeSiteDateTime } from './change-summary';
+import { ChangeSummary, describeSiteDateTime, describeValue } from './change-summary';
 import { formatPrice } from '../fields/currency';
 import type { EditorHost } from './editor-context';
 import { measureEditorReady } from './editor-panel';
@@ -736,15 +738,44 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
 	// The edits belong to this editor: ticking another row into a bulk edit keeps what was typed.
 	const state = useEditState( items, editFields, mode );
+	const editFieldsById = useMemo( () => new Map( editFields.map( ( field ) => [ field.id, field ] ) ), [ editFields ] );
+	// What each field showed when the user started editing it: its writes' expected values come from there (shown-values.ts).
+	const shownRef = useRef< ShownValues | null >( null );
+	shownRef.current ??= new ShownValues();
+	const shown = shownRef.current;
+	// The value each field showed first (by field id), for "changed by someone else since the list loaded".
+	const firstShownRef = useRef( new Map< string, string >() );
+	// The rows as last rendered (the selection and the variations loaded for it): what a first change of a field was made on.
+	const renderedRowsRef = useRef< ProductListItem[] >( [] );
+	// Every row of the selection has had its own load (a row ticked in later has not, until its load lands).
+	const allHydrated = items.every( ( row ) => hydrated.has( row.id ) );
+	/**
+	 * Whether a field's value on every row is the loaded one: its tab's load landed, or the rows carry it from the list
+	 * (not the texts the editor loads raw: the list has them rendered). Until then the field is read-only, so nothing is
+	 * typed over a value the form did not show.
+	 */
+	const fieldLoaded = useCallback(
+		( field: ProductField ) => {
+			if ( allHydrated && ! loading && loadedTabs.has( tabOf( field ) ) ) {
+				return true;
+			}
+
+			const paths = pathsOfEdit( field.id, editFieldsById );
+
+			return ! paths.some( ( path ) => EDIT_CONTEXT_KEYS.has( path.split( '.' )[ 0 ] ?? path ) ) && items.every( ( row ) => row._placeholder || rowCarries( row, paths ) );
+		},
+		[ allHydrated, loading, loadedTabs, editFieldsById, items ]
+	);
+	const pendingFieldIds = useMemo( () => new Set( visibleFields.filter( ( field ) => ! fieldLoaded( field ) ).map( ( field ) => field.id ) ), [ visibleFields, fieldLoaded ] );
 
 	const tabs = useMemo( () => buildTabs( visibleFields, items, settings ), [ visibleFields, items, settings ] );
 	const tab = useMemo< QuickEditTab >( () => tabs.find( ( entry ) => entry.id === tabId ) ?? tabs[ 0 ] ?? { id: GENERAL_TAB_ID, label: __( 'General', 'wp-woocommerce-products-list' ) }, [ tabs, tabId ] );
 	const form = useMemo( () => buildInlineForm( visibleFields, tab, items, settings ), [ visibleFields, tab, items, settings ] );
 	const formFields = useMemo(
-		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings } ),
+		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds } ),
 		// state.data changes on every keystroke; the placeholders only need the merged base, which state.mixed tracks.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ visibleFields, bulk, items, state.mixed, settings ]
+		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds ]
 	);
 	const { validity, isValid } = useFormValidity< FormData >( state.data, formFields, form );
 
@@ -991,8 +1022,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const tabLabels = useMemo( () => Object.fromEntries( tabs.map( ( entry ) => [ entry.id, entry.label ] ) ), [ tabs ] );
 	const fieldTab = useCallback( ( fieldId: string ) => editFields.find( ( field ) => field.id === fieldId ), [ editFields ] );
 
+	// The rows the user sees (committed render): a field's first change is made on these values.
+	useLayoutEffect( () => {
+		renderedRowsRef.current = applyToVariations && variations.status === 'loaded' ? [ ...items, ...Array.from( variations.byParent.values() ).flat() ] : items;
+	} );
+
 	const onChange = useCallback(
 		( changes: Record< string, unknown > ) => {
+			shown.record( Object.keys( changes ), renderedRowsRef.current );
 			state.setFields( changes );
 			setErrors( [] );
 			setWarnings( [] );
@@ -1000,8 +1037,42 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			setInvalidFields( [] );
 			clearFlaggedControls( formRef.current );
 		},
-		[ state ]
+		[ state, shown ]
 	);
+
+	// Fields whose value changed after the form first showed it (the fetch brought a newer value than the list's, or a reload).
+	const changedFields = useMemo< ChangedField[] >(
+		() => changedSinceShown( visibleFields, items, firstShownRef.current, shown, new Map( visibleFields.filter( ( field ) => shown.has( field.id ) ).map( ( field ) => [ field.id, state.data[ field.id ] ] ) ), fieldLoaded ),
+		// state.edits: a field becomes "edited" with its first change.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[ visibleFields, items, fieldLoaded, state.edits ]
+	);
+
+	// The open tab's changed fields, and how each is said.
+	const tabChanged = useMemo( () => {
+		const onTab = new Set( fieldsOfTab( visibleFields, tab ).map( ( field ) => field.id ) );
+
+		return changedFields.filter( ( entry ) => onTab.has( entry.id ) );
+	}, [ changedFields, visibleFields, tab ] );
+	const changedLine = ( entry: ChangedField ): string => {
+		const field = editFieldsById.get( entry.id );
+		const label = field?.label ?? entry.id;
+		const now = Array.isArray( entry.now ) && items.length > 1 ? __( 'different on the selected rows', 'wp-woocommerce-products-list' ) : field ? describeValue( field, entry.now, settings ) : String( entry.now ?? '' );
+
+		return entry.edited
+			? sprintf(
+					/* translators: 1: field label, 2: the value stored now */
+					__( '%1$s: changed by someone else since you started editing it, now %2$s. Your value is kept; Update will not write over the other change without asking.', 'wp-woocommerce-products-list' ),
+					label,
+					now
+			  )
+			: sprintf(
+					/* translators: 1: field label, 2: the value stored now */
+					__( '%1$s: changed by someone else since the list loaded, now %2$s. The field shows the current value.', 'wp-woocommerce-products-list' ),
+					label,
+					now
+			  );
+	};
 
 	/** The variations a price tool reaches when "Apply price and sale fields to all variations" is ticked. */
 	const parentVariations = useMemo(
@@ -1380,6 +1451,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		rememberParentStamps( parentStamps );
 		patchItems( full );
+		// The warning shows these rows' current values: the next Update's expected values are those.
+		shown.rebase( full.map( ( row ) => {
+			const known = items.find( ( item ) => item.id === row.id );
+
+			return known ? ( mergeHydrated( known as Record< string, unknown >, row as Record< string, unknown > ) as ProductListItem ) : row;
+		} ) );
 		setHydrated( ( current ) => {
 			const next = new Map( current );
 
@@ -1428,6 +1505,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		}
 
 		setErrors( [] );
+
+		// "Write over the other change": the values the form shows for those rows now (the notice names them) are what this Update replaces.
+		if ( failedIds && overwriteConfirmed && conflictIds.size ) {
+			shown.rebase( renderedRowsRef.current.filter( ( row ) => conflictIds.has( row.id ) && ( hydrated.has( row.id ) || isVariation( row ) ) ) );
+		}
 
 		// A previous Update saved every field edit (only rows deleted meanwhile failed): what is left are the staged tool runs.
 		const fieldsDone = failedIds !== null && failedIds.size === 0;
@@ -1618,6 +1700,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						...( retryTargets.carriersOnly?.size ? { carriersOnly: retryTargets.carriersOnly } : {} ),
 						...( sharedBatch ? { batchId: sharedBatch, keepBatchOpen: true, plannedExtra: toolRows } : {} ),
 						saveJob,
+						// Each field's expected values are the ones it showed when the user started editing it.
+						expectBase: ( item: ProductListItem ) => shown.baseRow( item, editFieldsById ),
 						...rowOptions,
 						onProgress: ( done, total ) => {
 							if ( mountedRef.current ) {
@@ -1939,6 +2023,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 			if ( mountedRef.current ) {
 				setSaving( false );
+				// The rows now hold this save's values: "changed by someone else" counts from here.
+				firstShownRef.current.clear();
 
 				// A failure leaves the editor open: keyboard focus goes to its report (never to <body>).
 				if ( failed ) {
@@ -2586,6 +2672,15 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					aria-labelledby={ tabs.length > 1 ? `wc-pl-edit-tab-${ tab.id }` : undefined }
 					aria-busy={ ! tabReady }
 				>
+					{ tabChanged.length ? (
+						<Notice status="warning" isDismissible={ false } className="wc-pl-edit__notice wc-pl-edit__changed">
+							<ul>
+								{ tabChanged.map( ( entry ) => (
+									<li key={ entry.id }>{ changedLine( entry ) }</li>
+								) ) }
+							</ul>
+						</Notice>
+					) : null }
 					{ ! formShown ? (
 						<p>{ __( 'The selected rows share no editable fields.', 'wp-woocommerce-products-list' ) }</p>
 					) : (

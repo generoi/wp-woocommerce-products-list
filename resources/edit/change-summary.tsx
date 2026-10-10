@@ -166,7 +166,8 @@ function optionLabel( field: ProductField, value: unknown ): string {
 	return elements.find( ( element ) => element.value === value )?.label ?? String( value ?? '' );
 }
 
-function describeValue( field: ProductField, value: unknown, settings: Settings ): string {
+/** A field's value as the editor's lines show it ("(empty)", Yes/No, option labels, money, site dates). */
+export function describeValue( field: ProductField, value: unknown, settings: Settings ): string {
 	if ( value === '' || value === null || value === undefined || ( Array.isArray( value ) && value.length === 0 ) ) {
 		return __( '(empty)', 'wp-woocommerce-products-list' );
 	}

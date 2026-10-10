@@ -27,7 +27,7 @@ import type { ProductField, Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { actionLabel, createLogFields, formatLogValue, logQueryFromView } from './log-fields';
-import { describeBatchScope, isRevertableRow, scopeFromPlan } from './batch-scope';
+import { describeBatchScope, isRevertableRow, itemsLeftToRevert, scopeFromPlan } from './batch-scope';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from './revert';
 import type { RevertCheckSummary, RevertOutcome } from './revert';
 import { batchQueryFromView, createBatchFields } from './batch-fields';
@@ -329,6 +329,10 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 		closeModal?.();
 	};
 
+	// Items the check found changed since the batch: the revert leaves them as they are, so they are not "put back".
+	const keptItems = ! outcome && check && check !== 'loading' ? check.changed : 0;
+	const nothingLeft = keptItems > 0 && !! plan && plan !== 'loading' && itemsLeftToRevert( { objects: plan.objects }, keptItems ) === 0;
+
 	return (
 		<div className="wc-pl-confirm">
 			<p>
@@ -358,7 +362,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						<Spinner /> { __( 'Checking what the batch changed…', 'wp-woocommerce-products-list' ) }
 					</>
 				) : plan ? (
-					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ) ) }</strong>
+					<strong>{ describeBatchScope( scopeFromPlan( plan, ( action ) => actionLabel( action, settings ) ), keptItems ) }</strong>
 				) : (
 					planError ?? __( 'The scope of this batch could not be loaded.', 'wp-woocommerce-products-list' )
 				) }
@@ -459,7 +463,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						) }
 					</Button>
 				) : (
-					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable } onClick={ () => void confirm() } __next40pxDefaultSize>
+					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable || nothingLeft } onClick={ () => void confirm() } __next40pxDefaultSize>
 						{ revertedBy ? __( 'Revert again', 'wp-woocommerce-products-list' ) : __( 'Revert batch', 'wp-woocommerce-products-list' ) }
 					</Button>
 				) }

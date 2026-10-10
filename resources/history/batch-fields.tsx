@@ -17,8 +17,16 @@ import type { BatchQuery, LogBatch } from './use-log';
 const FIELDS_SHOWN = 4;
 
 /** "348 variations of 5 products, 2 products" from the batch counts. */
-export function describeBatchObjects( batch: Pick< LogBatch, 'objects' | 'products' | 'variations' | 'parents' > ): string {
+export function describeBatchObjects( batch: Pick< LogBatch, 'objects' | 'products' | 'variations' | 'parents' > & Partial< Pick< LogBatch, 'skipped' > > ): string {
 	const parts: string[] = [];
+
+	// Nothing written (every item refused or left out): the items it was about, said as such, never "0 items".
+	if ( batch.objects === 0 && ( batch.skipped ?? 0 ) > 0 ) {
+		const skipped = batch.skipped ?? 0;
+
+		/* translators: %d: number of items the batch left unwritten */
+		return sprintf( _n( '%d item, not written', '%d items, none written', skipped, 'wp-woocommerce-products-list' ), skipped );
+	}
 	const products = batch.products ?? 0;
 	const variations = batch.variations ?? 0;
 
@@ -52,13 +60,15 @@ export function describeBatchObjects( batch: Pick< LogBatch, 'objects' | 'produc
 }
 
 /** The batch's field labels ("Regular price, Svenska: Name +3 more"), or its actions when it changed no field. */
-export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions' > & Partial< Pick< LogBatch, 'summary' > >, fieldOptions: LogFieldOption[], settings?: Pick< Settings, 'actions' > | null ): string {
+export function describeBatchChanges( batch: Pick< LogBatch, 'fields' | 'actions' > & Partial< Pick< LogBatch, 'summary' | 'skipped_fields' > >, fieldOptions: LogFieldOption[], settings?: Pick< Settings, 'actions' > | null ): string {
 	// The server's (or an integration's) name for an action batch: "Moved to trash", "Copy translations (Suomi → Svenska): Name".
 	if ( typeof batch.summary === 'string' && batch.summary.trim() !== '' ) {
 		return batch.summary;
 	}
 
-	const labels = Array.from( new Set( batch.fields.map( ( key ) => logFieldLabel( key, fieldOptions ) ) ) );
+	// A batch that wrote nothing is named after the fields it left unwritten.
+	const keys = batch.fields.length || ( batch.actions ?? [] ).some( ( action ) => action !== 'update' ) ? batch.fields : batch.skipped_fields ?? [];
+	const labels = Array.from( new Set( keys.map( ( key ) => logFieldLabel( key, fieldOptions ) ) ) );
 	const actions = ( batch.actions ?? [] ).filter( ( action ) => action !== 'update' ).map( ( action ) => actionLabel( action, settings ) );
 	const named = [ ...actions, ...labels ];
 

@@ -43,6 +43,8 @@ export interface FormFieldOptions {
 	base: Record< string, unknown >;
 	mixed: Record< string, MixedState >;
 	settings: Settings;
+	/** Fields whose values are still loading: shown read-only until they are there (nothing is typed over a value the form did not show). */
+	pending?: ReadonlySet< string >;
 }
 
 /** Variations are Active (publish) or Inactive (private): the list's vocabulary, and what the Enable/Disable actions write. */
@@ -129,7 +131,7 @@ function integerMessage( value: unknown ): string | null {
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
-	const { bulk, items, base, mixed, settings } = options;
+	const { bulk, items, base, mixed, settings, pending } = options;
 	const ids = new Set( fields.map( ( field ) => field.id ) );
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
@@ -305,6 +307,10 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 					custom: ( item, def ) => integerMessage( item[ field.id ] ) ?? ( custom ? custom( item, def as never ) : null ),
 				};
 			}
+		}
+
+		if ( pending?.has( field.id ) ) {
+			formField.readOnly = true;
 		}
 
 		return formField;

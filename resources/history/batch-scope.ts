@@ -113,7 +113,16 @@ export function summarizeBatch( rows: LogRow[], total: number ): BatchScope {
 /** How many pages of a batch the revert confirm loads before giving up on an exact count. */
 export const BATCH_SCOPE_MAX_PAGES = 10;
 
-export function describeBatchScope( scope: BatchScope ): string {
+/** Items a revert would put back once those changed since the batch (`kept`: a revert leaves them as they are) are taken out. */
+export function itemsLeftToRevert( scope: Pick< BatchScope, 'objects' >, kept = 0 ): number {
+	return Math.max( 0, scope.objects - Math.max( 0, kept ) );
+}
+
+/**
+ * @param kept Items the pre-revert check found changed since the batch (or already put back by an earlier
+ *             revert): the revert leaves them as they are, so they are not counted as put back.
+ */
+export function describeBatchScope( scope: BatchScope, kept = 0 ): string {
 	const changes = sprintf(
 		/* translators: %d: number of changes */
 		_n( '%d change', '%d changes', scope.changes, 'wp-woocommerce-products-list' ),
@@ -131,7 +140,27 @@ export function describeBatchScope( scope: BatchScope ): string {
 		: /* translators: 1: "N changes", 2: "N items" */
 		  sprintf( __( 'This will put back %1$s on %2$s.', 'wp-woocommerce-products-list' ), changes, scope.partial ? `${ objects }+` : objects );
 
-	const parts: string[] = [ text ];
+	const left = itemsLeftToRevert( scope, kept );
+	let head: string = text;
+
+	if ( kept > 0 && left === 0 ) {
+		head = __( 'Nothing is left to put back: every item of this batch changed since (see below).', 'wp-woocommerce-products-list' );
+	} else if ( kept > 0 ) {
+		const ofItems = sprintf(
+			/* translators: 1: items the revert puts back, 2: items in the batch */
+			_n( '%1$d of %2$d item', '%1$d of %2$d items', scope.objects, 'wp-woocommerce-products-list' ),
+			left,
+			scope.objects
+		);
+
+		head = scope.fields.length
+			? /* translators: 1: "N of M items", 2: the field names */
+			  sprintf( __( 'This will put back the changes on %1$s: %2$s.', 'wp-woocommerce-products-list' ), ofItems, scope.fields.join( ', ' ) )
+			: /* translators: %s: "N of M items" */
+			  sprintf( __( 'This will put back the changes on %s.', 'wp-woocommerce-products-list' ), ofItems );
+	}
+
+	const parts: string[] = [ head ];
 
 	if ( scope.skipped ) {
 		parts.push(

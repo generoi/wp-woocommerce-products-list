@@ -4,9 +4,12 @@
  * set/increase/decrease operation (edit/bulk-numeric-control.tsx).
  *
  * The text is the user's while the input has focus: every keystroke is
- * parsed and emitted, but the stored value is only formatted back into
- * the input when it changes from outside (a reset, another row) or on
- * blur. Formatting on every change turned "149" into "1,0049".
+ * parsed and emitted, and the stored value is not formatted back into the
+ * input while it is what the text says (formatting on every change turned
+ * "149" into "1,0049"). A value that changes from outside (the editor's
+ * load bringing a newer price, a reset, another row) replaces the text at
+ * once, also while the input has focus: the box never shows a price other
+ * than the one an edit would be based on (the save's expected value).
  */
 import { useEffect, useId, useRef, useState } from '@wordpress/element';
 import { InputControl } from '../../ui';
@@ -25,9 +28,7 @@ export function PriceEdit( { data, field, onChange, hideLabelFromVision, validit
 	const id = `wc-pl-price-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }-${ useId().replace( /:/g, '' ) }`;
 
 	useEffect( () => {
-		if ( ! focusedRef.current ) {
-			setText( toInput( stored, settings ) );
-		}
+		setText( ( current ) => ( focusedRef.current && samePrice( parsePrice( current, settings ), stored ) ? current : toInput( stored, settings ) ) );
 		// Only the stored value and the currency settings matter; `settings` is a stable singleton.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [ stored, settings.currency.decimalSeparator, settings.currency.decimals ] );
@@ -78,4 +79,19 @@ export function toInput( value: unknown, settings: Pick< Settings, 'currency' > 
 	const text = Number.isFinite( number ) ? number.toFixed( decimals ) : String( value );
 
 	return text.replace( '.', settings.currency.decimalSeparator );
+}
+
+/** Whether typed text (parsed) and a stored price are the same amount ('' and null alike). */
+function samePrice( parsed: string | null, stored: unknown ): boolean {
+	if ( parsed === null ) {
+		return false;
+	}
+
+	const empty = ( value: unknown ) => value === null || value === undefined || value === '';
+
+	if ( empty( parsed ) || empty( stored ) ) {
+		return empty( parsed ) && empty( stored );
+	}
+
+	return Number( parsed ) === Number( stored );
 }

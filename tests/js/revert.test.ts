@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ActionResponse } from '../../resources/api/client';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
-import { describeBatchScope, isRevertableRow, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
+import { describeBatchScope, isRevertableRow, itemsLeftToRevert, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
 import type { LogRow } from '../../resources/api/client';
 
 vi.mock( '../../resources/api/client', () => ( {
@@ -110,6 +110,16 @@ describe( 'left-out items', () => {
 		expect( describeBatchScope( scope ) ).toBe(
 			'This will put back 1 change on 1 item. 5 items were left out because they already had this value; nothing to put back. 1 item was left out when the batch ran (trashed meanwhile); nothing to put back.'
 		);
+	} );
+
+	it( 'does not count the items changed since the batch as put back', () => {
+		const scope = scopeFromPlan( { rows: 4, objects: 3, skipped: [] } );
+
+		expect( describeBatchScope( scope, 1 ) ).toBe( 'This will put back the changes on 2 of 3 items.' );
+		expect( itemsLeftToRevert( scope, 1 ) ).toBe( 2 );
+		expect( describeBatchScope( scope, 3 ) ).toBe( 'Nothing is left to put back: every item of this batch changed since (see below).' );
+		expect( itemsLeftToRevert( scope, 5 ) ).toBe( 0 );
+		expect( describeBatchScope( scope, 0 ) ).toBe( 'This will put back 4 changes on 3 items.' );
 	} );
 
 	it( 'names the not-revertable actions by their labels', () => {

@@ -152,6 +152,8 @@ export interface LogBatch {
 	skipped?: number;
 	/** Why items were left unwritten (`unchanged`: they already had the value, …). */
 	skipped_reasons?: string[];
+	/** The fields of the unwritten items' rows (what a batch refused on every item was about). */
+	skipped_fields?: string[];
 	/** A readable name for an action batch ("Moved to trash", "Copy translations (Suomi → Svenska): Name"); null for field edits. */
 	summary?: string | null;
 	/** Fields of the batch's own update/create rows (not those an action wrote). */

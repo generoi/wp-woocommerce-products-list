@@ -230,6 +230,10 @@ function VisualEditor( { id, labelId, describedBy, value, rows, onChange }: Visu
 		const body = parse( toVisualHtml( value ) ).body;
 
 		editable.replaceChildren( ...Array.from( body.childNodes ).map( ( node ) => document.importNode( node, true ) ) );
+		// A value from outside (the load bringing the stored text) is what later edits are read back against.
+		if ( emittedRef.current !== null ) {
+			originalRef.current = value;
+		}
 		emittedRef.current = value;
 	}, [ value ] );
 

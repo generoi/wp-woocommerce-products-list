@@ -317,6 +317,27 @@ class LogTest extends RestTestCase
         $this->assertSame(['b2'], array_column($data['items'], 'batch_id'));
     }
 
+    /** A batch refused on every item still names the fields and items it was about (History: never "— on 0 items"). */
+    public function test_a_refused_only_batch_lists_its_skipped_fields_and_items(): void
+    {
+        $product = $this->simpleProduct();
+        $other = $this->simpleProduct();
+
+        $this->seed([
+            ['batch_id' => 'r1', 'object_id' => $product->get_id(), 'field' => 'regular_price', 'old_value' => '16', 'new_value' => '15', 'status' => 'skipped', 'context' => ['reason' => 'conflict']],
+            ['batch_id' => 'r1', 'object_id' => $other->get_id(), 'field' => 'sale_price', 'old_value' => '', 'new_value' => '9', 'status' => 'skipped', 'context' => ['reason' => 'conflict']],
+        ]);
+
+        $items = $this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'];
+        $batch = array_values(array_filter($items, static fn (array $item): bool => $item['batch_id'] === 'r1'))[0];
+
+        $this->assertSame(0, $batch['objects']);
+        $this->assertSame([], $batch['fields']);
+        $this->assertSame(2, $batch['skipped']);
+        $this->assertSame(['regular_price', 'sale_price'], $batch['skipped_fields']);
+        $this->assertSame(['conflict'], $batch['skipped_reasons']);
+    }
+
     /**
      * History shows the first 8 characters of a batch id; typing them
      * finds the batch, in the log and in the batch list.
