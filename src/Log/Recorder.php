@@ -58,6 +58,13 @@ final class Recorder
     public const SALE_COMPANIONS = ['sale_price', 'date_on_sale_from', 'date_on_sale_to'];
 
     /**
+     * What WooCommerce clears when a save turns stock management off
+     * (`WC_Product::validate_props()`: quantity, backorders, low stock
+     * threshold), so the log holds the old values and a revert puts them back.
+     */
+    public const STOCK_COMPANIONS = ['stock_quantity', 'backorders', 'low_stock_amount'];
+
+    /**
      * wc/v3 keys the product and variation controllers write. Arrays among
      * them (categories, images, dimensions) are one field, not leaves.
      */
@@ -180,18 +187,25 @@ final class Recorder
 
     /**
      * The paths a save is diffed on: the request's own, plus the
-     * companions of a sale key it writes (`SALE_KEYS`).
+     * companions of a sale key it writes (`SALE_KEYS`) and of
+     * `manage_stock` (`STOCK_COMPANIONS`).
      *
      * @param  array<int, string>  $paths
      * @return array<int, string>
      */
     public static function watched(array $paths): array
     {
-        if (array_intersect($paths, self::SALE_KEYS) === []) {
-            return $paths;
+        $watched = $paths;
+
+        if (array_intersect($paths, self::SALE_KEYS) !== []) {
+            $watched = array_merge($watched, self::SALE_COMPANIONS);
         }
 
-        return array_values(array_unique(array_merge($paths, self::SALE_COMPANIONS)));
+        if (in_array('manage_stock', $paths, true)) {
+            $watched = array_merge($watched, self::STOCK_COMPANIONS);
+        }
+
+        return array_values(array_unique($watched));
     }
 
     /**

@@ -52,6 +52,13 @@ class ConcurrencyTest extends TestCase
         $this->assertSame(['sale_price', 'name', 'date_on_sale_from', 'date_on_sale_to'], Recorder::watched(['sale_price', 'name']));
     }
 
+    public function test_turning_stock_management_off_watches_what_woocommerce_clears_with_it(): void
+    {
+        // WC_Product::validate_props() empties the quantity, backorders and low stock threshold: logged, a revert puts them back.
+        $this->assertSame(['manage_stock', 'stock_status', 'stock_quantity', 'backorders', 'low_stock_amount'], Recorder::watched(['manage_stock', 'stock_status']));
+        $this->assertSame(['stock_quantity'], Recorder::watched(['stock_quantity']));
+    }
+
     public function test_the_plan_writes_products_first_then_variations_by_parent(): void
     {
         $this->assertSame([5, 1, 3, 2, 4], LogController::writeOrder([

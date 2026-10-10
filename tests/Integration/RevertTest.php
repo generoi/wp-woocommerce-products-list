@@ -915,6 +915,35 @@ class RevertTest extends RestTestCase
         $this->assertNull($product->get_stock_quantity());
     }
 
+    public function test_reverting_stock_management_turned_off_puts_the_cleared_stock_fields_back(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        [$id] = $parent->get_children();
+        $variation = wc_get_product($id);
+        $variation->set_manage_stock(true);
+        $variation->set_stock_quantity(9);
+        $variation->set_backorders('notify');
+        $variation->set_low_stock_amount(2);
+        $variation->save();
+
+        // WooCommerce empties the quantity, backorders and threshold with stock management.
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', [
+            'update' => [['id' => $id, 'manage_stock' => false, 'stock_status' => 'outofstock']],
+        ], [Logger::SOURCE_HEADER => 'quick']));
+        $this->assertNull(wc_get_product($id)->get_stock_quantity());
+        $this->assertEqualsCanonicalizing(['manage_stock', 'stock_status', 'stock_quantity', 'backorders', 'low_stock_amount'], array_column($this->rows($this->batchId()), 'field'));
+
+        $data = $this->data($this->request('POST', '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert'));
+        $this->assertTrue($data['results'][0]['ok']);
+
+        $variation = wc_get_product($id);
+        $this->assertTrue($variation->get_manage_stock());
+        $this->assertSame(9, $variation->get_stock_quantity());
+        $this->assertSame('instock', $variation->get_stock_status());
+        $this->assertSame('notify', $variation->get_backorders());
+        $this->assertSame(2, $variation->get_low_stock_amount());
+    }
+
     public function test_a_relative_stock_write_keeps_a_sale_made_meanwhile_and_is_logged(): void
     {
         $product = $this->simpleProduct(['manage_stock' => true, 'stock_quantity' => 10]);
