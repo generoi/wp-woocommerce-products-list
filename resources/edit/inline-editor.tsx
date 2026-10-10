@@ -3170,7 +3170,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					/>
 				) : null }
 
-				{ stagedCount ? (
+				{ staged.size ? (
 					<div className="wc-pl-edit__staged">
 						<strong>{ __( 'Also saved with Update:', 'wp-woocommerce-products-list' ) }</strong>
 						<ul>
