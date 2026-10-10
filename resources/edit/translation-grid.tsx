@@ -61,9 +61,11 @@ export class TranslationStore {
 	 * Record a value typed over `stored` (the value the row holds now). The
 	 * first stored value of an edit is kept as its base; a value equal to that
 	 * base (typed back to what was shown) or to the stored one (nothing to
-	 * write) takes the edit out again. The base itself stays until the edits
-	 * are cleared: the input still shows the text typed over that base, so a
-	 * later keystroke must expect it, never a value a reload brought meanwhile.
+	 * write) takes the edit out again. Typed back to the base, the base stays
+	 * (until the cell is shown the stored value again, showsStored): the input
+	 * shows the text typed over it, so a later keystroke must expect it, never
+	 * a value a reload brought. Typed to a newer stored value, the input shows
+	 * exactly what is stored now, so the old base goes.
 	 */
 	set( id: number, fieldId: string, value: string, stored: string ): void {
 		const before = this.count();
@@ -71,13 +73,21 @@ export class TranslationStore {
 		const bases = this.originals.get( id ) ?? new Map< string, string >();
 		const base = bases.get( fieldId ) ?? stored;
 
-		bases.set( fieldId, base );
-		this.originals.set( id, bases );
-
-		if ( value === base || value === stored ) {
+		if ( value === base ) {
 			row.delete( fieldId );
+			bases.set( fieldId, base );
+		} else if ( value === stored ) {
+			row.delete( fieldId );
+			bases.delete( fieldId );
 		} else {
 			row.set( fieldId, value );
+			bases.set( fieldId, base );
+		}
+
+		if ( bases.size ) {
+			this.originals.set( id, bases );
+		} else {
+			this.originals.delete( id );
 		}
 
 		if ( row.size ) {
@@ -88,6 +98,25 @@ export class TranslationStore {
 
 		if ( this.count() !== before ) {
 			this.emit();
+		}
+	}
+
+	/**
+	 * A cell with no edit shows the stored value again (a reload put it in the
+	 * input): the next keystroke is typed over that value, so a base kept from
+	 * text typed back earlier goes.
+	 */
+	showsStored( id: number, fieldId: string ): void {
+		if ( this.edits.get( id )?.has( fieldId ) ) {
+			return;
+		}
+
+		const bases = this.originals.get( id );
+
+		bases?.delete( fieldId );
+
+		if ( bases && ! bases.size ) {
+			this.originals.delete( id );
 		}
 	}
 
@@ -296,6 +325,7 @@ const GridRow = memo( function GridRow( { item, tabId, lang, gridFields, store, 
 			}
 
 			showText( input, cellText( name, stringOf( readFieldValue( field, item ) ) ) );
+			store.showsStored( item.id, field.id );
 		}
 	} );
 

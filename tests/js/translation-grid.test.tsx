@@ -87,6 +87,32 @@ describe( 'translation grid text', () => {
 		store.set( 1, 'i18n:se.name', 'C', 'C' );
 		expect( store.count() ).toBe( 0 );
 	} );
+
+	it( 'starts again from the stored value once the input shows it, so a refused edit can be typed over the other writer\'s text', () => {
+		const store = new TranslationStore();
+
+		// Typed over A; the save is refused (B stored meanwhile) and the grid reloads: the cell keeps 'A y' with B shown as changed.
+		store.set( 1, 'i18n:se.name', 'A y', 'A' );
+		// The user takes B (types it out) and adds to it: the input showed B, so B is what the save expects.
+		store.set( 1, 'i18n:se.name', 'B', 'B' );
+		expect( store.count() ).toBe( 0 );
+		store.set( 1, 'i18n:se.name', 'B z', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'B' } );
+	} );
+
+	it( 'forgets a typed-back base once a reload puts the stored value in the cell', () => {
+		const store = new TranslationStore();
+
+		store.set( 1, 'i18n:se.name', 'A x', 'A' );
+		store.set( 1, 'i18n:se.name', 'A', 'A' );
+		// The grid unfolds again with B stored: the untouched cell now shows B.
+		store.showsStored( 1, 'i18n:se.name' );
+		store.set( 1, 'i18n:se.name', 'B x', 'B' );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'B' } );
+		// A cell with an edit keeps its base.
+		store.showsStored( 1, 'i18n:se.name' );
+		expect( store.originalOf( 1, 'i18n:se.name' ) ).toBe( 'B' );
+	} );
 } );
 
 describe( 'TranslationGrid', () => {
@@ -189,6 +215,39 @@ describe( 'TranslationGrid', () => {
 		// Expected: what each input showed when typing began, never the reloaded value D's input did not show.
 		expect( write( 1 )._wcpl_expect ).toEqual( { 'i18n.se.name': 'Svensk F' } );
 		expect( write( 2 )._wcpl_expect ).toEqual( { 'i18n.se.name': 'Svensk H' } );
+	} );
+
+	it( 'expects the reloaded value a typed-back cell shows, so a later edit is never a false conflict', async () => {
+		const fields = [ i18nField( 'se', 'name' ) ];
+		let stored = 'Svensk F';
+		const load = vi.fn( async () => ( { items: [ product( 1, 'D', { name: stored } ) ], missing: [], parentStamps: new Map() } ) );
+		const store = new TranslationStore();
+
+		render( <TranslationGrid tabId="i18n:se" tabLabel="Svenska" items={ [ product( 1, 'D' ) ] } fields={ fields } settings={ { languages: { default: 'fi', others: [ 'se' ], labels: {} } } as never } store={ store } load={ load as never } /> );
+
+		const details = document.querySelector( 'details' ) as HTMLDetailsElement;
+		const toggle = async ( open: boolean ) => {
+			details.open = open;
+			await act( async () => {
+				fireEvent( details, new Event( 'toggle' ) );
+			} );
+		};
+		const name = () => document.querySelector< HTMLInputElement >( 'input[data-grid-col="name"]' )!;
+
+		await toggle( true );
+		await waitFor( () => expect( name().value ).toBe( 'Svensk F' ) );
+		fireEvent.change( name(), { target: { value: 'Svensk F x' } } );
+		fireEvent.change( name(), { target: { value: 'Svensk F' } } );
+
+		// Another user saves; the grid unfolds again and the untouched cell shows their value.
+		await toggle( false );
+		stored = 'Svensk G';
+		await toggle( true );
+		await waitFor( () => expect( name().value ).toBe( 'Svensk G' ) );
+
+		fireEvent.change( name(), { target: { value: 'Svensk G y' } } );
+		expect( store.originalsOf( 1 ) ).toEqual( { 'i18n:se.name': 'Svensk G' } );
+		expect( screen.queryByText( /Changed by someone else/ ) ).toBeNull();
 	} );
 } );
 
