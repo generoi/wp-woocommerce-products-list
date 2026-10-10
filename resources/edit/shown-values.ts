@@ -137,26 +137,92 @@ export class ShownValues {
 
 	/**
 	 * The row an item's expected values are read from: the current row with
-	 * each changed field's paths as the field showed them when its edit
+	 * each changed field's paths as the form showed them when the edit
 	 * started. A row loaded after that (a variation fetched later) is the
 	 * current row: the user cannot have seen anything older.
+	 *
+	 * Fields share paths (the sale price reads the regular price, the stock
+	 * status the stock quantity, every meta-backed field `meta_data`), so a
+	 * path is settled by the field changed first whose snapshot carries it:
+	 * the oldest value the form showed for it, never one a later snapshot
+	 * took from a load the user had not seen when they typed. `meta_data` is
+	 * settled per meta key the same way; a key no snapshot carries is left
+	 * out (nothing the form showed, so nothing is expected), not taken from
+	 * the current row. The result does not depend on object identity.
 	 */
 	baseRow( item: ProductListItem, byId: ReadonlyMap< string, ProductField > ): ProductListItem {
-		let row = item as Record< string, unknown >;
+		const settled = new Map< string, unknown >();
+		const metaByKey = new Map< string, unknown[] >();
+		let metaPath = false;
+		let metaCarried = false;
+		let any = false;
 
+		// Map order is record order: the field changed first comes first.
 		for ( const [ id, snapshot ] of this.byField ) {
-			const shown = snapshot.get( item.id );
+			const shown = snapshot.get( item.id ) as Record< string, unknown > | undefined;
 
-			if ( ! shown || shown === item ) {
+			if ( ! shown ) {
 				continue;
 			}
 
+			any = true;
+
 			for ( const path of pathsOfEdit( id, byId ) ) {
-				row = writePath( row, path, readPath( shown as Record< string, unknown >, path ) );
+				if ( path === META_PATH ) {
+					metaPath = true;
+
+					if ( Array.isArray( shown[ META_PATH ] ) ) {
+						metaCarried = true;
+						settleMeta( metaByKey, shown[ META_PATH ] as unknown[] );
+					}
+
+					continue;
+				}
+
+				const value = readPath( shown, path );
+
+				if ( ! settled.has( path ) || ( settled.get( path ) === ABSENT && value !== ABSENT ) ) {
+					settled.set( path, value );
+				}
 			}
 		}
 
+		if ( ! any ) {
+			return item;
+		}
+
+		let row = item as Record< string, unknown >;
+
+		for ( const [ path, value ] of settled ) {
+			row = writePath( row, path, value );
+		}
+
+		if ( metaPath ) {
+			row = writePath( row, META_PATH, metaCarried ? Array.from( metaByKey.values() ).flat() : ABSENT );
+		}
+
 		return row as ProductListItem;
+	}
+}
+
+const META_PATH = 'meta_data';
+
+/** Add the meta keys a snapshot carries that no earlier snapshot did (every entry of the key, as listed). */
+function settleMeta( byKey: Map< string, unknown[] >, list: unknown[] ): void {
+	const here = new Map< string, unknown[] >();
+
+	for ( const entry of list ) {
+		const key = isPlainObject( entry ) ? entry.key : undefined;
+
+		if ( typeof key !== 'string' || byKey.has( key ) ) {
+			continue;
+		}
+
+		here.set( key, [ ...( here.get( key ) ?? [] ), entry ] );
+	}
+
+	for ( const [ key, entries ] of here ) {
+		byKey.set( key, entries );
 	}
 }
 

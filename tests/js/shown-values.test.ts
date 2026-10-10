@@ -6,7 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { writeItem } from '../../resources/edit/expect';
 import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from '../../resources/edit/shown-values';
 import type { ProductField, ProductListItem } from '../../resources/types';
-import { coreFields, field, simple } from './edit-fixtures';
+import { createSalePriceField } from '../../resources/fields/sale-price';
+import { createStockQuantityField } from '../../resources/fields/stock-quantity';
+import { createStockStatusField } from '../../resources/fields/stock-status';
+import { coreFields, editSettings, field, simple } from './edit-fixtures';
 
 const i18nName = field( 'i18n:se.name', { rest: { fields: [ 'i18n.se.name' ], applies: { product: true, variation: false } } } );
 const fields: ProductField[] = [ ...coreFields(), i18nName ];
@@ -78,6 +81,63 @@ describe( 'ShownValues', () => {
 
 		shown.forget();
 		expect( shown.has( 'sale_price' ) ).toBe( false );
+	} );
+} );
+
+describe( 'ShownValues with fields that share paths', () => {
+	const settings = editSettings();
+	const real = [ createSalePriceField( settings ), createStockStatusField( settings ), createStockQuantityField( settings ), ...coreFields().filter( ( entry ) => ! [ 'sale_price', 'stock_status', 'stock_quantity' ].includes( entry.id ) ) ];
+	const realById = new Map( real.map( ( entry ) => [ entry.id, entry ] ) );
+
+	it( 'keeps the regular price the box showed when the sale price is changed after a load brought another', () => {
+		const shown = new ShownValues();
+		const listed = row( 7, { regular_price: '14', sale_price: '' } );
+
+		// Typed 15 into the regular price while the list's 14 showed.
+		shown.record( [ 'regular_price' ], [ listed ] );
+		// The load brings 16 (someone else's save); the user then changes the sale price.
+		const hydrated = row( 7, { regular_price: '16', sale_price: '' } );
+		shown.record( [ 'sale_price' ], [ hydrated ] );
+
+		// Another tab merged in a new row object: no identity shortcut.
+		const current = { ...hydrated } as ProductListItem;
+		const sent = writeItem( shown.baseRow( current, realById ), { regular_price: '15', sale_price: '12' } )._wcpl_expect;
+
+		expect( sent ).toEqual( { regular_price: '14', sale_price: '' } );
+		// The same row object as the snapshot gives the same answer.
+		expect( writeItem( shown.baseRow( hydrated, realById ), { regular_price: '15', sale_price: '12' } )._wcpl_expect ).toEqual( sent );
+	} );
+
+	it( 'settles the stock quantity from the field changed first, and from a later one only when the first did not carry it', () => {
+		const shown = new ShownValues();
+
+		shown.record( [ 'stock_quantity' ], [ row( 4, { stock_status: 'instock', stock_quantity: 5, manage_stock: true } ) ] );
+		shown.record( [ 'stock_status' ], [ row( 4, { stock_status: 'instock', stock_quantity: 9, manage_stock: true } ) ] );
+		const current = row( 4, { stock_status: 'instock', stock_quantity: 9, manage_stock: true } );
+
+		expect( writeItem( shown.baseRow( current, realById ), { stock_quantity: 6, stock_status: 'outofstock' } )._wcpl_expect ).toEqual( { stock_quantity: 5, stock_status: 'instock' } );
+
+		// A first snapshot without the quantity (the list did not carry it): the field that showed it settles it.
+		const later = new ShownValues();
+		const listed = simple( 5, { stock_status: 'instock' } ) as unknown as Record< string, unknown >;
+		delete listed.stock_quantity;
+		later.record( [ 'stock_status' ], [ listed as unknown as ProductListItem ] );
+		later.record( [ 'stock_quantity' ], [ row( 5, { stock_status: 'instock', stock_quantity: 3, manage_stock: true } ) ] );
+
+		expect( writeItem( later.baseRow( row( 5, { stock_status: 'instock', stock_quantity: 8, manage_stock: true } ), realById ), { stock_quantity: 4 } )._wcpl_expect ).toEqual( { stock_quantity: 3 } );
+	} );
+
+	it( 'settles each meta key from the first snapshot that carries it, and expects nothing for a key none showed', () => {
+		const metaField = ( id: string ) => field( id, { rest: { fields: [ 'meta_data' ], applies: { product: true, variation: true } } } );
+		const metaById = new Map( [ metaField( 'note_a' ), metaField( 'note_b' ) ].map( ( entry ) => [ entry.id, entry ] ) );
+		const shown = new ShownValues();
+
+		shown.record( [ 'note_a' ], [ row( 2, { meta_data: [ { key: '_a', value: 'mine' } ] } ) ] );
+		shown.record( [ 'note_b' ], [ row( 2, { meta_data: [ { key: '_a', value: 'theirs' }, { key: '_b', value: 'b1' } ] } ) ] );
+		const current = row( 2, { meta_data: [ { key: '_a', value: 'theirs' }, { key: '_b', value: 'b2' }, { key: '_c', value: 'c-new' } ] } );
+		const payload = { meta_data: [ { key: '_a', value: 'x' }, { key: '_b', value: 'y' }, { key: '_c', value: 'z' } ] };
+
+		expect( writeItem( shown.baseRow( current, metaById ), payload )._wcpl_expect ).toEqual( { 'meta_data._a': 'mine', 'meta_data._b': 'b1' } );
 	} );
 } );
 
