@@ -1,24 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-10
 
-- Quick and bulk edit panel laid out like WooCommerce's Edit product screen: one card per section (Product, Pricing, Buy button, Inventory, Description, then Status and visibility, Organization, and collapsed Shipping, Tax and Advanced cards). A form 760 px or wider has a main and a side column; a narrower one is a single column in task order (Product, Pricing, Inventory, Status, Organization, Description, then the settings). The column count follows the form's own width, not the viewport.
-- Paired fields side by side (regular and sale price, sale dates, stock quantity and status, backorders and low stock threshold), stacking when the card is narrow. SKU is under Inventory, Virtual under Shipping, Downloadable under Advanced, and there is one Shipping section.
-- The "apply to variations" checkbox is the first row of Pricing (and of a language tab's Prices), not a box above the tabs; the Pricing card is there whenever a variable product is selected, so ticking it no longer reflows the form. Corrected plural: "Prices will change on 51 variations of 1 variable product".
-- A collapsed card opens for a field with a pending edit or a problem, shows " •" when it holds a pending edit, and a field focused from the problem list (or the first invalid one on Update) opens its card first.
-- Language tabs: Translation, Prices (with the currency) and SEO cards; labels inside the form drop the language name. The tab strip stays in view while the form scrolls.
-- WooCommerce wording in the form: Stock status, Stock quantity, Allow backorders?; helper texts on a variation's status and a variable product's Manage stock.
-- Quick edit of a variable product, "Set the price of all its variations": the prices take the bulk operations (regular price minus 20 %, decrease by %, rounding), the note shows the variations' current regular price and how many are on sale, and the existing-sales choice, "only lower" and the change summary apply as in bulk edit.
-- Stock status is no longer offered for variable products (WooCommerce derives it from the variations) and is not sent to a row that manages stock (WooCommerce sets it from the quantity); a quick edit with Manage stock on hides it, and a bulk edit says which rows it skips. Before, the save reported success and nothing changed.
-- No "Also apply to the variations" box when every variation of the selected variable product is selected too.
-- Bulk edit opens on General (or the filtered language), not on the tab the last quick edit used; quick edits still remember their tab.
+New layout for the quick and bulk edit panel, following WooCommerce's Edit product screen. It replaces the three equal columns (General, Organization, Pricing) that were hard to scan, repeated the Shipping heading and put the apply-to-variations box above the tabs.
+
+### Layout
+- One card per section. Main column: Product (name, slug, short description), Pricing, Buy button, Inventory, Description. Side column: Status and visibility, Organization (categories, tags, brands), then Shipping, Tax and Advanced, which start collapsed and stay in the side column in every quick and bulk edit.
+- The form takes two columns from 720 px of its own width (it follows the form, not the window); narrower panels are one column in task order: Product, Pricing, Status and visibility, Organization, Inventory, Description, then the settings. Tab order follows what is on screen. The panel opens at least 880 px wide until its edge is dragged, so a 1280-1440 px laptop gets the side column.
+- Fields where a manager expects them: SKU under Inventory, Virtual under Shipping, Downloadable under Advanced, Status beside Catalog visibility and Featured, and a single Shipping section. Paired fields sit side by side and stack when narrow (regular and sale price, sale dates, stock quantity and status, backorders and low stock threshold). WooCommerce wording: Stock status, Stock quantity, Allow backorders?
+- The "apply to variations" checkbox leads the Pricing card (and a language's Prices card) instead of a box above the tabs, with a corrected plural ("Prices will change on 51 variations of 1 variable product").
+- A collapsed card opens for a pending edit or a problem and shows " •" while it holds a pending edit; a field focused from the problem list opens its card first. Long texts show their first lines until focused and do not capture the mouse wheel.
+- Language tabs are split into Translation, Prices (with the currency) and SEO cards and drop the language name from labels. The tab strip stays on one row, scrolls sideways when narrow and stays in view while the form scrolls. A language's "Default:" hint shows unsaved General text.
+- The panel starts below a wrapped admin toolbar, a snackbar over a wide panel rises above the Update / Cancel footer, and sale times keep room for "hh.mm".
+
+### Editing
+- Quick edit of a variable product with "Set the price of all its variations" ticked offers the bulk price operations (regular price minus 20 %, `r-20%`, rounding), shows the variations' current regular price and how many are on sale, and runs the existing-sales choice, "only lower" and the change summary as bulk edit does.
+- Bulk price operations: the operation select has its own row, rounding sits beside the value, and the note slot keeps its height, so typing "r-20%" moves nothing below.
+- Stock: quick edit shows Stock quantity, Allow backorders? and Low stock threshold only with Manage stock ticked, and bulk edit does the same when no selected item manages stock. Stock status is not offered for variable products and is not sent to rows that manage stock (WooCommerce sets it from the quantity); before, the save reported success and nothing changed. Inventory explains why and offers "Set Stock quantity to 0" (which keeps focus and becomes its own Undo) or, for variable products, selecting their variations.
+- No "Also apply to the variations" box when every variation of the selected variable product is selected too. Bulk edit opens on General (or the filtered language); quick edits still remember their tab. The bulk item list starts folded above 5 items, and a greyed-out Update says why.
 - A variation's tax class stored as "parent" no longer raises a false "changed by someone else" notice after a save.
-- Short description sits under the name in quick edit; long texts show their first lines until focused, so Pricing stays in view. Shipping, Tax and Advanced end the shorter column (the main one in bulk edit). Every card with a pending edit shows " •". The bulk item list starts folded above 5 items. Sale times keep room for "hh.mm" and wrap under the date when narrow. A snackbar over a wide panel rises above its Update / Cancel footer. Shorter language tools summary ("Svenska tools (5)"). Change summary plural ("on 1 row").
-- The panel opens at least 880 px wide (within its limits) until the user drags its edge, and the form takes two columns from 720 px, so a 1280-1440 px laptop gets the side column (Status, Categories). In one column, Status and visibility and Organization come right after Pricing, before Inventory.
-- Quick edit: Stock quantity, Allow backorders? and Low stock threshold show only once Manage stock is ticked, as on WooCommerce's product screen ("Track stock quantity for this product.").
-- Bulk stock status is not offered when no selected row would take it; Inventory says why and what to do instead ("Set Stock quantity to 0", or for variable products: select their variations). Why a stock edit is skipped, the existing-sales choice and "only lower" now sit at the end of the Inventory and Pricing cards, and a greyed-out Update says why next to it.
-- Bulk price operations: the operation select has its own row (no more "Regular pr…"), the rounding sits beside the value, the direction appears only once a rounding is picked, and "Reads as" shares the note's reserved slot: no empty band and no jump while typing "r-20%".
-- A long text that is not focused no longer scrolls inside: the mouse wheel over it scrolls the panel. Language tools summary names the tools. A language tab's "Default:" hint shows the General tab's unsaved text ("Default (not saved yet): …").
 
 ## 0.2.4 - 2026-10-10
 
