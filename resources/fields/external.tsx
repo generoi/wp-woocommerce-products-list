@@ -13,7 +13,7 @@ export function createExternalFields( _settings: Settings ): ProductField[] {
 			getValue: ( { item } ) => valueOf( item, 'external_url' ) ?? '',
 			rest: { applies: { product: true, variation: false } },
 			productTypes: [ 'external' ],
-			edit: { group: 'general', bulk: 'default', order: 15 },
+			edit: { group: 'external', bulk: 'default', order: 15 },
 		} ),
 		field( {
 			id: 'button_text',
@@ -24,7 +24,7 @@ export function createExternalFields( _settings: Settings ): ProductField[] {
 			getValue: ( { item } ) => valueOf( item, 'button_text' ) ?? '',
 			rest: { applies: { product: true, variation: false } },
 			productTypes: [ 'external' ],
-			edit: { group: 'general', bulk: 'default', order: 16 },
+			edit: { group: 'external', bulk: 'default', order: 16 },
 		} ),
 	];
 }

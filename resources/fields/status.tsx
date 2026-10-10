@@ -21,6 +21,6 @@ export function createStatusField( settings: Settings ): ProductField {
 		render: ( { item } ) => <OptionCell value={ item.status } options={ item._kind === 'variation' ? VARIATION_STATUSES : settings.statuses } />,
 		getValue: ( { item } ) => item.status ?? '',
 		rest: { sortParam: 'post_status', applies: { product: true, variation: true } },
-		edit: { group: 'general', bulk: 'default', order: 90 },
+		edit: { group: 'visibility', bulk: 'default', order: 49 },
 	} );
 }

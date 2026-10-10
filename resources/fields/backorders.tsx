@@ -15,6 +15,6 @@ export function createBackordersField( settings: Settings ): ProductField {
 		getValue: ( { item } ) => item.backorders ?? 'no',
 		rest: { applies: { product: true, variation: true } },
 		productTypes: [ ...PHYSICAL_TYPES ],
-		edit: { group: 'inventory', bulk: 'default', order: 33 },
+		edit: { group: 'inventory', bulk: 'default', order: 33, label: __( 'Allow backorders?', 'wp-woocommerce-products-list' ) },
 	} );
 }

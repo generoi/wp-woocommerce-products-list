@@ -187,7 +187,7 @@ describe( 'market price tool', () => {
 		const items = [ variable( 10 ) ];
 		const { rerender } = render( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ items } settings={ settings } run={ run } onDone={ vi.fn() } /> );
 
-		expect( screen.getByText( /Variable products have no prices of their own\. Tick "Apply price and sale fields to all variations"/ ) ).toBeInTheDocument();
+		expect( screen.getByText( /Variable products have no prices of their own\. Tick "Also apply to the variations" in Prices/ ) ).toBeInTheDocument();
 		expect( screen.queryByText( /variations have no name or SEO fields/ ) ).toBeNull();
 
 		rerender( <LanguageTools tabId="i18n:se" tabLabel="Svenska" items={ items } settings={ settings } run={ run } onDone={ vi.fn() } applyToVariations parentVariations={ [ variation( 11, 10 ), variation( 12, 10 ) ] } /> );

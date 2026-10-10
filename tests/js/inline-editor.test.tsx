@@ -681,14 +681,14 @@ describe( 'InlineEditor, round 4', () => {
 		renderEditor( parents, { fields: priced as typeof fields } );
 
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
-		await screen.findByLabelText( /Apply price and sale fields/ );
+		await screen.findByLabelText( /Also apply to the variations|Set the price of all its variations/ );
 
 		fireEvent.click( screen.getByRole( 'tab', { name: 'SE' } ) );
 		await waitFor( () => expect( ( listProducts as unknown as ReturnType< typeof vi.fn > ).mock.calls.some( ( [ query ] ) => ! String( query._fields ).includes( 'type' ) ) ).toBe( true ) );
 		await waitFor( () => expect( screen.getByRole( 'tabpanel' ) ).toHaveAttribute( 'aria-busy', 'false' ) );
 		fireEvent.click( screen.getByRole( 'tab', { name: 'General' } ) );
 
-		expect( screen.getByLabelText( /Apply price and sale fields/ ) ).toBeInTheDocument();
+		expect( screen.getByLabelText( /Also apply to the variations|Set the price of all its variations/ ) ).toBeInTheDocument();
 		expect( screen.getAllByText( 'Variable' ) ).toHaveLength( 2 );
 		expect( screen.getAllByText( 'Omaking Fresh' ).length ).toBeGreaterThan( 0 );
 		expect( screen.queryByText( '#219' ) ).not.toBeInTheDocument();

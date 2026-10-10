@@ -59,7 +59,9 @@ import { LanguageTools, stagedToolIds, toolTargetsLabel } from './language-tools
 import type { StagedTool } from './language-tools';
 import { editTypeOf, isVariableParent, isVariation } from './field-value';
 import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
-import { buildInlineForm, buildTabs, fieldsOfTab, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
+import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, buildTabs, fieldsOfTab, formLabelOf, GENERAL_TAB_ID, tabOf, withScheduleSale } from './form-layouts';
+import { ApplyControlContext, applyControlField } from './apply-control';
+import type { ApplyControlState } from './apply-control';
 import { labelsOf, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
@@ -80,6 +82,7 @@ import { saleScheduleProblems } from './sale-schedule';
 import { clearFlaggedControls, collectInvalidFields, controlForField, flagInvalidControls, focusControl, focusFirstInvalidControl, invalidMessageId, revealInvalidControls, validateFormData } from './validity';
 import type { InvalidField, ValidatedField } from './validity';
 import { isSellableField, visibleEditFields } from './visibility';
+import { useFormColumns } from './use-form-columns';
 
 export interface InlineEditorProps {
 	host: EditorHost;
@@ -201,6 +204,26 @@ function focusFirstControl( root: HTMLElement | null, prefer?: string ): void {
 
 	// The panel's body brings the field into view (clear of its sticky footer, `scroll-padding`); the list behind it stays put.
 	first?.focus();
+}
+
+/**
+ * Run `then` with a control once it can take focus: a control in a
+ * collapsed card (its content is `hidden="until-found"`) opens that card
+ * first, which takes a render or two.
+ */
+function whenControlShown( find: () => HTMLElement | null, then: ( control: HTMLElement | null ) => void, tries = 10 ): void {
+	const control = find();
+	// The card's own toggle, so DataForm keeps track of it being open (the user can close it again).
+	const toggle = control?.closest( '.dataforms-layouts-card__field' )?.querySelector< HTMLElement >( ':scope > [aria-expanded="false"], :scope > * > [aria-expanded="false"]' );
+
+	if ( control && ( toggle || control.closest( '[hidden]' ) ) && tries > 0 ) {
+		toggle?.click();
+		setTimeout( () => whenControlShown( find, then, tries - 1 ), 30 );
+
+		return;
+	}
+
+	then( control );
 }
 
 /** The Update button text for a plan: what will actually be written. */
@@ -770,14 +793,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const tabs = useMemo( () => buildTabs( visibleFields, items, settings ), [ visibleFields, items, settings ] );
 	const tab = useMemo< QuickEditTab >( () => tabs.find( ( entry ) => entry.id === tabId ) ?? tabs[ 0 ] ?? { id: GENERAL_TAB_ID, label: __( 'General', 'wp-woocommerce-products-list' ) }, [ tabs, tabId ] );
-	const form = useMemo( () => buildInlineForm( visibleFields, tab, items, settings ), [ visibleFields, tab, items, settings ] );
+	// The labels inside the form ("Stock status"; "Name" on the Svenska tab): what a control is found by.
+	const controlLabels = useMemo( () => Object.fromEntries( editFields.map( ( field ) => [ field.id, formLabelOf( field, settings ) ] ) ), [ editFields, settings ] );
 	const formFields = useMemo(
-		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds } ),
+		() => toFormFields( visibleFields, { bulk, items, base: state.data, mixed: state.mixed, settings, pending: pendingFieldIds, labels: controlLabels } ),
 		// state.data changes on every keystroke; the placeholders only need the merged base, which state.mixed tracks.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds ]
+		[ visibleFields, bulk, items, state.mixed, settings, pendingFieldIds, controlLabels ]
 	);
-	const { validity, isValid } = useFormValidity< FormData >( state.data, formFields, form );
 
 	// A tab visited for the first time loads its fields; the rows merge in object by object.
 	useEffect( () => {
@@ -1022,6 +1045,61 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const tabLabels = useMemo( () => Object.fromEntries( tabs.map( ( entry ) => [ entry.id, entry.label ] ) ), [ tabs ] );
 	const fieldTab = useCallback( ( fieldId: string ) => editFields.find( ( field ) => field.id === fieldId ), [ editFields ] );
 
+	// The apply-to-variations checkbox leads Pricing (and a language's Prices) whenever a variable product is selected, so
+	// the card is there before a price field is and ticking it never makes the form jump.
+	const applyLabel = bulk
+		? sprintf(
+				/* translators: %d: number of variable products */
+				_n( 'Also apply to the variations of the %d variable product', 'Also apply to the variations of the %d variable products', variableParents.length, 'wp-woocommerce-products-list' ),
+				variableParents.length
+		  )
+		: __( 'Set the price of all its variations', 'wp-woocommerce-products-list' );
+	const applyField = useMemo( () => applyControlField( applyLabel ), [ applyLabel ] );
+	const formLeads = useMemo< Record< string, string[] > | undefined >( () => {
+		if ( variableParents.length === 0 ) {
+			return undefined;
+		}
+
+		const section = tab.id === GENERAL_TAB_ID ? 'pricing' : tab.id.startsWith( 'i18n:' ) && editFields.some( ( field ) => tabOf( field ) === tab.id && isSellableField( field ) ) ? 'prices' : null;
+
+		return section ? { [ section ]: [ APPLY_TO_VARIATIONS_FIELD_ID ] } : undefined;
+	}, [ variableParents.length, tab.id, editFields ] );
+	const dataFormFields = useMemo( () => ( formLeads ? [ ...formFields, applyField ] : formFields ), [ formLeads, formFields, applyField ] );
+
+	// Collapsed cards open for a field with a pending edit or a problem, and that stays so for this selection: a card
+	// never closes under the user because an edit was typed back or an error went away. (A field focused from the
+	// problem list, or the first invalid one on Update, opens its card itself: whenControlShown.)
+	const openedRef = useRef< { key: string; ids: string[] } >( { key: selectionKey, ids: [] } );
+
+	if ( openedRef.current.key !== selectionKey ) {
+		openedRef.current = { key: selectionKey, ids: [] };
+	}
+
+	const openTriggers = [ ...Object.keys( pendingEdits ), ...invalidFields.map( ( entry ) => entry.field ), ...errors.map( ( entry ) => entry.field ?? '' ) ].filter( Boolean );
+	const openedIds = openedRef.current.ids;
+
+	for ( const id of openTriggers ) {
+		if ( ! openedIds.includes( id ) ) {
+			openedIds.push( id );
+		}
+	}
+
+	const openKey = [ ...openedIds ].sort().join( '|' );
+	const pendingKey = Object.keys( pendingEdits ).sort().join( '|' );
+	const formColumns = useFormColumns( formRef );
+	const form = useMemo(
+		() =>
+			buildInlineForm( visibleFields, tab, items, settings, {
+				columns: formColumns.columns,
+				open: new Set( openKey.split( '|' ) ),
+				pending: new Set( pendingKey.split( '|' ) ),
+				leads: formLeads,
+				bulk,
+			} ),
+		[ visibleFields, tab, items, settings, formColumns.columns, openKey, pendingKey, formLeads, bulk ]
+	);
+	const { validity, isValid } = useFormValidity< FormData >( state.data, dataFormFields, form );
+
 	// The rows the user sees (committed render): a field's first change is made on these values.
 	useLayoutEffect( () => {
 		renderedRowsRef.current = applyToVariations && variations.status === 'loaded' ? [ ...items, ...Array.from( variations.byParent.values() ).flat() ] : items;
@@ -1155,7 +1233,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const nextRow = useMemo( () => ( bulk || ! selectedRows[ 0 ] ? null : nextRowOnScreen( selectedRows[ 0 ].id ) ), [ bulk, selectedRows ] );
 
-	/** Focus a field from the problem list: its tab first, then its control. */
+	/** Focus a field from the problem list: its tab first, then its card opened, then its control. */
 	const focusField = useCallback(
 		( fieldId: string ) => {
 			const field = fieldTab( fieldId );
@@ -1166,11 +1244,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 			setTimeout( () => {
 				if ( mountedRef.current ) {
-					focusControl( controlForField( formRef.current, fieldLabels[ fieldId ] ?? fieldId ) );
+					whenControlShown( () => controlForField( formRef.current, controlLabels[ fieldId ] ?? fieldId ), ( control ) => mountedRef.current && focusControl( control ) );
 				}
 			}, 0 );
 		},
-		[ fieldTab, tab.id, fieldLabels ]
+		[ fieldTab, tab.id, controlLabels ]
 	);
 
 	/**
@@ -1217,7 +1295,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		// The browser's wording when the control has one, so the list says what the field says.
 		const worded = invalid.map( ( entry ) => {
-			const control = controlForField( formRef.current, fieldLabels[ entry.field ] ?? entry.field ) as HTMLInputElement | null;
+			const control = controlForField( formRef.current, controlLabels[ entry.field ] ?? entry.field ) as HTMLInputElement | null;
 			const native = control && typeof control.validationMessage === 'string' ? control.validationMessage : '';
 
 			return native ? { ...entry, message: native } : entry;
@@ -1252,12 +1330,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 			const controls = flagInvalidControls(
 				formRef.current,
-				worded.map( ( entry ) => ( { field: entry.field, label: fieldLabels[ entry.field ] ?? entry.field } ) )
+				worded.map( ( entry ) => ( { field: entry.field, label: controlLabels[ entry.field ] ?? entry.field } ) )
 			);
 
-			if ( ! focusControl( controls[ 0 ] ?? null ) && ! focusFirstInvalidControl( formRef.current ) ) {
-				focusWithin( rootRef.current, '.wc-pl-edit__errors' );
-			}
+			// The first one may sit in a collapsed card that opens with this render (its content takes no focus until then).
+			whenControlShown(
+				() => controls[ 0 ] ?? null,
+				( control ) => {
+					if ( mountedRef.current && ! focusControl( control ) && ! focusFirstInvalidControl( formRef.current ) ) {
+						focusWithin( rootRef.current, '.wc-pl-edit__errors' );
+					}
+				}
+			);
 		}, 0 );
 
 		return true;
@@ -1315,7 +1399,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			flagInvalidControls(
 				root,
 				Array.from( flagged.keys() ).map( ( field ) => {
-					const label = fieldLabels[ field ] ?? field;
+					const label = controlLabels[ field ] ?? field;
 
 					// A bulk numeric field is an operation select and a value input: the value is what is wrong.
 					return { field, label: controlForField( root, `${ label }: value` ) ? `${ label }: value` : label };
@@ -1947,7 +2031,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						if ( mountedRef.current ) {
 							flagInvalidControls(
 								formRef.current,
-								flagged.map( ( entry ) => ( { field: entry.field, label: fieldLabels[ entry.field ] ?? entry.field } ) )
+								flagged.map( ( entry ) => ( { field: entry.field, label: controlLabels[ entry.field ] ?? entry.field } ) )
 							);
 						}
 					}, 0 );
@@ -2233,6 +2317,27 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	const variationNote = ( () => {
 		if ( ! applyToVariations ) {
 			// Prices show for the rest of the selection; say who they skip and how to include them.
+			if ( ! bulk ) {
+				const count = variableParents.reduce( ( sum, parent ) => sum + ( Number( parent._childCount ) || 0 ), 0 );
+
+				return (
+					<span className="wc-pl-edit__note">
+						{ count > 0
+							? sprintf(
+									/* translators: %d: number of variations */
+									_n(
+										'Variable products are priced per variation. Tick to set one price for its %d variation, or quick edit a single variation.',
+										'Variable products are priced per variation. Tick to set one price for all %d variations, or quick edit a single variation.',
+										count,
+										'wp-woocommerce-products-list'
+									),
+									count
+							  )
+							: __( 'Variable products are priced per variation. Tick to set one price for all its variations, or quick edit a single variation.', 'wp-woocommerce-products-list' ) }
+					</span>
+				);
+			}
+
 			return sellableShown ? (
 				<span className="wc-pl-edit__note">
 					{ sprintf(
@@ -2246,7 +2351,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						variableParents.length
 					) }
 				</span>
-			) : null;
+			) : (
+				<span className="wc-pl-edit__note">
+					{ __( 'Variable products are priced per variation. Tick to set the price and sale fields on all their variations.', 'wp-woocommerce-products-list' ) }
+				</span>
+			);
 		}
 
 		if ( variations.status === 'loading' ) {
@@ -2276,10 +2385,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			return (
 				<span className="wc-pl-edit__note">
 					{ sprintf(
-						/* translators: 1: number of variations, 2: number of variable products */
-						__( 'Price and sale fields will apply to %1$d variations of %2$d variable products.', 'wp-woocommerce-products-list' ),
-						variations.count,
-						variableParents.length
+						/* translators: 1: "N variations", 2: "N variable products" */
+						__( 'Prices will change on %1$s of %2$s.', 'wp-woocommerce-products-list' ),
+						sprintf(
+							/* translators: %d: number of variations */
+							_n( '%d variation', '%d variations', variations.count, 'wp-woocommerce-products-list' ),
+							variations.count
+						),
+						sprintf(
+							/* translators: %d: number of variable products */
+							_n( '%d variable product', '%d variable products', variableParents.length, 'wp-woocommerce-products-list' ),
+							variableParents.length
+						)
 					) }
 				</span>
 			);
@@ -2287,6 +2404,24 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		return null;
 	} )();
+
+	const applyControl = useMemo< ApplyControlState >(
+		() => ( {
+			checked: applyToVariations,
+			label: applyLabel,
+			note: variationNote,
+			disabled: saving,
+			onToggle: ( checked: boolean ) => {
+				setApplyToVariations( checked );
+				setErrors( [] );
+				setWarnings( [] );
+				setAcknowledged( null );
+			},
+		} ),
+		// The note is rebuilt every render; what it shows follows these.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk ]
+	);
 
 	// wc/v3's batch routes need edit_others_products (woocommerce_rest_cannot_batch);
 	// one row goes through POST products/{id} instead (api/client.ts), several cannot.
@@ -2589,24 +2724,6 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					</Notice>
 				) : null }
 
-				{ variableParents.length > 0 ? (
-					<div className="wc-pl-edit__options">
-						<CheckboxControl
-							__nextHasNoMarginBottom
-							label={ __( 'Apply price and sale fields to all variations of the selected variable products', 'wp-woocommerce-products-list' ) }
-							checked={ applyToVariations }
-							disabled={ saving }
-							onChange={ ( checked ) => {
-								setApplyToVariations( checked );
-								setErrors( [] );
-								setWarnings( [] );
-								setAcknowledged( null );
-							} }
-						/>
-						{ variationNote }
-					</div>
-				) : null }
-
 				{ tabs.length > 1 ? (
 					<div className="wc-pl-edit__tabs" role="tablist" aria-label={ __( 'Edit sections', 'wp-woocommerce-products-list' ) } onKeyDown={ onTabKeyDown }>
 						{ tabs.map( ( entry ) => {
@@ -2667,7 +2784,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				<div
 					ref={ formRef }
 					id={ PANEL_ID }
-					className="wc-pl-edit__form"
+					className={ `wc-pl-edit__form is-${ formColumns.columns === 2 ? 'wide' : 'single' }${ formColumns.narrow ? ' is-narrow' : '' }` }
 					role={ tabs.length > 1 ? 'tabpanel' : undefined }
 					aria-labelledby={ tabs.length > 1 ? `wc-pl-edit-tab-${ tab.id }` : undefined }
 					aria-busy={ ! tabReady }
@@ -2684,7 +2801,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					{ ! formShown ? (
 						<p>{ __( 'The selected rows share no editable fields.', 'wp-woocommerce-products-list' ) }</p>
 					) : (
-						<DataForm< FormData > data={ state.data } fields={ formFields } form={ form } onChange={ onChange } validity={ validity } />
+						<ApplyControlContext.Provider value={ applyControl }>
+							<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+						</ApplyControlContext.Provider>
 					) }
 				</div>
 

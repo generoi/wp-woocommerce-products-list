@@ -13,6 +13,6 @@ export function createFeaturedField( _settings: Settings ): ProductField {
 		render: ( { item } ) => <BooleanCell value={ valueOf( item, 'featured' ) } />,
 		getValue: ( { item } ) => valueOf( item, 'featured' ) === true,
 		rest: { param: 'featured', applies: { product: true, variation: false } },
-		edit: { group: 'visibility', bulk: 'default', order: 50 },
+		edit: { group: 'visibility', bulk: 'default', order: 52 },
 	} );
 }

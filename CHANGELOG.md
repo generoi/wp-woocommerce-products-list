@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Quick and bulk edit panel laid out like WooCommerce's Edit product screen: one card per section (Product, Pricing, Buy button, Inventory, Description, then Status and visibility, Organization, and collapsed Shipping, Tax and Advanced cards). A form 760 px or wider has a main and a side column; a narrower one is a single column in task order (Product, Pricing, Inventory, Status, Organization, Description, then the settings). The column count follows the form's own width, not the viewport.
+- Paired fields side by side (regular and sale price, sale dates, stock quantity and status, backorders and low stock threshold), stacking when the card is narrow. SKU is under Inventory, Virtual under Shipping, Downloadable under Advanced, and there is one Shipping section.
+- The "apply to variations" checkbox is the first row of Pricing (and of a language tab's Prices), not a box above the tabs; the Pricing card is there whenever a variable product is selected, so ticking it no longer reflows the form. Corrected plural: "Prices will change on 51 variations of 1 variable product".
+- A collapsed card opens for a field with a pending edit or a problem, shows " •" when it holds a pending edit, and a field focused from the problem list (or the first invalid one on Update) opens its card first.
+- Language tabs: Translation, Prices (with the currency) and SEO cards; labels inside the form drop the language name. The tab strip stays in view while the form scrolls.
+- WooCommerce wording in the form: Stock status, Stock quantity, Allow backorders?; helper texts on a variation's status and a variable product's Manage stock.
+
 ## 0.2.4 - 2026-10-10
 
 - Translation grid: an edit typed back to its original keeps the value it was typed over, so a later keystroke cannot expect a value the input never showed and write over another user's change (f88dcbe).

@@ -177,6 +177,8 @@ export interface ProductField< Item = ProductListItem > extends Field< Item > {
 				tab?: string;
 				bulk: BulkMode;
 				order?: number;
+				/** The label inside the edit form when it differs from the column's (WooCommerce's "Stock status" for the "Stock" column). */
+				label?: string;
 		  }
 		| false;
 	/** A read-only companion value shown beside the control (e.g. the default-language name). */

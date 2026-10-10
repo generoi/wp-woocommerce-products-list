@@ -60,7 +60,7 @@ export function createStockStatusField( settings: Settings ): ProductField {
 		},
 		getValue: ( { item } ) => item.stock_status ?? '',
 		rest: { fields: [ 'stock_status', 'stock_quantity', 'manage_stock' ], param: 'stock_status', sortParam: 'stock_quantity', applies: { product: true, variation: true } },
-		edit: { group: 'inventory', bulk: 'default', order: 30 },
+		edit: { group: 'inventory', bulk: 'default', order: 32, label: __( 'Stock status', 'wp-woocommerce-products-list' ) },
 	} );
 }
 

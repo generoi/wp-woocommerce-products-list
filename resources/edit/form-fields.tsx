@@ -23,7 +23,7 @@ import { isSalePriceField, numericKindOf } from './bulk-numeric';
 import { createBulkNumericControl } from './bulk-numeric-control';
 import type { FormData } from './bulk-numeric-control';
 import { createDateTimeControl } from './datetime-control';
-import { isVariation, readFieldValue } from './field-value';
+import { isVariableParent, isVariation, readFieldValue } from './field-value';
 import { mergeReference, MIXED_VALUE, hasOptionList } from './merge';
 import type { MixedState } from './merge';
 import { createMixedBooleanControl } from './mixed-boolean-control';
@@ -45,6 +45,8 @@ export interface FormFieldOptions {
 	settings: Settings;
 	/** Fields whose values are still loading: shown read-only until they are there (nothing is typed over a value the form did not show). */
 	pending?: ReadonlySet< string >;
+	/** The labels the form shows, by field id, where they differ from the field's (formLabelOf in form-layouts.ts). */
+	labels?: Record< string, string >;
 }
 
 /** Variations are Active (publish) or Inactive (private): the list's vocabulary, and what the Enable/Disable actions write. */
@@ -131,10 +133,11 @@ function integerMessage( value: unknown ): string | null {
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
-	const { bulk, items, base, mixed, settings, pending } = options;
+	const { bulk, items, base, mixed, settings, pending, labels } = options;
 	const ids = new Set( fields.map( ( field ) => field.id ) );
 	const rows = items.filter( ( item ) => ! item._placeholder );
 	const onlyVariations = rows.length > 0 && rows.every( isVariation );
+	const onlyVariableParents = rows.length > 0 && rows.every( isVariableParent );
 
 	return fields.map( ( field ) => {
 		const state = mixed[ field.id ];
@@ -146,7 +149,7 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 		const formField: Field< FormData > = {
 			id: field.id,
-			label: field.label ?? field.id,
+			label: labels?.[ field.id ] ?? field.label ?? field.id,
 			type: field.type,
 			description: field.description,
 			placeholder: isMixed ? state?.placeholder : field.placeholder,
@@ -233,6 +236,12 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 		if ( onlyVariations && leaf === 'status' && ! field.Edit ) {
 			formField.elements = VARIATION_STATUS_ELEMENTS;
 			formField.getElements = undefined;
+			formField.description ??= __( 'Inactive variations cannot be bought.', 'wp-woocommerce-products-list' );
+		}
+
+		// A variable product's own stock is the whole product's; restocking sizes happens on the variations.
+		if ( onlyVariableParents && field.id === 'manage_stock' ) {
+			formField.description ??= __( 'Stock for the product as a whole. Each variation (a size, a colour) can keep its own stock.', 'wp-woocommerce-products-list' );
 		}
 
 		// A variation without a class of its own ships like its parent; the product-level "No shipping class" is not a choice here.

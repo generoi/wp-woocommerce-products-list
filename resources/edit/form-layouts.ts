@@ -1,12 +1,16 @@
 /**
  * The inline edit form: a tab strip (General, one tab per extension group
- * such as a language) with labelled groups per field `edit.group`, laid
- * out in up to three columns like WooCommerce's quick edit, derived from
- * the fields themselves so extension fields land in the right place without
- * code. `wcProductsList.quickEdit.tabs` and `.layout` can reshape both.
+ * such as a language) with one card per section, in the order a store
+ * manager works (what it is, what it costs, how much is in stock, how it
+ * is shown and organised, the long texts, then the rarely used settings),
+ * modelled on WooCommerce's Edit product screen: a main column and a side
+ * column when the form is wide, a single column in task order when it is
+ * narrow. Derived from the fields themselves so extension fields land in
+ * the right place without code. `wcProductsList.quickEdit.tabs` and
+ * `.layout` can reshape both.
  */
 import { applyFilters } from '@wordpress/hooks';
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 import type { Form, FormField } from '../dataviews';
 import { getQuickEditTabs } from '../extensions/api';
 import { FILTERS } from '../extensions/hooks';
@@ -14,27 +18,36 @@ import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../t
 import { isVariation } from './field-value';
 import { isEditorHostedAction, LANG_ARG } from './hosted-actions';
 import { SCHEDULE_SALE_FIELD_ID } from './payload';
+import { isSellableField, leafOf } from './visibility';
 
 export const GENERAL_TAB_ID = 'general';
 
 export const GROUP_LABELS: Record< string, string > = {
-	general: __( 'General', 'wp-woocommerce-products-list' ),
+	general: __( 'Product', 'wp-woocommerce-products-list' ),
 	pricing: __( 'Pricing', 'wp-woocommerce-products-list' ),
 	price: __( 'Pricing', 'wp-woocommerce-products-list' ),
 	inventory: __( 'Inventory', 'wp-woocommerce-products-list' ),
 	organization: __( 'Organization', 'wp-woocommerce-products-list' ),
-	visibility: __( 'Visibility', 'wp-woocommerce-products-list' ),
+	visibility: __( 'Status and visibility', 'wp-woocommerce-products-list' ),
 	shipping: __( 'Shipping', 'wp-woocommerce-products-list' ),
 	tax: __( 'Tax', 'wp-woocommerce-products-list' ),
 	external: __( 'Buy button', 'wp-woocommerce-products-list' ),
 	linked: __( 'Linked products', 'wp-woocommerce-products-list' ),
-	content: __( 'Content', 'wp-woocommerce-products-list' ),
+	content: __( 'Description', 'wp-woocommerce-products-list' ),
 	downloads: __( 'Downloads', 'wp-woocommerce-products-list' ),
 	advanced: __( 'Advanced', 'wp-woocommerce-products-list' ),
+	translation: __( 'Translation', 'wp-woocommerce-products-list' ),
+	seo: __( 'SEO', 'wp-woocommerce-products-list' ),
+	prices: __( 'Prices', 'wp-woocommerce-products-list' ),
 };
 
-/** Card order on the General tab; groups not listed follow in first-seen order. */
-export const GROUP_ORDER: readonly string[] = [ 'general', 'pricing', 'price', 'inventory', 'organization', 'visibility', 'shipping', 'tax', 'external', 'linked', 'content', 'downloads', 'advanced' ];
+/**
+ * Field order on a tab (the single-column reading order): what the product
+ * is, what it costs, its stock, how it is shown and organised, its texts,
+ * then the rarely used settings. Groups not listed (an extension's) follow
+ * the texts, in first-seen order.
+ */
+export const GROUP_ORDER: readonly string[] = [ 'general', 'pricing', 'price', 'external', 'inventory', 'visibility', 'organization', 'content', 'translation', 'prices', 'seo', 'shipping', 'tax', 'advanced', 'linked', 'downloads' ];
 
 export function groupOf( field: ProductField ): string {
 	return field.edit ? field.edit.group || 'general' : 'general';
@@ -73,10 +86,13 @@ function orderOf( field: ProductField ): number {
 	return field.edit && typeof field.edit.order === 'number' ? field.edit.order : 100;
 }
 
+/** Where the groups not in GROUP_ORDER (an extension's) go: after the texts, before the rarely used settings. */
+const UNKNOWN_GROUP_RANK = GROUP_ORDER.indexOf( 'seo' ) + 0.5;
+
 function groupRank( group: string, seen: string[] ): number {
 	const index = GROUP_ORDER.indexOf( group );
 
-	return index === -1 ? GROUP_ORDER.length + seen.indexOf( group ) : index;
+	return index === -1 ? UNKNOWN_GROUP_RANK + ( seen.indexOf( group ) + 1 ) / 1000 : index;
 }
 
 /**
@@ -209,137 +225,240 @@ export function buildTabs( fields: ProductField[], items: ProductListItem[], set
 	return Array.isArray( filtered ) ? ( filtered as QuickEditTab[] ) : list;
 }
 
-export interface LayoutOptions {
-	/** Omit the group header when the tab holds a single group (a language tab). */
-	collapseSingleGroup?: boolean;
-}
-
 /**
- * The General tab's columns, as WooCommerce lays its quick edit out: 1 the
- * product itself (name, slug, status, visibility, featured, menu order,
- * content), 2 how it is organised (terms, shipping class, tax), 3 what it
- * sells for and how it is stocked (SKU, prices, sale schedule, stock,
- * weight and dimensions). Groups not listed go to column 2.
+ * A form-only control field: the "apply to variations" checkbox shown as
+ * the first row of Pricing. It sits in DataForm's field list only, never in
+ * the edit fields, the form data or the payload (inline-editor.tsx).
  */
-export const COLUMN_OF_GROUP: Record< string, 1 | 2 | 3 > = {
-	general: 1,
-	visibility: 1,
-	content: 1,
-	external: 1,
-	linked: 1,
-	advanced: 1,
-	downloads: 1,
-	organization: 2,
-	tax: 2,
-	pricing: 3,
-	price: 3,
-	inventory: 3,
-	shipping: 3,
+export const APPLY_TO_VARIATIONS_FIELD_ID = 'wcpl_apply_to_variations';
+
+/** Groups that share a card: `price` is Pricing, linked products and downloads are Advanced settings. */
+const SECTION_OF_GROUP: Record< string, string > = {
+	price: 'pricing',
+	linked: 'advanced',
+	downloads: 'advanced',
 };
 
-/** Fields whose column differs from their group's. */
-export const COLUMN_OF_FIELD: Record< string, 1 | 2 | 3 > = {
-	sku: 3,
-	global_unique_id: 3,
-	shipping_class: 2,
-	virtual: 3,
-	downloadable: 3,
-};
-
-/** The group a column-moved field is shown under (its own group's heading would be out of place in the new column). */
+/** Fields laid out under another section than their own group's (an extension's GTIN beside the SKU). */
 export const LAYOUT_GROUP_OF_FIELD: Record< string, string > = {
-	sku: 'inventory',
 	global_unique_id: 'inventory',
-	virtual: 'inventory',
-	downloadable: 'inventory',
-	shipping_class: 'shipping',
 };
 
-export function columnOf( field: ProductField ): 1 | 2 | 3 {
-	return COLUMN_OF_FIELD[ field.id ] ?? COLUMN_OF_GROUP[ groupOf( field ) ] ?? 2;
-}
+/** Sections of the side column when the form is wide, as WooCommerce's Edit product sidebar. */
+export const SIDE_GROUPS: ReadonlySet< string > = new Set( [ 'visibility', 'organization', 'shipping', 'tax', 'advanced', 'linked', 'downloads', 'prices', 'seo' ] );
 
-/** The group a field is laid out under in the inline form. */
-export function layoutGroupOf( field: ProductField ): string {
-	return LAYOUT_GROUP_OF_FIELD[ field.id ] ?? groupOf( field );
-}
+/** Rarely used sections: a collapsed card, opened by the user or by an edit, a problem or a focus request inside. */
+export const COLLAPSED_GROUPS: ReadonlySet< string > = new Set( [ 'shipping', 'tax', 'advanced', 'linked', 'downloads' ] );
 
-/** A multi-line control (descriptions): on a language tab these take the second column. */
+/** Section order in a single column: Status and Organization come before the long descriptions. */
+export const NARROW_ORDER: readonly string[] = GROUP_ORDER;
+
+/** Section order when wide: the main column (the work), then the side column (the settings); prices come before SEO. */
+export const SECTION_ORDER: readonly string[] = [ 'general', 'pricing', 'external', 'inventory', 'content', 'translation', 'visibility', 'organization', 'prices', 'seo', 'shipping', 'tax', 'advanced' ];
+
+/** Fields shown side by side (by the last id segment, so a language's prices pair too); they stack when the card is narrow. */
+export const FIELD_PAIRS: ReadonlyArray< readonly [ string, string ] > = [
+	[ 'regular_price', 'sale_price' ],
+	[ 'date_on_sale_from', 'date_on_sale_to' ],
+	[ 'sku', 'global_unique_id' ],
+	[ 'stock_quantity', 'stock_status' ],
+	[ 'backorders', 'low_stock_amount' ],
+	[ 'weight', 'dimensions' ],
+];
+
+/** A language tab's translated texts; its prices go to Prices and the rest (SEO titles and descriptions) to SEO. */
+const TRANSLATION_LEAVES: ReadonlySet< string > = new Set( [ 'name', 'slug', 'short_description', 'description' ] );
+
+/** A collapsed card's header value (quick edit only: in bulk one row's value would mislead). */
+const SECTION_SUMMARY: Record< string, string > = {
+	shipping: 'shipping_class',
+	tax: 'tax_status',
+};
+
+/** A multi-line control (descriptions): on a language tab these are the translation. */
 function isLongText( field: ProductField ): boolean {
 	const edit = field.Edit as { control?: string } | undefined;
 
-	return ( field.type as string ) === 'html' || ( typeof edit === 'object' && edit !== null && edit.control === 'textarea' );
+	return ( field.type as string ) === 'html' || field.html === true || ( typeof edit === 'object' && edit !== null && edit.control === 'textarea' );
 }
 
-/** The columns of a tab: the General tab by group and field, other tabs short controls left and long ones right. */
-export function columnsOfTab( fields: ProductField[], tab: QuickEditTab ): ProductField[][] {
-	const tabFields = fieldsOfTab( fields, tab );
+function isLanguageTab( tab: QuickEditTab ): boolean {
+	return tab.id.startsWith( 'i18n:' );
+}
 
-	if ( tab.id === GENERAL_TAB_ID ) {
-		const columns: ProductField[][] = [ [], [], [] ];
+/** The section (card) a field is laid out under on `tab`. */
+export function layoutGroupOf( field: ProductField, tab?: QuickEditTab ): string {
+	if ( tab && isLanguageTab( tab ) ) {
+		const leaf = leafOf( field.id );
 
-		for ( const field of tabFields ) {
-			columns[ columnOf( field ) - 1 ]!.push( field );
+		if ( isSellableField( field ) || leaf === SCHEDULE_SALE_FIELD_ID ) {
+			return 'prices';
 		}
 
-		return columns.filter( ( column ) => column.length > 0 );
+		return TRANSLATION_LEAVES.has( leaf ) || isLongText( field ) ? 'translation' : 'seo';
 	}
 
-	const short = tabFields.filter( ( field ) => ! isLongText( field ) );
-	const long = tabFields.filter( isLongText );
+	const group = LAYOUT_GROUP_OF_FIELD[ field.id ] ?? groupOf( field );
 
-	return [ short, long ].filter( ( column ) => column.length > 0 );
+	return SECTION_OF_GROUP[ group ] ?? group;
 }
 
-/** One labelled group per `edit.group` in `column`, in the tab's order; the header is dropped when the tab has one group. */
-function groupFields( column: ProductField[], settings: Settings, withHeaders: boolean ): FormField[] {
-	const groups = new Map< string, string[] >();
-	const seen = column.map( layoutGroupOf ).filter( ( group, index, all ) => all.indexOf( group ) === index );
-	const ordered = [ ...column ].sort( ( a, b ) => groupRank( layoutGroupOf( a ), seen ) - groupRank( layoutGroupOf( b ), seen ) );
+/** Whether a section sits in the side column when the form is wide. */
+export function isSideGroup( group: string ): boolean {
+	return SIDE_GROUPS.has( group );
+}
 
-	for ( const field of ordered ) {
-		const group = layoutGroupOf( field );
-		const ids = groups.get( group ) ?? [];
+/** Whether a section starts collapsed. */
+export function isCollapsedGroup( group: string ): boolean {
+	return COLLAPSED_GROUPS.has( group );
+}
 
-		ids.push( field.id );
-		groups.set( group, ids );
+/** The sections of a tab, each with its fields in `edit.order`, in single-column order. */
+export function sectionsOfTab( fields: ProductField[], tab: QuickEditTab, leads: Record< string, string[] > = {} ): Array< { group: string; fields: string[] } > {
+	const tabFields = fieldsOfTab( fields, tab );
+	const sections = new Map< string, string[] >();
+
+	for ( const [ group, ids ] of Object.entries( leads ) ) {
+		if ( ids.length ) {
+			sections.set( group, [ ...ids ] );
+		}
 	}
 
-	return Array.from( groups.entries() ).map( ( [ group, children ] ) => ( {
-		id: `group:${ group }`,
-		...( withHeaders ? { label: groupLabel( group, settings ) } : {} ),
-		layout: { type: 'regular', labelPosition: 'top' },
-		children,
-	} ) );
+	const seen: string[] = [];
+
+	tabFields
+		.map( ( field, index ) => ( { field, index, group: layoutGroupOf( field, tab ) } ) )
+		.sort( ( a, b ) => orderOf( a.field ) - orderOf( b.field ) || a.index - b.index )
+		.forEach( ( { field, group } ) => {
+			if ( ! seen.includes( group ) ) {
+				seen.push( group );
+			}
+
+			sections.set( group, [ ...( sections.get( group ) ?? [] ), field.id ] );
+		} );
+
+	return Array.from( sections.entries() )
+		.map( ( [ group, ids ] ) => ( { group, fields: ids } ) )
+		.sort( ( a, b ) => groupRank( a.group, seen ) - groupRank( b.group, seen ) );
+}
+
+/** A section's children: field ids, with the pairs as `row` layouts (aligned at the top so uneven help texts do not shift the inputs). */
+function sectionChildren( ids: string[] ): Array< string | FormField > {
+	const present = new Set( ids );
+	const used = new Set< string >();
+	const children: Array< string | FormField > = [];
+
+	for ( const id of ids ) {
+		if ( used.has( id ) ) {
+			continue;
+		}
+
+		const leaf = leafOf( id );
+		const prefix = id.slice( 0, id.length - leaf.length );
+		const pair = FIELD_PAIRS.find( ( entry ) => entry.includes( leaf ) );
+		const partner = pair ? `${ prefix }${ pair[ 0 ] === leaf ? pair[ 1 ] : pair[ 0 ] }` : null;
+
+		if ( pair && partner && present.has( partner ) && ! used.has( partner ) ) {
+			const [ first, second ] = pair[ 0 ] === leaf ? [ id, partner ] : [ partner, id ];
+
+			used.add( first );
+			used.add( second );
+			children.push( { id: `pair:${ first }`, layout: { type: 'row', alignment: 'start' }, children: [ first, second ] } );
+			continue;
+		}
+
+		used.add( id );
+		children.push( id );
+	}
+
+	return children;
+}
+
+export interface LayoutOptions {
+	/** How many columns the form is wide enough for (measured on the form itself): 2 puts the settings in a side column. */
+	columns?: 1 | 2;
+	/** Fields whose section opens even when it starts collapsed: a pending edit, a problem, a focus request. */
+	open?: ReadonlySet< string >;
+	/** Fields that open their section's card, by section (the apply-to-variations control first in Pricing); the card is kept even when it has nothing else. */
+	leads?: Record< string, string[] >;
+	/** Fields with a pending edit: a collapsible card holding one says so in its title (" •", as the tabs do). */
+	pending?: ReadonlySet< string >;
+	/** A bulk edit: no value summaries in the collapsed headers (one row's value would mislead). */
+	bulk?: boolean;
+}
+
+/** The card title of a section; on a General tab of a translated shop, the texts say which language they are. */
+function sectionLabel( group: string, tab: QuickEditTab, settings: Settings ): string {
+	const languages = settings.languages;
+
+	if ( group === 'prices' && isLanguageTab( tab ) ) {
+		const currency = languages?.currencies?.[ tab.id.slice( 'i18n:'.length ) ];
+
+		/* translators: %s: currency code, e.g. SEK */
+		return currency ? sprintf( __( 'Prices (%s)', 'wp-woocommerce-products-list' ), currency ) : groupLabel( group, settings );
+	}
+
+	if ( tab.id === GENERAL_TAB_ID && languages && languages.others.length > 0 && ( group === 'general' || group === 'content' ) ) {
+		const source = languages.labels[ languages.default ] ?? languages.default.toUpperCase();
+
+		/* translators: 1: section title (Product, Description), 2: the shop's default language */
+		return sprintf( __( '%1$s · %2$s', 'wp-woocommerce-products-list' ), groupLabel( group, settings ), source );
+	}
+
+	return groupLabel( group, settings );
 }
 
 /**
- * The DataForm layout of a tab for the inline editor: the groups of
- * `columnsOfTab` side by side (DataForm's row layout, each column a
- * regular group of its labelled groups), or a single column when the tab
- * has one. `wcProductsList.quickEdit.layout` runs last.
+ * The DataForm layout of a tab for the inline editor: one card per section
+ * (the rarely used ones collapsed), with paired fields side by side. When
+ * the form is wide, a main column (the product, its prices, stock and
+ * texts) and a side column (status, organization and settings), as
+ * WooCommerce's Edit product screen; else one column in task order. Both
+ * are real containers, so reading and keyboard order are the visual order.
+ * `wcProductsList.quickEdit.layout` runs last.
  */
 export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, items: ProductListItem[], settings: Settings, options: LayoutOptions = {} ): Form {
-	const tabFields = fieldsOfTab( fields, tab );
-	const groupCount = new Set( tabFields.map( groupOf ) ).size;
-	const withHeaders = ! ( groupCount === 1 && options.collapseSingleGroup !== false && tab.id !== GENERAL_TAB_ID );
-	const columns = columnsOfTab( fields, tab );
+	const { columns = 1, open, leads, pending, bulk = false } = options;
+	const sections = sectionsOfTab( fields, tab, leads );
+
+	const cards: Array< { group: string; card: FormField } > = sections.map( ( { group, fields: ids } ) => {
+		const collapsible = isCollapsedGroup( group );
+		const opened = ! collapsible || ids.some( ( id ) => open?.has( id ) );
+		const marked = collapsible && ids.some( ( id ) => pending?.has( id ) );
+		const summary = ! bulk && SECTION_SUMMARY[ group ] && ids.includes( SECTION_SUMMARY[ group ]! ) ? [ SECTION_SUMMARY[ group ]! ] : [];
+
+		return {
+			group,
+			card: {
+				id: `group:${ group }`,
+				label: `${ sectionLabel( group, tab, settings ) }${ marked ? ' •' : '' }`,
+				layout: collapsible ? { type: 'card', isCollapsible: true, isOpened: opened, summary } : { type: 'card', isCollapsible: false },
+				children: sectionChildren( ids ),
+			} as FormField,
+		};
+	} );
 
 	let formFields: FormField[];
 
-	if ( columns.length <= 1 ) {
-		formFields = groupFields( columns[ 0 ] ?? [], settings, withHeaders );
+	const main = cards.filter( ( entry ) => ! isSideGroup( entry.group ) );
+	const side = cards.filter( ( entry ) => isSideGroup( entry.group ) );
+
+	if ( columns === 2 && main.length > 0 && side.length > 0 ) {
+		const rank = ( group: string ) => SECTION_ORDER.indexOf( group ) === -1 ? SECTION_ORDER.indexOf( 'translation' ) + 0.5 : SECTION_ORDER.indexOf( group );
+		const byRank = ( a: { group: string }, b: { group: string } ) => rank( a.group ) - rank( b.group );
+
+		formFields = [
+			{
+				id: 'columns',
+				layout: { type: 'row', alignment: 'start', styles: { 'column:main': { flex: '1.7 1 0' }, 'column:side': { flex: '1 1 0' } } },
+				children: [
+					{ id: 'column:main', layout: { type: 'regular', labelPosition: 'top' }, children: [ ...main ].sort( byRank ).map( ( entry ) => entry.card ) },
+					{ id: 'column:side', layout: { type: 'regular', labelPosition: 'top' }, children: [ ...side ].sort( byRank ).map( ( entry ) => entry.card ) },
+				],
+			},
+		];
 	} else {
-		const styles: Record< string, { flex?: string } > = {};
-		const children: FormField[] = columns.map( ( column, index ) => {
-			const id = `column:${ index + 1 }`;
-
-			styles[ id ] = { flex: '1 1 0' };
-
-			return { id, layout: { type: 'regular', labelPosition: 'top' }, children: groupFields( column, settings, withHeaders ) };
-		} );
-
-		formFields = [ { id: 'columns', layout: { type: 'row', alignment: 'start', styles }, children } ];
+		formFields = cards.map( ( entry ) => entry.card );
 	}
 
 	const form: Form = {
@@ -352,3 +471,32 @@ export function buildInlineForm( fields: ProductField[], tab: QuickEditTab, item
 	return filtered && typeof filtered === 'object' ? ( filtered as Form ) : form;
 }
 
+/**
+ * The label a field carries inside the form: its `edit.label` (WooCommerce's
+ * wording, "Stock status"), else its label without the tab's name on a
+ * language tab ("Name", not "Svenska: Name": the tab already says it). Error
+ * lists, the change summary and the list columns keep the full label.
+ */
+export function formLabelOf( field: ProductField, settings: Settings ): string {
+	const label = field.label ?? field.id;
+
+	if ( field.edit && field.edit.label ) {
+		return field.edit.label;
+	}
+
+	const tab = tabOf( field );
+
+	if ( tab === GENERAL_TAB_ID ) {
+		return label;
+	}
+
+	const tabName = groupLabel( tab, settings );
+	const escaped = tabName.replace( /[.*+?^${}()|[\]\\]/g, '\\$&' );
+	const stripped = label.replace( new RegExp( `^${ escaped }\\s*[:·–—-]\\s*`, 'i' ), '' ).replace( new RegExp( `\\s*\\(${ escaped }\\)$`, 'i' ), '' ).trim();
+
+	if ( ! stripped || stripped === label ) {
+		return label;
+	}
+
+	return stripped.charAt( 0 ).toUpperCase() + stripped.slice( 1 );
+}

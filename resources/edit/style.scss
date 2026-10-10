@@ -15,11 +15,17 @@
 		border-radius: 4px;
 	}
 
-	// The language tabs wrap onto a second line in the panel rather than scroll it sideways.
+	// The language tabs wrap onto a second line in the panel rather than scroll it sideways, and stay in
+	// view at the top of the panel's scrolling body while the form scrolls under them.
 	&__tabs {
+		position: sticky;
+		// The panel body's 16px top padding: the strip sits flush with the top of the scrolling area.
+		top: -16px;
+		z-index: 2;
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0 4px;
+		background: #fff;
 		border-bottom: 1px solid var( --wp-components-color-gray-300, #ddd );
 
 		[role='tab'] {
@@ -336,23 +342,56 @@
 		}
 	}
 
-	// The columns of the General tab (DataForm's row layout) wrap on narrow screens.
+	// Paired fields (DataForm's row layout) stack when the card is too narrow for two 240px controls.
 	.dataforms-layouts-row__field > :first-child {
 		flex-wrap: wrap;
 	}
 
 	.dataforms-layouts-row__field-control {
+		flex: 1 1 0;
 		min-width: min( 100%, 240px );
+
+		// A hidden field (the sale dates while "Schedule sale" is off) leaves no gap.
+		&:empty {
+			display: none;
+		}
 	}
 
-	// Group headings inside the columns: small, like WooCommerce's quick edit legends.
-	.dataforms-layouts-regular__header h2 {
-		margin: 0;
-		font-size: 11px;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.02em;
-		color: var( --wp-components-color-foreground-muted, #757575 );
+	.dataforms-layouts-row__field:not( :has( .dataforms-layouts-row__field-control:not( :empty ) ) ) {
+		display: none;
+	}
+
+	// Sections are cards with a title that reads as a heading, not as one more field label.
+	.dataforms-layouts-card__field {
+		--wp-ui-card-padding: 16px;
+
+		.dataforms-layouts-card__field-header-content {
+			// Card.Title (the first child; the summary follows it): 13px semibold, sentence case.
+			> :first-child {
+				margin: 0;
+				font-size: 13px;
+				font-weight: 600;
+				line-height: 20px;
+				text-transform: none;
+				letter-spacing: normal;
+				color: #1e1e1e;
+			}
+		}
+	}
+
+	.wc-pl-edit__form.is-narrow .dataforms-layouts-card__field {
+		--wp-ui-card-padding: 12px;
+	}
+
+	// The apply-to-variations control: the first row of Pricing, its note right under the checkbox.
+	.wc-pl-edit__apply {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.wc-pl-edit__apply-note {
+		padding-inline-start: 24px;
 	}
 
 }
@@ -906,8 +945,12 @@
 		overflow-y: auto;
 		overscroll-behavior: contain;
 		padding: 16px 20px 0;
-		// A field focused or scrolled to stays clear of the sticky Update / Cancel footer.
+		// A field focused or scrolled to stays clear of the sticky Update / Cancel footer (and the sticky tabs).
 		scroll-padding-block: 8px 88px;
+
+		&:has( .wc-pl-edit__tabs ) {
+			scroll-padding-block: calc( var( --wc-pl-tabs-height, 41px ) + 8px ) 88px;
+		}
 
 		.wc-pl-inline-edit {
 			display: flex;

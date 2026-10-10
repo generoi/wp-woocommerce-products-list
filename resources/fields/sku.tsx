@@ -13,6 +13,6 @@ export function createSkuField( _settings: Settings ): ProductField {
 		render: ( { item } ) => <code className="wc-products-list__sku">{ item.sku || '—' }</code>,
 		getValue: ( { item } ) => item.sku ?? '',
 		rest: { sortParam: 'sku', applies: { product: true, variation: true } },
-		edit: { group: 'general', bulk: false, order: 10 },
+		edit: { group: 'inventory', bulk: false, order: 29 },
 	} );
 }

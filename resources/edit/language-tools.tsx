@@ -808,7 +808,7 @@ type ToolProps = Omit< LanguageToolsProps, 'tabId' | 'onDirtyChange' | 'defaultO
 function nothingAppliesText( def: DeclarativeAction, items: readonly ProductListItem[], applyToVariations: boolean | undefined, parentVariations: readonly ProductListItem[] | undefined ): string {
 	if ( isSellableTool( def ) && items.some( isVariableParent ) ) {
 		if ( ! applyToVariations ) {
-			return __( 'Variable products have no prices of their own. Tick "Apply price and sale fields to all variations" to change their variations\' prices.', 'wp-woocommerce-products-list' );
+			return __( 'Variable products have no prices of their own. Tick "Also apply to the variations" in Prices to change their variations\' prices.', 'wp-woocommerce-products-list' );
 		}
 
 		if ( ! parentVariations?.length ) {

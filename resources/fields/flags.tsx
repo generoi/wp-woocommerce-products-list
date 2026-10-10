@@ -20,8 +20,8 @@ function flag( id: string, label: string, options: { variation: boolean; product
 
 export function createFlagFields( _settings: Settings ): ProductField[] {
 	return [
-		flag( 'virtual', __( 'Virtual', 'wp-woocommerce-products-list' ), { variation: true, productTypes: [ 'simple' ], group: 'general', order: 80 } ),
-		flag( 'downloadable', __( 'Downloadable', 'wp-woocommerce-products-list' ), { variation: true, productTypes: [ 'simple' ], group: 'general', order: 81 } ),
+		flag( 'virtual', __( 'Virtual', 'wp-woocommerce-products-list' ), { variation: true, productTypes: [ 'simple' ], group: 'shipping', order: 59 } ),
+		flag( 'downloadable', __( 'Downloadable', 'wp-woocommerce-products-list' ), { variation: true, productTypes: [ 'simple' ], group: 'advanced', order: 94 } ),
 		flag( 'sold_individually', __( 'Sold individually', 'wp-woocommerce-products-list' ), { variation: false, productTypes: 'all', group: 'inventory', order: 35 } ),
 		flag( 'reviews_allowed', __( 'Reviews allowed', 'wp-woocommerce-products-list' ), { variation: false, productTypes: 'all', group: 'advanced', order: 95 } ),
 	];

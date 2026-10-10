@@ -32,8 +32,10 @@ const SECTION_OF_EDIT_GROUP: Record< string, string > = {
 	content: 'content',
 };
 
-/** Read-only core fields (no `edit.group`). */
+/** Read-only core fields (no `edit.group`), and fields whose edit card is not their column section (SKU and Virtual are product properties in the list, Inventory and Shipping in the edit form). */
 const SECTION_OF_FIELD: Record< string, string > = {
+	sku: 'product',
+	virtual: 'product',
 	price: 'pricing',
 	on_sale: 'pricing',
 	cost_of_goods_sold: 'pricing',

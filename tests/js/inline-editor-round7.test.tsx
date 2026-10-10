@@ -78,6 +78,38 @@ afterEach( () => {
 } );
 
 describe( 'apply to all variations', () => {
+	it( 'is the first row of the Pricing card and never becomes an edit of its own', async () => {
+		const parent = variable( 31, { name: 'Koel Q', _childCount: 2 } );
+
+		answerLists( [ parent ] );
+		getVariations.mockImplementation( async ( parentId: number ) => ( {
+			items: [ variation( parentId * 10 + 1, parentId, { regular_price: '20' } ), variation( parentId * 10 + 2, parentId, { regular_price: '30' } ) ],
+			total: 2,
+			totalPages: 1,
+		} ) );
+
+		const { container } = render( <InlineEditor host={ hostFor( [ parent ] ) } /> );
+		const box = await screen.findByLabelText( 'Set the price of all its variations' );
+		const card = box.closest( '.dataforms-layouts-card__field' ) as HTMLElement;
+
+		// Inside the form's Pricing card, with what it does tied to it; nothing above the tabs.
+		expect( card ).not.toBeNull();
+		expect( card.textContent ).toMatch( /^Pricing/ );
+		expect( container.querySelector( '.wc-pl-edit__options' ) ).toBeNull();
+		expect( document.getElementById( box.getAttribute( 'aria-describedby' ) ?? '' )?.textContent ).toMatch( /Tick to set one price for all 2 variations/ );
+
+		const update = screen.getByRole( 'button', { name: /^Update/ } );
+		const before = update.textContent;
+
+		fireEvent.click( box );
+		await screen.findByText( /Prices will change on 2 variations of 1 variable product\./ );
+
+		// The price fields join the same card; ticking is a choice about scope, not a pending edit.
+		expect( ( await screen.findByLabelText( 'regular_price' ) ).closest( '.dataforms-layouts-card__field' ) ).toBe( box.closest( '.dataforms-layouts-card__field' ) );
+		expect( update.textContent ).toBe( before );
+		expect( saveEdits ).not.toHaveBeenCalled();
+	} );
+
 	it( 'fetches each parent’s variations once: tab switches and list patches neither refetch nor block Update', async () => {
 		const parents = [ variable( 21, { name: 'Koel A' } ), variable( 22, { name: 'Koel B' } ) ];
 
@@ -92,8 +124,8 @@ describe( 'apply to all variations', () => {
 		const view = render( <InlineEditor host={ host } /> );
 
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
-		fireEvent.click( await screen.findByLabelText( /Apply price and sale fields/ ) );
-		await screen.findByText( /will apply to 4 variations of 2 variable products/ );
+		fireEvent.click( await screen.findByLabelText( /Also apply to the variations|Set the price of all its variations/ ) );
+		await screen.findByText( /Prices will change on 4 variations of 2 variable products/ );
 		expect( getVariations ).toHaveBeenCalledTimes( 2 );
 
 		// A language tab loads (the rows merge in new objects) and back.
@@ -106,7 +138,7 @@ describe( 'apply to all variations', () => {
 			view.rerender( <InlineEditor host={ { ...host, items: parents.map( ( row ) => ( { ...row } ) ) } } /> );
 		} );
 
-		expect( screen.getByText( /will apply to 4 variations of 2 variable products/ ) ).toBeInTheDocument();
+		expect( screen.getByText( /Prices will change on 4 variations of 2 variable products/ ) ).toBeInTheDocument();
 		expect( screen.queryByText( /Loading variations/ ) ).not.toBeInTheDocument();
 		expect( getVariations ).toHaveBeenCalledTimes( 2 );
 
@@ -117,7 +149,7 @@ describe( 'apply to all variations', () => {
 		await act( async () => {
 			view.rerender( <InlineEditor host={ { ...host, items: [ ...parents, third ] } } /> );
 		} );
-		await screen.findByText( /will apply to 6 variations of 3 variable products/ );
+		await screen.findByText( /Prices will change on 6 variations of 3 variable products/ );
 		expect( getVariations ).toHaveBeenCalledTimes( 3 );
 		expect( getVariations.mock.calls[ 2 ]?.[ 0 ] ).toBe( 23 );
 	} );
@@ -139,7 +171,7 @@ describe( 'apply to all variations', () => {
 
 		await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
 
-		const box = await screen.findByLabelText( /Apply price and sale fields/ );
+		const box = await screen.findByLabelText( /Also apply to the variations|Set the price of all its variations/ );
 
 		fireEvent.click( box );
 		await waitFor( () => expect( signals ).toHaveLength( 2 ) );
