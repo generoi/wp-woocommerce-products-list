@@ -119,6 +119,22 @@ export function itemsLeftToRevert( scope: Pick< BatchScope, 'objects' >, kept = 
 }
 
 /**
+ * Whether a revert pass has nothing to do: every item changed since the batch
+ * (`changed`) and each of those was already put back by an earlier revert
+ * (`alreadyReverted`). Items changed since by someone else still need the
+ * pass, even when nothing else is left to put back: it reports them and
+ * offers "Revert N anyway" (or "Subtract the change instead"), the only way
+ * to put them back that the Undo's "revert it from History" points to.
+ */
+export function nothingToRevert( scope: Pick< BatchScope, 'objects' >, check: { changed: number; alreadyReverted: number } | null ): boolean {
+	if ( ! check || check.changed <= 0 || itemsLeftToRevert( scope, check.changed ) > 0 ) {
+		return false;
+	}
+
+	return check.changed - check.alreadyReverted <= 0;
+}
+
+/**
  * @param kept Items the pre-revert check found changed since the batch (or already put back by an earlier
  *             revert): the revert leaves them as they are, so they are not counted as put back.
  */

@@ -3,7 +3,7 @@ import type { ActionResponse } from '../../resources/api/client';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert, splitResults } from '../../resources/history/revert';
 import { formatLogValue } from '../../resources/history/log-fields';
 import { editSettings } from './edit-fixtures';
-import { describeBatchScope, isRevertableRow, itemsLeftToRevert, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
+import { describeBatchScope, isRevertableRow, itemsLeftToRevert, nothingToRevert, scopeFromPlan, summarizeBatch } from '../../resources/history/batch-scope';
 import type { LogRow } from '../../resources/api/client';
 
 vi.mock( '../../resources/api/client', () => ( {
@@ -122,6 +122,19 @@ describe( 'left-out items', () => {
 		expect( describeBatchScope( scope, 3 ) ).toBe( 'Nothing is left to put back: every item of this batch changed since (see below).' );
 		expect( itemsLeftToRevert( scope, 5 ) ).toBe( 0 );
 		expect( describeBatchScope( scope, 0 ) ).toBe( 'This will put back 4 changes on 3 items.' );
+	} );
+
+	it( 'keeps Revert on when every item changed since but some were changed by someone else (the pass offers "Revert anyway")', () => {
+		const scope = { objects: 1 };
+
+		// The Undo left the only item alone ("revert it from History"): History must still be able to put it back.
+		expect( nothingToRevert( scope, { changed: 1, alreadyReverted: 0 } ) ).toBe( false );
+		expect( nothingToRevert( { objects: 3 }, { changed: 3, alreadyReverted: 2 } ) ).toBe( false );
+		// Every item already put back by an earlier revert: nothing to run.
+		expect( nothingToRevert( { objects: 3 }, { changed: 3, alreadyReverted: 3 } ) ).toBe( true );
+		// Items left to put back, or no dry run yet.
+		expect( nothingToRevert( { objects: 3 }, { changed: 1, alreadyReverted: 1 } ) ).toBe( false );
+		expect( nothingToRevert( scope, null ) ).toBe( false );
 	} );
 
 	it( 'names the not-revertable actions by their labels', () => {

@@ -27,7 +27,7 @@ import type { ProductField, Settings } from '../types';
 import { invalidateProducts } from '../store/products';
 import { Notices } from '../ui';
 import { actionLabel, createLogFields, formatLogValue, logQueryFromView } from './log-fields';
-import { describeBatchScope, isRevertableRow, itemsLeftToRevert, scopeFromPlan } from './batch-scope';
+import { describeBatchScope, isRevertableRow, itemsLeftToRevert, nothingToRevert, scopeFromPlan } from './batch-scope';
 import { checkRevertPlan, describeConflict, relativeConflicts, runRevert } from './revert';
 import type { RevertCheckSummary, RevertOutcome } from './revert';
 import { batchQueryFromView, createBatchFields } from './batch-fields';
@@ -341,6 +341,8 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 	// The scope line keeps saying what the dry run found once a pass ran (not "N changes on N items" as if nothing was left alone).
 	const scopeKept = check && check !== 'loading' ? check.changed : 0;
 	const nothingLeft = keptItems > 0 && !! plan && plan !== 'loading' && itemsLeftToRevert( { objects: plan.objects }, keptItems ) === 0;
+	// Revert stays on while some of those were changed by someone else: its pass offers "Revert N anyway" for them.
+	const nothingToRun = ! outcome && !! plan && plan !== 'loading' && nothingToRevert( { objects: plan.objects }, check && check !== 'loading' ? check : null );
 
 	return (
 		<div className="wc-pl-confirm">
@@ -474,7 +476,7 @@ function RevertModal< T extends RevertTarget >( { items, closeModal, onActionPer
 						) }
 					</Button>
 				) : (
-					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable || nothingLeft } onClick={ () => void confirm() } __next40pxDefaultSize>
+					<Button variant="primary" isBusy={ busy } disabled={ busy || ! row || plan === 'loading' || ! plan || ! plan.revertable || nothingToRun } onClick={ () => void confirm() } __next40pxDefaultSize>
 						{ revertedBy ? __( 'Revert again', 'wp-woocommerce-products-list' ) : __( 'Revert batch', 'wp-woocommerce-products-list' ) }
 					</Button>
 				) }

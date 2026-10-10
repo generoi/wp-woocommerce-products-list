@@ -527,6 +527,14 @@
 		min-width: min( 720px, 90vw );
 	}
 
+	// A batch's "Changed" line ("Svenska: SEO title, … +1 more on 1 product") stays in its column:
+	// cut with an ellipsis (the title holds every field) instead of running under "Result".
+	&__batch {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
 	&__header {
 		display: flex;
 		justify-content: space-between;
