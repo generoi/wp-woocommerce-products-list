@@ -410,6 +410,16 @@ describe( 'runRevert and the list', () => {
 		] );
 	} );
 
+	it( 'records no failed rows for a revert refused as already running (it wrote and tried nothing)', async () => {
+		const post = vi.fn( async () => {
+			throw Object.assign( new Error( 'This batch is being reverted already.' ), { code: 'wc_products_list_revert_running', data: { status: 409 } } );
+		} );
+		const logFailed = vi.fn( async () => undefined );
+
+		await expect( runRevert( 'batch-a', { chunk: 100, chunks: [ [ 7, 8 ] ] }, { close: async () => undefined, logFailed }, post ) ).rejects.toThrow( 'being reverted already' );
+		expect( logFailed ).not.toHaveBeenCalled();
+	} );
+
 	it( 'posts nothing when every chunk was answered (the server logged per-object failures itself)', async () => {
 		const post = vi.fn( async ( _batch: string, options?: { ids?: number[] } ) => response( ( options?.ids ?? [] ).map( ( id ) => ( id === 2 ? { id, ok: false, code: 'error', message: 'No.' } : { id, ok: true } ) ) ) );
 		const logFailed = vi.fn( async () => undefined );

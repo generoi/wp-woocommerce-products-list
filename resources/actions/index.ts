@@ -69,7 +69,7 @@ function allowed( action: ProductAction, settings: Settings ): boolean {
 }
 
 /** Fields the handler changed on one ok result; an older PHP side without `changed` counts as a change, so Undo is still offered. */
-function changedFields( result: ActionResult ): number {
+export function changedFields( result: ActionResult ): number {
 	return typeof result.changed === 'number' ? result.changed : 1;
 }
 

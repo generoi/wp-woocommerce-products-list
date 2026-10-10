@@ -167,6 +167,9 @@ export function failedChunkResults( ids: number[], error: unknown ): ActionResul
 	} ) );
 }
 
+/** Refusals of a whole revert request before it wrote anything: one revert of a batch at a time, never while its save runs. */
+const NOT_STARTED_CODES = new Set( [ 'wc_products_list_revert_running', 'wc_products_list_batch_running' ] );
+
 /** Post the revert in chunks, REVERT_PARALLEL at a time; `plan.chunks` or the given ids cut to the plan's chunk size. Results keep the chunk order.
  * A chunk whose request fails comes back as failed results (failedChunkResults) and the other chunks still run;
  * it throws only when no chunk got an answer, so nothing was put back for sure. */
@@ -213,7 +216,12 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 			} catch ( error ) {
 				firstError ??= error;
 				perChunk[ index ] = failedChunkResults( ids, error );
-				unanswered.push( ...perChunk[ index ]! );
+
+				// A chunk refused before it started (another revert of this batch, or its save, still running) wrote and
+				// tried nothing: no failed rows for it.
+				if ( ! NOT_STARTED_CODES.has( String( ( error as { code?: unknown } | null )?.code ?? '' ) ) ) {
+					unanswered.push( ...perChunk[ index ]! );
+				}
 			}
 
 			done += ids.length;

@@ -114,6 +114,30 @@ describe( 'a campaign on all of a variable product’s variations from its quick
 	} );
 } );
 
+describe( 'the variation price note', () => {
+	it( 'counts the variations whose price the edit changes, not every variation', async () => {
+		const parent = variable( 32, { name: 'Koel R', _childCount: 3 } );
+
+		answerLists( [ parent ] );
+		getVariations.mockImplementation( async ( parentId: number ) => ( {
+			items: [ variation( 321, parentId, { regular_price: '20' } ), variation( 322, parentId, { regular_price: '30' } ), variation( 323, parentId, { regular_price: '20' } ) ],
+			total: 3,
+			totalPages: 1,
+		} ) );
+
+		render( <InlineEditor host={ hostFor( [ parent ] ) } /> );
+		fireEvent.click( await screen.findByLabelText( 'Set the price of all its variations' ) );
+		await screen.findByText( /Prices will change on 3 variations of 1 variable product\./ );
+
+		fireEvent.change( await screen.findByLabelText( 'regular_price: operation' ), { target: { value: 'set' } } );
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '20' } } );
+		await screen.findByText( /Prices will change on 1 variation of 1 variable product\./ );
+
+		fireEvent.change( screen.getByLabelText( 'regular_price: value' ), { target: { value: '25' } } );
+		await screen.findByText( /Prices will change on 3 variations of 1 variable product\./ );
+	} );
+} );
+
 describe( 'a variable product selected with every one of its variations', () => {
 	it( 'has no apply-to-variations box: the price fields reach those variations already', async () => {
 		const parent = variable( 41, { _childCount: 2 } );

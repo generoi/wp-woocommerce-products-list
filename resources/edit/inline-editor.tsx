@@ -34,13 +34,13 @@ import { batchProducts, closeBatch, getVariations, logSkipped, newBatchId, toRow
 import type { SkippedItem } from '../api/client';
 import { DataForm, useFormValidity } from '../dataviews';
 import { getSettings } from '../settings';
-import { patchItems, removeItems } from '../store/products';
+import { deletionsNamedByEditor, patchItems, removeItems } from '../store/products';
 import { getCurrentRows, getCurrentRowsSnapshot, subscribeCurrentRows } from '../store/rows';
 import { beginSaveJob, finishSaveJob } from '../store/save-activity';
 import type { ProductField, ProductListItem, QuickEditTab, Settings } from '../types';
 import { isBatchItemError } from '../types';
 import { rowFields } from '../actions/context';
-import { ActionRowsError, runDeclarativeAction } from '../actions/index';
+import { ActionRowsError, changedFields as actionChangedFields, runDeclarativeAction } from '../actions/index';
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
@@ -1641,9 +1641,11 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	 * Run the staged tools under the Update's batch, one after the other in the order they were added. A tool
 	 * that ran leaves the staged list; one that failed stays there (the next Update runs it again) and is reported.
 	 */
-	const runStagedTools = async ( rows: ProductListItem[], batchId: string, planned?: number ): Promise< { ran: number; errors: EditError[] } > => {
+	const runStagedTools = async ( rows: ProductListItem[], batchId: string, planned?: number ): Promise< { ran: number; unchanged: number; errors: EditError[] } > => {
 		const errors: EditError[] = [];
 		let ran = 0;
+		// Tools that ran and wrote nothing ("Keep as is" on values already kept): not "applied".
+		let unchanged = 0;
 		const ranTabs = new Set< string >();
 		let reachedVariations = false;
 
@@ -1656,8 +1658,14 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 
 			try {
-				await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true, announce: true, ...( planned ? { planned } : {} ) } );
-				ran++;
+				const response = await runDeclarativeAction( entry.def.id, entry.def.label || entry.def.id, ids, entry.args, rowFields( allFields ), { inlineErrors: true, batchId, silent: true, announce: true, ...( planned ? { planned } : {} ) } );
+
+				if ( ! Array.isArray( response?.results ) || response.results.some( ( result ) => result.ok && actionChangedFields( result ) > 0 ) ) {
+					ran++;
+				} else {
+					unchanged++;
+				}
+
 				ranTabs.add( entry.tabId );
 				reachedVariations ||= Boolean( parentVariations?.length ) && ids.some( ( id ) => parentVariations!.some( ( variation ) => variation.id === id ) );
 				stageTool( entry.key, null );
@@ -1782,7 +1790,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			}
 		}
 
-		return { ran, errors };
+		return { ran, unchanged, errors };
 	};
 
 	/**
@@ -2098,7 +2106,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				: { updated: [], errors: [], batchId: sharedBatch ?? '', unchanged: 0, stockSkipped: 0, saleSkipped: 0, replacedSales: 0 };
 
 			// Then the staged tools, in the order they were added, once the field edits all saved (a failed field edit keeps them for the retry).
-			const tools = result.errors.length === 0 ? await runStagedTools( toolItems, result.batchId, sharedBatch ? result.updated.length + result.errors.length + toolRows : undefined ) : { ran: 0, errors: [] as EditError[] };
+			const tools = result.errors.length === 0 ? await runStagedTools( toolItems, result.batchId, sharedBatch ? result.updated.length + result.errors.length + toolRows : undefined ) : { ran: 0, unchanged: 0, errors: [] as EditError[] };
 
 			// Every write of the Update is done: the batch can be planned and reverted (before any Undo is offered).
 			if ( openBatch ) {
@@ -2182,14 +2190,19 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					...selectSkipped,
 				];
 
-				const toolsLine = tools.ran
+				const fieldsLine = runFields ? successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ) : '';
+				let toolsLine = tools.ran
 					? sprintf(
 							/* translators: %d: number of language changes (tool runs) */
 							_n( '%d language change applied.', '%d language changes applied.', tools.ran, 'wp-woocommerce-products-list' ),
 							tools.ran
 					  )
 					: '';
-				const fieldsLine = runFields ? successMessage( result, { trashed: changed.trashed.length, missing: changed.missing.length, names: skippedNames } ) : '';
+
+				// The language tools ran and wrote nothing, and there was nothing else to save: no "applied" for it.
+				if ( ! toolsLine && ! fieldsLine && tools.unchanged > 0 ) {
+					toolsLine = __( 'Nothing changed: the values equal the current ones.', 'wp-woocommerce-products-list' );
+				}
 				const heldLine = holdBack
 					? sprintf(
 							/* translators: %d: number of rows held back */
@@ -2404,6 +2417,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				} );
 
 				if ( settling.size ) {
+					// The list's own refresh of these parents finds them deleted too: this editor's notice names them.
+					deletionsNamedByEditor( settling );
 					void settleParents( items.filter( ( item ) => settling.has( item.id ) ) );
 				}
 			}
@@ -2718,7 +2733,31 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 			// The range is in the shop's currency: on a language tab whose prices are in a market currency (SEK) it would
 			// read as the prices being replaced, so it is left out there.
 			const range = tabPricesInMarketCurrency( editFields, tab.id, settings ) ? '' : variationPriceRange( rows, settings );
-			const count = failedIds ? rows.length : variations.count;
+			// With a price or sale edit planned, the variations whose prices it changes (not those already at the result,
+			// or skipped); before that, every variation it can reach.
+			const shownIds = new Set( rows.map( ( row ) => row.id ) );
+			const fieldById = new Map( editFields.map( ( field ) => [ field.id, field ] ) );
+			const priceEdit = Object.keys( plannedEdits ).some( ( id ) => isSellableField( fieldById.get( id ) ?? id ) );
+			const changing = plan && priceEdit
+				? plan.writes.filter( ( write ) => shownIds.has( write.target.item.id ) && Object.keys( write.target.edits ).some( ( id ) => isSellableField( fieldById.get( id ) ?? id ) ) )
+				: null;
+			const count = changing ? changing.length : failedIds ? rows.length : variations.count;
+			const changingParents = changing
+				? new Set( Array.from( byParent ).filter( ( [ , list ] ) => list.some( ( row ) => changing.some( ( write ) => write.target.item.id === row.id ) ) ).map( ( [ parentId ] ) => parentId ) ).size
+				: parentCount;
+
+			if ( changing && count === 0 ) {
+				return (
+					<span className="wc-pl-edit__note">
+						{ range ? `${ range } ` : '' }
+						{ sprintf(
+							/* translators: %d: number of variations */
+							_n( 'The price of its %d variation does not change.', 'None of the %d variations change price.', rows.length, 'wp-woocommerce-products-list' ),
+							rows.length
+						) }
+					</span>
+				);
+			}
 
 			return (
 				<span className="wc-pl-edit__note">
@@ -2733,8 +2772,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						),
 						sprintf(
 							/* translators: %d: number of variable products */
-							_n( '%d variable product', '%d variable products', parentCount, 'wp-woocommerce-products-list' ),
-							parentCount
+							_n( '%d variable product', '%d variable products', changingParents, 'wp-woocommerce-products-list' ),
+							changingParents
 						)
 					) }
 				</span>
@@ -2759,7 +2798,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		} ),
 		// The note is rebuilt every render; what it shows follows these.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk, failedIds, retryTargets ]
+		[ applyToVariations, applyLabel, saving, variations, variationsLoaded, sellableShown, variableParents, bulk, failedIds, retryTargets, plan, plannedEdits, editFields ]
 	);
 
 	// wc/v3's batch routes need edit_others_products (woocommerce_rest_cannot_batch);

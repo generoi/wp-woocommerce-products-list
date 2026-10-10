@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7 - 2026-10-10
+
+Fixes for the side issues of the closeout verification on 0.3.6.
+
+- The list's refresh of a variable product after its variations were saved no longer shows a product deleted meanwhile as a priceless Simple product. A parent that reads back half-deleted (WordPress removes its product type and other terms first) or not at all is checked until its deletion is over: gone, it leaves the list and a notice names it; still there, it is read again.
+- An Undo (a revert in one request) lets go of its claim on the batch when it ends, and a revert in several requests when its batch is closed, so a History revert started right after is no longer refused as "already running". A revert chunk refused before it started (another revert or the save still running) records no failed rows.
+- The variation pricing note ("Prices will change on N variations of M variable products") counts the variations whose price the edit changes, not every variation, once a price or sale edit is set.
+- After the translation grid is refused on an item, the list's "Svenska: Name" cell drops a stale "copied" tag: a translated value read again replaces the cached one whole instead of merging into it.
+- A staged language tool that wrote nothing ("Keep as is" on values already kept) is no longer reported as "1 language change applied"; with nothing else saved, Update says "Nothing changed".
+
 ## 0.3.6 - 2026-10-10
 
 - Adjust market prices on a variable product in quick edit names the quick edit control ("Set the price of all its variations") instead of the bulk edit one ("Also apply to the variations").

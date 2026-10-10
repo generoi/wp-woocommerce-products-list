@@ -19,7 +19,7 @@ const saveEdits = vi.fn();
 
 vi.mock( '../../resources/settings', () => ( { getSettings: () => settings } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify } ) );
-vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: vi.fn(), invalidateProducts: vi.fn() } ) );
+vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), removeItems: vi.fn(), invalidateProducts: vi.fn(), deletionsNamedByEditor: vi.fn() } ) );
 vi.mock( '../../resources/api/client', () => ( {
 	logSkipped: vi.fn( async () => undefined ),
 	getVariations: vi.fn(),

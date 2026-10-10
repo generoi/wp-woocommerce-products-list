@@ -264,6 +264,9 @@ final class LogController
             }
         }
 
+        // A revert of several requests is over: its claim on the reverted batch goes with it.
+        Concurrency::releaseRevertOf($batchId);
+
         return rest_ensure_response(['batch_id' => $batchId, 'closed' => BatchState::close($batchId)]);
     }
 
@@ -805,13 +808,21 @@ final class LogController
 
         // One revert of a batch at a time: a second tab (or user) starting
         // the same revert is told so instead of racing the first. The
-        // chunks of one revert (one revert batch id, posted side by side)
-        // share the claim.
+        // chunks of one revert (one revert batch id, posted side by side
+        // with a planned count) share the claim until the revert batch is
+        // closed. A revert in one request (no planned count) lets it go
+        // when the request ends: an Undo does not hold the batch for
+        // another `REVERT_CLAIM_TTL` seconds after it is done.
         $ownId = is_string($revertBatchId) && $revertBatchId !== '';
         $claim = $ownId ? $revertBatchId : wp_generate_uuid4();
+        $chunked = $ownId && (int) $request->get_header(BatchState::PLANNED_HEADER) > 0;
 
         if (! Concurrency::claimRevert($batchId, $claim)) {
             return Concurrency::revertRunningError();
+        }
+
+        if ($chunked) {
+            Concurrency::rememberRevertOf($claim, $batchId);
         }
 
         try {
@@ -824,7 +835,7 @@ final class LogController
                 (bool) $request->get_param('relative')
             ));
         } finally {
-            Concurrency::releaseRevert($batchId, $claim, $ownId);
+            Concurrency::releaseRevert($batchId, $claim, $chunked);
         }
     }
 

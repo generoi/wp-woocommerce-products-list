@@ -201,3 +201,15 @@ describe( 'mergeHydrated with an empty answer', () => {
 		expect( mergeHydrated( { id: 1, tags: [ 'a' ] }, { tags: [] } ).tags ).toEqual( [] );
 	} );
 } );
+
+describe( 'mergeHydrated with a translated value', () => {
+	it( 'replaces a value entry whole: a "copied" flag the fresh value lacks does not survive', async () => {
+		const { mergeHydrated } = await import( '../../resources/edit/hydrate' );
+		const cached = { id: 1, i18n: { se: { name: { value: 'Ullsocka', source: 'Wool sock', same: true, copiedFrom: 'no' }, short_description: { value: 'Kort' } } } };
+		const merged = mergeHydrated( cached, { i18n: { se: { name: { value: 'Yllesocka', source: 'Wool sock' } } } } );
+
+		expect( merged.i18n.se.name ).toEqual( { value: 'Yllesocka', source: 'Wool sock' } );
+		// The other fields of the language stay: only the entry is replaced.
+		expect( merged.i18n.se.short_description ).toEqual( { value: 'Kort' } );
+	} );
+} );

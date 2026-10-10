@@ -5,7 +5,7 @@ import { ACTIONS } from '../../resources/extensions/hooks';
 import { normalizeProduct, normalizeVariation } from '../../resources/hierarchy/normalize';
 import { resetHierarchyStore } from '../../resources/hierarchy/use-hierarchy';
 import { setSettings } from '../../resources/settings';
-import { COUNTS_KEY, PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, invalidateProducts, isEdited, markEdited, patchItems, refreshParentsOf, removeItems, resetEditedRows, retainEditedRows, subscribeRemoved, useProductList, variationsKey } from '../../resources/store/products';
+import { COUNTS_KEY, PARENT_DERIVED_FIELDS, PRODUCTS_PREFIX, cachedProductIds, deletionsNamedByEditor, refreshParentIds, invalidateProducts, isEdited, markEdited, patchItems, refreshParentsOf, removeItems, resetEditedRows, retainEditedRows, subscribeRemoved, useProductList, variationsKey } from '../../resources/store/products';
 import type { View } from '../../resources/dataviews';
 import { cache } from '../../resources/store/query-cache';
 import type { ListResult } from '../../resources/api/client';
@@ -18,6 +18,10 @@ vi.mock( '../../resources/api/client', () => ( {
 	listProducts: ( ...args: unknown[] ) => listProducts( ...args ),
 	getCounts: vi.fn(),
 } ) );
+
+const info = vi.fn();
+
+vi.mock( '../../resources/actions/notices', () => ( { notify: { info: ( ...args: unknown[] ) => info( ...args ), error: vi.fn(), success: vi.fn() } } ) );
 
 function parent( id: number, price = '179' ): ProductListItem {
 	return normalizeProduct( { id, type: 'variable', name: `P${ id }`, price, on_sale: false, wc_products_list: { variation_count: 2, edit_link: '', can_edit: true, can_delete: true, parent_id: 0 } } );
@@ -65,6 +69,51 @@ describe( 'refreshParentsOf', () => {
 
 		expect( await refreshParentsOf( [ normalizeVariation( { id: 1 }, 77 ), normalizeProduct( { id: 10, type: 'variable' } ) ] ) ).toEqual( [] );
 		expect( listProducts ).not.toHaveBeenCalled();
+	} );
+
+	it( 'does not patch a parent that reads back half-deleted: once it is gone it leaves the list and is named', async () => {
+		await seedPage( [ parent( 10 ), parent( 11 ) ] );
+		info.mockReset();
+		// WordPress deleted the product type term first: the parent reads back as a priceless Simple product, then is gone.
+		listProducts
+			.mockResolvedValueOnce( { items: [ normalizeProduct( { id: 10, type: 'simple', name: 'P10', price: '' } ), parent( 11, '99' ) ], total: 2, totalPages: 1 } )
+			.mockResolvedValueOnce( { items: [ { id: 10, status: 'publish' } ], total: 1, totalPages: 1 } )
+			.mockResolvedValueOnce( { items: [], total: 0, totalPages: 0 } );
+
+		const refreshed = await refreshParentIds( [ 10, 11 ], undefined, { sleep: async () => {} } );
+
+		expect( refreshed ).toEqual( [ 11 ] );
+		expect( listProducts.mock.calls[ 1 ]?.[ 0 ] ).toMatchObject( { include: '10', _fields: 'id,status' } );
+
+		const page = cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data;
+		expect( page?.items.map( ( item ) => item.id ) ).toEqual( [ 11 ] );
+		expect( page?.items[ 0 ] ).toMatchObject( { id: 11, price: '99' } );
+		expect( info ).toHaveBeenCalledWith( expect.stringMatching( /1 product was deleted meanwhile .*: P10$/ ), expect.anything() );
+	} );
+
+	it( 'reads a parent again that is still there after the checks, names one missing, and leaves one the editor names to the editor', async () => {
+		await seedPage( [ parent( 10 ), parent( 12 ) ] );
+		info.mockReset();
+		listProducts
+			.mockResolvedValueOnce( { items: [ normalizeProduct( { id: 10, type: 'simple', name: 'P10' } ) ], total: 1, totalPages: 1 } )
+			.mockResolvedValueOnce( { items: [ { id: 10, status: 'publish' } ], total: 1, totalPages: 1 } )
+			.mockResolvedValueOnce( { items: [ { id: 10, status: 'publish' } ], total: 1, totalPages: 1 } )
+			.mockResolvedValueOnce( { items: [ normalizeProduct( { id: 10, type: 'simple', name: 'P10', price: '5' } ) ], total: 1, totalPages: 1 } );
+
+		expect( await refreshParentIds( [ 10, 12 ], undefined, { tries: 2, sleep: async () => {} } ) ).toEqual( [ 10 ] );
+		expect( cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data?.items.map( ( item ) => item.id ) ).toEqual( [ 10 ] );
+		expect( cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data?.items[ 0 ] ).toMatchObject( { price: '5' } );
+		// 12 was missing from the first read and gone at the check: removed and named.
+		expect( info ).toHaveBeenCalledWith( expect.stringMatching( /: P12$/ ), expect.anything() );
+		info.mockReset();
+
+		await seedPage( [ parent( 20 ) ] );
+		deletionsNamedByEditor( [ 20 ] );
+		listProducts.mockReset();
+		listProducts.mockResolvedValue( { items: [], total: 0, totalPages: 0 } );
+		await refreshParentIds( [ 20 ], undefined, { sleep: async () => {} } );
+		expect( cache.get< ListResult< ProductListItem > >( `${ PRODUCTS_PREFIX }page1` )?.data?.items ).toEqual( [] );
+		expect( info ).not.toHaveBeenCalled();
 	} );
 
 	it( 'runs after the saved action', async () => {

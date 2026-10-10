@@ -768,9 +768,10 @@ class ConcurrencyTest extends RestTestCase
 
         $first = wp_generate_uuid4();
         $route = '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert';
+        $chunk = [ListMode::BATCH_HEADER => $first, BatchState::PLANNED_HEADER => '2'];
 
         // The first chunk of a revert claims the batch...
-        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$a->get_id()], 'revert_batch_id' => $first], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$a->get_id()], 'revert_batch_id' => $first], $chunk));
         $this->assertSame($first, get_transient(Concurrency::revertClaim($this->batchId())));
 
         // ...a revert under another id is refused while the claim lasts...
@@ -780,10 +781,37 @@ class ConcurrencyTest extends RestTestCase
         $this->assertSame('12', get_post_meta($b->get_id(), '_sale_price', true));
 
         // ...and the next chunk of the same revert goes through.
-        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$b->get_id()], 'revert_batch_id' => $first], [ListMode::BATCH_HEADER => wp_generate_uuid4()]));
+        $this->assertStatus(200, $this->request('POST', $route, ['ids' => [$b->get_id()], 'revert_batch_id' => $first], $chunk));
         $this->assertSame('', get_post_meta($b->get_id(), '_sale_price', true));
 
-        delete_transient(Concurrency::revertClaim($this->batchId()));
+        // Closing the revert lets the claim go at once.
+        $this->assertSame($first, get_transient(Concurrency::revertClaim($this->batchId())));
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/log/batch/'.$first.'/close', [], [ListMode::BATCH_HEADER => '']));
+        $this->assertFalse(get_transient(Concurrency::revertClaim($this->batchId())));
+        $this->assertFalse(get_transient(Concurrency::revertOf($first)));
+    }
+
+    public function test_a_revert_in_one_request_lets_its_claim_go_when_it_ends(): void
+    {
+        $a = $this->simpleProduct(['regular_price' => '20']);
+        $b = $this->simpleProduct(['regular_price' => '20']);
+        $this->assertStatus(200, $this->request('POST', '/wc/v3/products/batch', ['update' => [
+            ['id' => $a->get_id(), 'sale_price' => '11'],
+            ['id' => $b->get_id(), 'sale_price' => '12'],
+        ]]));
+
+        $route = '/wc-products-list/v1/log/batch/'.$this->batchId().'/revert';
+        $undo = wp_generate_uuid4();
+
+        // An Undo: one request under its own revert batch id, no planned count.
+        $this->assertStatus(200, $this->request('POST', $route, ['revert_batch_id' => $undo], [ListMode::BATCH_HEADER => $undo]));
+        $this->assertFalse(get_transient(Concurrency::revertClaim($this->batchId())));
+
+        // A History revert right after is not refused as "already running".
+        $again = wp_generate_uuid4();
+        $response = $this->request('POST', $route, ['revert_batch_id' => $again], [ListMode::BATCH_HEADER => $again]);
+        $this->assertStatus(200, $response);
+        $this->assertNotSame(Concurrency::REVERT_RUNNING_ERROR, $this->data($response)['code'] ?? null);
     }
 
     public function test_a_planned_batch_is_running_until_closed_and_interrupted_when_abandoned(): void

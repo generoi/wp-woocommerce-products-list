@@ -201,10 +201,16 @@ export function rootKeysOf( fields: string[] ): Set< string > {
 	return new Set( fields.map( ( field ) => field.split( '.' )[ 0 ] ?? field ) );
 }
 
+/** An extension's value entry: the stored value with what the server derives from it, sent whole. */
+function isValueEntry( value: Record< string, unknown > ): boolean {
+	return 'value' in value;
+}
+
 /**
  * The cached row with the fetched values on top. Plain objects (an
  * extension's `i18n`, `dimensions`) merge key by key, so a partial fetch
- * keeps what the row already carried; arrays and scalars are replaced.
+ * keeps what the row already carried; arrays, scalars and value entries
+ * (an object with a `value`, sent whole) are replaced.
  * `undefined` never replaces a value. With `only`, just those top-level
  * keys are taken from the fetched row (what the request asked for), and
  * the identity keys the cached row has are kept whatever the fetch says.
@@ -228,7 +234,9 @@ export function mergeHydrated< Row extends Record< string, unknown > >( cached: 
 			continue;
 		}
 
-		result[ key ] = isPlainObject( current ) && isPlainObject( value ) ? mergeHydrated( current, value ) : value;
+		// A value entry (`{ value, source, same, copiedFrom, … }`, a translated text) is one value: what it no longer says
+		// (a "copied" flag the new text does not have) must not survive from the cached one.
+		result[ key ] = isPlainObject( current ) && isPlainObject( value ) && ! isValueEntry( value ) ? mergeHydrated( current, value ) : value;
 	}
 
 	return result as Row;

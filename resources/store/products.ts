@@ -5,11 +5,14 @@
  * request is made; `invalidateProducts` is the slow, certain path.
  */
 import { useCallback, useEffect, useMemo, useRef } from '@wordpress/element';
+import { decodeEntities } from '@wordpress/html-entities';
 import { addAction, doAction } from '@wordpress/hooks';
+import { _n, sprintf } from '@wordpress/i18n';
 import { getCounts, listProducts } from '../api/client';
 import type { ListResult } from '../api/client';
 import { buildProductListQuery } from '../api/query';
 import type { View } from '../dataviews';
+import { notify } from '../actions/notices';
 import { ACTIONS } from '../extensions/hooks';
 import { getChildrenState, invalidateVariations, patchVariationRows, removeVariationRows } from '../hierarchy/use-hierarchy';
 import { getSettings } from '../settings';
@@ -437,8 +440,71 @@ export async function refreshParentsOf( rows: ProductListItem[], fetchList: type
 	return refreshParentIds( rows.map( parentIdOf ).filter( ( id ): id is number => typeof id === 'number' ), fetchList );
 }
 
-/** Refetch the derived fields of these parents (those in a cached page) and patch them in. */
-export async function refreshParentIds( ids: number[], fetchList: typeof listProducts = listProducts ): Promise< number[] > {
+/** Parents an open editor names itself as deleted meanwhile (its own notice): the list removes them without naming them again. */
+const namedByEditor = new Set< number >();
+
+/** The editor names these parents itself when they turn out deleted: `refreshParentIds` only removes them. */
+export function deletionsNamedByEditor( ids: Iterable< number > ): void {
+	for ( const id of ids ) {
+		namedByEditor.add( id );
+	}
+}
+
+/** Statuses a product can have, the Trash included (a list query's `status: 'any'` leaves the Trash out). */
+const EVERY_STATUS = 'publish,future,draft,pending,private,trash';
+
+export interface RefreshParentOptions {
+	/** Existence checks of a parent that read back half-deleted, `interval` ms apart (default 8 × 1 s). */
+	tries?: number;
+	interval?: number;
+	sleep?: ( ms: number ) => Promise< void >;
+}
+
+/**
+ * Whether a parent's fresh read may be a product being deleted: WordPress deletes its terms (the product type among
+ * them) and meta first, then its variations, and the post last, so for a few seconds a variable product reads back as
+ * a Simple product without prices. A parent missing from the read is checked too.
+ */
+function mayBeDeleting( id: number, fresh: ProductListItem | undefined ): boolean {
+	if ( ! fresh ) {
+		return true;
+	}
+
+	const cached = findCachedRow( id ) as { type?: unknown } | undefined;
+
+	return cached?.type === 'variable' && ( fresh as { type?: unknown } ).type !== 'variable';
+}
+
+/**
+ * Check these parents until each is gone or its deletion is over: the ids gone for good, and those still there.
+ * A parent moved to the Trash is neither (the Trash keeps it): it is left as the list shows it.
+ */
+async function settleParents( ids: number[], fetchList: typeof listProducts, { tries = 8, interval = 1000, sleep = ( ms: number ) => new Promise< void >( ( resolve ) => setTimeout( resolve, ms ) ) }: RefreshParentOptions ): Promise< { gone: number[]; present: number[] } > {
+	let pending = ids;
+	const gone: number[] = [];
+
+	for ( let attempt = 0; attempt < tries && pending.length > 0; attempt++ ) {
+		if ( attempt > 0 ) {
+			await sleep( interval );
+		}
+
+		const result = await fetchList( { include: pending.join( ',' ), per_page: pending.length, include_status: EVERY_STATUS, _fields: 'id,status' } );
+		const seen = new Map( result.items.map( ( item ) => [ item.id, item.status ] ) );
+
+		gone.push( ...pending.filter( ( id ) => ! seen.has( id ) ) );
+		// Trashed: done, and not gone. Still there: checked again (a type read back while deleting is no proof it stays).
+		pending = pending.filter( ( id ) => seen.has( id ) && seen.get( id ) !== 'trash' );
+	}
+
+	return { gone, present: ids.filter( ( id ) => ! gone.includes( id ) ) };
+}
+
+/**
+ * Refetch the derived fields of these parents (those in a cached page) and patch them in. A parent that reads back
+ * half-deleted (a variable product as a priceless Simple one) or not at all is checked until its deletion is over:
+ * gone, it leaves the list and a notice names it; still there, it is read again.
+ */
+export async function refreshParentIds( ids: number[], fetchList: typeof listProducts = listProducts, options: RefreshParentOptions = {} ): Promise< number[] > {
 	const cached = cachedProductIds();
 	const parents = Array.from( new Set( ids.filter( ( id ) => cached.has( id ) ) ) );
 
@@ -448,6 +514,7 @@ export async function refreshParentIds( ids: number[], fetchList: typeof listPro
 
 	const perPage = getSettings().limits.perPageMax;
 	const refreshed: number[] = [];
+	const suspects: number[] = [];
 
 	for ( let start = 0; start < parents.length; start += perPage ) {
 		const chunk = parents.slice( start, start + perPage );
@@ -457,10 +524,51 @@ export async function refreshParentIds( ids: number[], fetchList: typeof listPro
 			status: 'any',
 			_fields: PARENT_DERIVED_FIELDS.join( ',' ),
 		} );
+		const byId = new Map( result.items.map( ( item ) => [ item.id, item ] ) );
+		const doubtful = new Set( chunk.filter( ( id ) => mayBeDeleting( id, byId.get( id ) ) ) );
+		const sure = result.items.filter( ( item ) => ! doubtful.has( item.id ) );
 
-		if ( result.items.length ) {
-			patchItems( result.items );
-			refreshed.push( ...result.items.map( ( item ) => item.id ) );
+		suspects.push( ...doubtful );
+
+		if ( sure.length ) {
+			patchItems( sure );
+			refreshed.push( ...sure.map( ( item ) => item.id ) );
+		}
+	}
+
+	if ( ! suspects.length ) {
+		return refreshed;
+	}
+
+	const { gone, present } = await settleParents( suspects, fetchList, options );
+
+	if ( present.length ) {
+		const again = await fetchList( { include: present.join( ',' ), per_page: present.length, status: 'any', _fields: PARENT_DERIVED_FIELDS.join( ',' ) } );
+
+		if ( again.items.length ) {
+			patchItems( again.items );
+			refreshed.push( ...again.items.map( ( item ) => item.id ) );
+		}
+	}
+
+	const goneShown = gone.filter( ( id ) => findCachedRow( id ) );
+
+	if ( goneShown.length ) {
+		const names = goneShown.filter( ( id ) => ! namedByEditor.has( id ) ).map( ( id ) => decodeEntities( String( findCachedRow( id )?.name ?? `#${ id }` ) ) );
+
+		goneShown.forEach( ( id ) => namedByEditor.delete( id ) );
+		removeItems( goneShown );
+
+		if ( names.length ) {
+			notify.info(
+				sprintf(
+					/* translators: 1: number of products, 2: their names */
+					_n( '%1$d product was deleted meanwhile and left the list: %2$s', '%1$d products were deleted meanwhile and left the list: %2$s', names.length, 'wp-woocommerce-products-list' ),
+					names.length,
+					names.join( ', ' )
+				),
+				{ id: 'wc-pl-parents-deleted' }
+			);
 		}
 	}
 

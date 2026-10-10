@@ -1019,6 +1019,35 @@ final class Concurrency
         }
     }
 
+    /**
+     * The revert of several requests posted under `$revertBatchId` is
+     * closed: the claim it keeps between its chunks is let go at once,
+     * rather than `REVERT_CLAIM_TTL` seconds later (a revert started
+     * right after, from History or another tab, is not refused as
+     * still running).
+     */
+    public static function releaseRevertOf(string $revertBatchId): void
+    {
+        $batchId = get_transient(self::revertOf($revertBatchId));
+
+        delete_transient(self::revertOf($revertBatchId));
+
+        if (is_string($batchId) && $batchId !== '') {
+            self::releaseRevert($batchId, $revertBatchId, false);
+        }
+    }
+
+    /** The batch a revert of several requests reverts, kept while it holds the claim. */
+    public static function rememberRevertOf(string $revertBatchId, string $batchId): void
+    {
+        set_transient(self::revertOf($revertBatchId), $batchId, self::REVERT_CLAIM_TTL);
+    }
+
+    public static function revertOf(string $revertBatchId): string
+    {
+        return 'wcpl_revert_of_'.md5($revertBatchId);
+    }
+
     public static function revertClaim(string $batchId): string
     {
         return 'wcpl_revert_'.md5($batchId);

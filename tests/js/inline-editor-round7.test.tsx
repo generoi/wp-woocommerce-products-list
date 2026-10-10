@@ -459,6 +459,36 @@ describe( 'language tools with Update', () => {
 		}
 	} );
 
+	it( 'does not report a staged tool that wrote nothing as applied', async () => {
+		const previous = settings.actions;
+
+		settings.actions = [ transform ] as unknown as typeof settings.actions;
+
+		try {
+			const rows = [ simple( 1 ), simple( 2 ) ];
+
+			answerLists( rows );
+			// The server ran it and changed nothing ("Keep as is" on values it leaves alone).
+			runAction.mockResolvedValue( { batch_id: 'batch-shared', results: [ { id: 1, ok: true, changed: 0 }, { id: 2, ok: true, changed: 0 } ], items: [] } );
+
+			render( <InlineEditor host={ hostFor( rows, fieldsWithTab, { initialTab: 'i18n:se' } ) } /> );
+			await screen.findByRole( 'heading', { name: 'Bulk edit 2 items' } );
+			fireEvent.change( await screen.findByLabelText( 'Text' ), { target: { value: 'NEW ' } } );
+			fireEvent.click( screen.getByRole( 'button', { name: /add to Update/ } ) );
+			fireEvent.click( await screen.findByRole( 'button', { name: 'Apply 1 language change' } ) );
+
+			await waitFor( () => expect( runAction ).toHaveBeenCalledTimes( 1 ) );
+			await waitFor( () => expect( notify.success.mock.calls.length + notify.info.mock.calls.length ).toBeGreaterThan( 0 ) );
+
+			const said = [ ...notify.success.mock.calls, ...notify.info.mock.calls ].map( ( call ) => String( call[ 0 ] ) ).join( ' ' );
+
+			expect( said ).not.toContain( 'language change applied' );
+			expect( said ).toContain( 'Nothing changed' );
+		} finally {
+			settings.actions = previous;
+		}
+	} );
+
 	it( 'names every row a staged tool was refused on, not only the first', async () => {
 		const previous = settings.actions;
 
