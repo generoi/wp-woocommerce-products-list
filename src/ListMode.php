@@ -22,11 +22,13 @@ final class ListMode
     /**
      * Where a write came from. The app sends `quick`, `bulk` or `extension`;
      * the plugin itself sets `action` and `revert` on its own nested
-     * requests. Defaults to `quick`. The log table stores exactly these.
+     * requests; `i18n` marks a translation write outside wc/v3 (gds-woo-i18n's
+     * attribute-term translations, contracts §3.6). Defaults to `quick`. The
+     * log table stores exactly these.
      */
     public const SOURCE_HEADER = 'X-WC-Products-List-Source';
 
-    public const SOURCES = ['quick', 'bulk', 'action', 'extension', 'revert'];
+    public const SOURCES = ['quick', 'bulk', 'action', 'extension', 'revert', 'i18n'];
 
     /**
      * A batch id is a UUID v4, as the app generates. Anything else in the

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Attribute-term translations are clash-checked and logged (audit round 8): gds-woo-i18n's term route (`PUT /gds-woo-i18n/v1/terms/{id}`) and the term edit screen take a per-term lock (`Concurrency::lockName('t', id)`), compare the loaded value (`expect`) with the stored one and refuse a clash with 409 `wc_products_list_conflict` naming the term, the field and its value now; every change and refusal is a History row. The log accepts `object_type` `term` (`Logger::OBJECT_TYPES`), action `translate_term` and source `i18n`; term rows are never reverted and never match a product's `object_id` filter (`GET /log` takes `object_type`). History names them "Translate attribute term" / "(attribute term)". docs/contracts.md §3.6.
+
 ## 0.2.1 - 2026-10-10
 
 Clash-prevention and background-update fixes from audit rounds 5-7 of the 0.2.0 save and History path. Default `log` mode still measures within noise of 0.1.10 (round 7, isolated clone: full catalogue over HTTP 185 s vs 191 s mean at comparable load, 51.7 vs 46.5 queries per save on the CLI, the clash checks 3-6 % of a 100-row save; client long tasks during a foreground background save p50 65 ms, max 102 ms).

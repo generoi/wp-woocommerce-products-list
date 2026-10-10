@@ -39,7 +39,7 @@ export function skipReasonLabel( reason: string ): string {
 }
 
 /** Actions whose rows a revert never writes back; mirrors Revert::NOT_REVERTABLE in src/Log/Revert.php. */
-export const NOT_REVERTABLE_ACTIONS: ReadonlySet< string > = new Set( [ 'trash', 'restore', 'delete', 'duplicate', 'create' ] );
+export const NOT_REVERTABLE_ACTIONS: ReadonlySet< string > = new Set( [ 'trash', 'restore', 'delete', 'duplicate', 'create', 'translate_term' ] );
 
 /**
  * A row a revert puts back: an ok row with a field, of an update or of an

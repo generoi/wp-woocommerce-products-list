@@ -52,10 +52,12 @@ final class Revert
 
     /**
      * Actions whose rows a revert never writes back, whatever field they
-     * carry: the built-in ones that have their own way back (or none).
+     * carry: the built-in ones that have their own way back (or none),
+     * and term translations (`translate_term`, object_type `term`: the
+     * object id is a term id, not a product's).
      * Mirrored in resources/history/batch-scope.ts.
      */
-    public const NOT_REVERTABLE = ['trash', 'restore', 'delete', 'duplicate', 'create'];
+    public const NOT_REVERTABLE = ['trash', 'restore', 'delete', 'duplicate', 'create', Logger::ACTION_TRANSLATE_TERM];
 
     /**
      * Whether the rows of an action are put back by a revert: any action
@@ -108,7 +110,7 @@ final class Revert
                 continue;
             }
 
-            if (! self::revertable($action) || ($row['status'] ?? 'ok') !== 'ok' || $field === '') {
+            if (! self::revertable($action) || $type === 'term' || ($row['status'] ?? 'ok') !== 'ok' || $field === '') {
                 // A failed change wrote nothing: it is reported as such, not as its action.
                 $skipped[$type.':'.$id] ??= ['id' => $id, 'object_type' => $type, 'action' => ($row['status'] ?? 'ok') === 'error' && self::revertable($action) ? 'failed' : $action];
 
@@ -145,9 +147,11 @@ final class Revert
         foreach ($skipped as $key => $item) {
             // An object with both an update row and, say, a trash row is reverted
             // where it can be and not reported as skipped.
-            $reverted = $item['object_type'] === 'variation'
-                ? array_filter($plan['variations'], static fn (array $byId): bool => isset($byId[$item['id']])) !== []
-                : isset($plan['products'][$item['id']]);
+            $reverted = match ($item['object_type']) {
+                'variation' => array_filter($plan['variations'], static fn (array $byId): bool => isset($byId[$item['id']])) !== [],
+                'term' => false,
+                default => isset($plan['products'][$item['id']]),
+            };
 
             if (! $reverted) {
                 $plan['skipped'][] = $item;

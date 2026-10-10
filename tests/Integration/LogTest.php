@@ -369,6 +369,66 @@ class LogTest extends RestTestCase
         $this->assertSame(1, $summary['errors']);
     }
 
+    /**
+     * gds-woo-i18n logs attribute-term translations as `term` rows (§3.6):
+     * shown with the term's name and edit link, never matched by a
+     * product's id filter and never reverted, even in a batch with a
+     * product of the same id.
+     */
+    public function test_term_rows_are_shown_but_never_reverted_or_taken_for_a_product(): void
+    {
+        $product = $this->simpleProduct();
+        register_taxonomy('pa_color', ['product', 'product_variation']);
+        $term = self::factory()->term->create_and_get(['taxonomy' => 'pa_color', 'name' => 'Konjakki']);
+        $batch = wp_generate_uuid4();
+        $mixed = wp_generate_uuid4();
+        $base = ['source' => 'i18n', 'action' => Logger::ACTION_TRANSLATE_TERM, 'object_type' => 'term', 'field' => 'i18n.se.name'];
+
+        $this->seed([
+            $base + ['batch_id' => $batch, 'object_id' => $term->term_id, 'old_value' => null, 'new_value' => 'Konjak'],
+            $base + ['batch_id' => $batch, 'object_id' => $term->term_id, 'old_value' => 'Konjak', 'new_value' => 'Cognac', 'status' => 'skipped', 'message' => 'changed by someone else', 'context' => ['reason' => 'conflict', 'fields' => ['i18n.se.name']]],
+            // A term row whose id is a product's, in a batch with that product's own change.
+            $base + ['batch_id' => $mixed, 'object_id' => $product->get_id(), 'old_value' => 'x', 'new_value' => 'y'],
+            ['batch_id' => $mixed, 'object_id' => $product->get_id(), 'field' => 'menu_order', 'old_value' => '0', 'new_value' => '5'],
+            ['batch_id' => $mixed, 'object_id' => $product->get_id(), 'object_type' => 'unknown', 'field' => 'sku', 'old_value' => 'a', 'new_value' => 'b', 'status' => 'skipped'],
+        ]);
+
+        $rows = $this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $batch]))['items'];
+        $this->assertSame(['term', 'term'], array_column($rows, 'object_type'));
+        $this->assertSame('Konjakki', $rows[0]['object_name']);
+        $this->assertStringContainsString('tag_ID='.$term->term_id, (string) $rows[0]['edit_link']);
+        $this->assertSame(['skipped', 'ok'], array_column($rows, 'status'));
+        $this->assertSame('i18n', $rows[0]['source']);
+
+        // Unknown types are filed as products, as before.
+        $types = array_column($this->data($this->request('GET', '/wc-products-list/v1/log', ['batch' => $mixed]))['items'], 'object_type');
+        $this->assertSame(['product', 'product', 'term'], $types);
+
+        // A product's history leaves out a term with the same id, unless asked for terms.
+        $byProduct = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $product->get_id()]))['items'];
+        $this->assertSame(['product', 'product'], array_column($byProduct, 'object_type'));
+        $byTerm = $this->data($this->request('GET', '/wc-products-list/v1/log', ['object_id' => $product->get_id(), 'object_type' => 'term']))['items'];
+        $this->assertSame(['term'], array_column($byTerm, 'object_type'));
+
+        $batches = [];
+        foreach ($this->data($this->request('GET', '/wc-products-list/v1/log/batches'))['items'] as $item) {
+            $batches[$item['batch_id']] = $item;
+        }
+        $this->assertFalse($batches[$batch]['revertable']);
+        $this->assertSame('Translate attribute term', $batches[$batch]['summary']);
+        $this->assertSame(['conflict'], $batches[$batch]['skipped_reasons']);
+        $this->assertTrue($batches[$mixed]['revertable']);
+
+        $plan = $this->data($this->request('GET', '/wc-products-list/v1/log/batch/'.$mixed));
+        $this->assertSame(1, $plan['objects']);
+        $this->assertContains(['id' => $product->get_id(), 'object_type' => 'term', 'action' => Logger::ACTION_TRANSLATE_TERM], $plan['skipped']);
+
+        $response = $this->request('POST', '/wc-products-list/v1/log/batch/'.$mixed.'/revert');
+        $this->assertStatus(200, $response);
+        $this->assertSame(0, wc_get_product($product->get_id())->get_menu_order());
+        $this->assertSame([], get_post_meta($product->get_id(), 'i18n.se.name'));
+    }
+
     public function test_log_requires_the_capability(): void
     {
         $this->actAs('editor');

@@ -4,7 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { batchQueryFromView, describeBatchChanges, describeSkipped } from '../../resources/history/batch-fields';
-import { actionLabel, actionOptions, logQueryFromView } from '../../resources/history/log-fields';
+import { NOT_REVERTABLE_ACTIONS } from '../../resources/history/batch-scope';
+import { actionLabel, actionOptions, logQueryFromView, SOURCE_OPTIONS } from '../../resources/history/log-fields';
 import type { DeclarativeAction } from '../../resources/types';
 import { editSettings } from './edit-fixtures';
 
@@ -18,6 +19,12 @@ describe( 'History action names', () => {
 		expect( actionLabel( 'i18n_old_tool', settings ) ).toBe( 'I18n old tool' );
 		expect( actionOptions( settings ).map( ( option ) => option.value ) ).toContain( 'i18n_transform' );
 		expect( describeBatchChanges( { fields: [], actions: [ 'i18n_transform' ] }, [], settings ) ).toBe( 'Edit translated text' );
+	} );
+
+	it( 'names attribute-term translations (gds-woo-i18n, source i18n) and never offers to revert them', () => {
+		expect( actionLabel( 'translate_term', settings ) ).toBe( 'Translate attribute term' );
+		expect( SOURCE_OPTIONS.find( ( option ) => option.value === 'i18n' )?.label ).toBe( 'Translations' );
+		expect( NOT_REVERTABLE_ACTIONS.has( 'translate_term' ) ).toBe( true );
 	} );
 } );
 

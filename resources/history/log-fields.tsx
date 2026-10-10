@@ -18,6 +18,7 @@ export const SOURCE_OPTIONS = [
 	{ value: 'action', label: __( 'Action', 'wp-woocommerce-products-list' ) },
 	{ value: 'extension', label: __( 'Extension', 'wp-woocommerce-products-list' ) },
 	{ value: 'revert', label: __( 'Revert', 'wp-woocommerce-products-list' ) },
+	{ value: 'i18n', label: __( 'Translations', 'wp-woocommerce-products-list' ) },
 ];
 
 export const ACTION_OPTIONS = [
@@ -26,6 +27,7 @@ export const ACTION_OPTIONS = [
 	{ value: 'restore', label: __( 'Restore', 'wp-woocommerce-products-list' ) },
 	{ value: 'delete', label: __( 'Delete', 'wp-woocommerce-products-list' ) },
 	{ value: 'duplicate', label: __( 'Duplicate', 'wp-woocommerce-products-list' ) },
+	{ value: 'translate_term', label: __( 'Translate attribute term', 'wp-woocommerce-products-list' ) },
 ];
 
 /**
@@ -213,7 +215,12 @@ export function createLogFields( settings: Settings, options: LogFieldOptions = 
 				getValue: ( { item } ) => item.object_name || `#${ item.object_id }`,
 				render: ( { item } ) => {
 					const label = item.object_name || `#${ item.object_id }`;
-					const kind = item.object_type === 'variation' ? ` (${ __( 'variation', 'wp-woocommerce-products-list' ) })` : '';
+					const kind =
+						item.object_type === 'variation'
+							? ` (${ __( 'variation', 'wp-woocommerce-products-list' ) })`
+							: item.object_type === 'term'
+							? ` (${ __( 'attribute term', 'wp-woocommerce-products-list' ) })`
+							: '';
 
 					return item.edit_link ? (
 						<a href={ item.edit_link }>

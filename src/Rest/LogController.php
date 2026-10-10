@@ -41,6 +41,8 @@ final class LogController
                 'action' => ['type' => 'string'],
                 'object_id' => ['type' => 'integer'],
                 'parent_id' => ['type' => 'integer'],
+                // With object_id/parent_id: whose id it is. Default: a product's or variation's (a term id may equal one).
+                'object_type' => ['type' => 'string', 'enum' => Logger::OBJECT_TYPES],
             ],
         ]);
 
@@ -387,7 +389,7 @@ final class LogController
         $rows = $pageIds === [] ? [] : $wpdb->get_results($this->prepare(
             "SELECT batch_id, MIN(created_at) AS created_at, MIN(user_id) AS user_id, COALESCE(MIN(IF(source <> 'action', source, NULL)), MIN(source)) AS source,
                 SUM(status <> 'skipped') AS row_count, COUNT(DISTINCT IF(status <> 'skipped', object_id, NULL)) AS object_count, COUNT(DISTINCT user_id) AS user_count, MAX(id) AS last_id,
-                SUM(action NOT IN ({$notRevertable}) AND status = 'ok' AND field <> '') AS updates,
+                SUM(action NOT IN ({$notRevertable}) AND object_type <> 'term' AND status = 'ok' AND field <> '') AS updates,
                 SUM(status = 'error') AS errors,
                 COUNT(DISTINCT IF(status = 'skipped', object_id, NULL)) AS skipped_count,
                 COUNT(DISTINCT IF(object_type = 'product' AND status <> 'skipped', object_id, NULL)) AS product_count,
@@ -511,6 +513,7 @@ final class LogController
             'publish' => __('Publish', 'wp-woocommerce-products-list'),
             'draft' => __('Set to draft', 'wp-woocommerce-products-list'),
             'feature' => ($context['args']['featured'] ?? true) ? __('Mark as featured', 'wp-woocommerce-products-list') : __('Remove from featured', 'wp-woocommerce-products-list'),
+            Logger::ACTION_TRANSLATE_TERM => __('Translate attribute term', 'wp-woocommerce-products-list'),
             default => null,
         };
 
@@ -612,7 +615,7 @@ final class LogController
         $ids = self::writeOrder(is_array($objects) ? $objects : []);
         $others = is_array($others) ? $others : [];
         $written = array_flip($ids);
-        $skipped = array_values(array_filter(Revert::objects($others)['skipped'], static fn (array $item): bool => ! isset($written[(int) $item['id']])));
+        $skipped = array_values(array_filter(Revert::objects($others)['skipped'], static fn (array $item): bool => $item['object_type'] === 'term' || ! isset($written[(int) $item['id']])));
         $chunk = Revert::chunk();
         $users = (int) $counts['users'];
 
@@ -649,7 +652,7 @@ final class LogController
         $masked = implode(',', array_fill(0, count(Recorder::MASKED_KEYS), '%s'));
 
         return [
-            "(status = 'ok' AND field <> '' AND object_id <> 0 AND action NOT IN ({$notRevertable}) AND field NOT IN ({$masked}))",
+            "(status = 'ok' AND field <> '' AND object_id <> 0 AND object_type <> 'term' AND action NOT IN ({$notRevertable}) AND field NOT IN ({$masked}))",
             array_merge(Revert::NOT_REVERTABLE, Recorder::MASKED_KEYS),
         ];
     }
@@ -963,11 +966,22 @@ final class LogController
             return [implode(' AND ', $where), $values];
         }
 
+        $byId = false;
+
         foreach (['object_id', 'parent_id'] as $param) {
             if ($request[$param] !== null && $request[$param] !== '') {
                 $where[] = "{$param} = %d";
                 $values[] = (int) $request[$param];
+                $byId = true;
             }
+        }
+
+        if (is_string($request['object_type']) && in_array($request['object_type'], Logger::OBJECT_TYPES, true)) {
+            $where[] = 'object_type = %s';
+            $values[] = $request['object_type'];
+        } elseif ($byId) {
+            // A product's history never shows the rows of a term that has the same id.
+            $where[] = "object_type <> 'term'";
         }
 
         foreach (['field', 'action'] as $param) {
@@ -1115,9 +1129,12 @@ final class LogController
         $userIds = [];
 
         foreach ($rows as $row) {
-            $postIds[] = (int) $row['object_id'];
-            $postIds[] = (int) $row['parent_id'];
             $userIds[] = (int) $row['user_id'];
+
+            if ($row['object_type'] !== 'term') {
+                $postIds[] = (int) $row['object_id'];
+                $postIds[] = (int) $row['parent_id'];
+            }
         }
 
         foreach ($rows as $row) {
@@ -1139,12 +1156,24 @@ final class LogController
         foreach ($rows as $row) {
             $objectId = (int) $row['object_id'];
             $parentId = (int) $row['parent_id'];
-            $post = $objectId > 0 ? get_post($objectId) : null;
-            $editId = $row['object_type'] === 'variation' && $parentId > 0 ? $parentId : $objectId;
             $editLink = null;
 
-            if ($editId > 0 && get_post($editId) !== null && current_user_can('edit_post', $editId)) {
-                $editLink = get_edit_post_link($editId, 'raw') ?: null;
+            if ($row['object_type'] === 'term') {
+                // gds-woo-i18n's attribute-term translations: the id is a term's.
+                $term = $objectId > 0 ? get_term($objectId) : null;
+                $objectName = $term instanceof \WP_Term ? $term->name : '';
+
+                if ($term instanceof \WP_Term && current_user_can('edit_term', $objectId)) {
+                    $editLink = get_edit_term_link($objectId, $term->taxonomy, 'product') ?: null;
+                }
+            } else {
+                $post = $objectId > 0 ? get_post($objectId) : null;
+                $objectName = $post !== null ? (string) $post->post_title : '';
+                $editId = $row['object_type'] === 'variation' && $parentId > 0 ? $parentId : $objectId;
+
+                if ($editId > 0 && get_post($editId) !== null && current_user_can('edit_post', $editId)) {
+                    $editLink = get_edit_post_link($editId, 'raw') ?: null;
+                }
             }
 
             $items[] = [
@@ -1158,7 +1187,7 @@ final class LogController
                 'object_type' => (string) $row['object_type'],
                 'object_id' => $objectId,
                 'parent_id' => $parentId,
-                'object_name' => $post !== null ? (string) $post->post_title : '',
+                'object_name' => $objectName,
                 'edit_link' => $editLink,
                 'field' => (string) $row['field'],
                 'old_value' => $row['old_value'] === null ? null : (string) $row['old_value'],

@@ -98,9 +98,10 @@ export interface LogRow {
 	created_at: string;
 	created_at_gmt: string;
 	user: { id: number; name: string };
-	source: 'quick' | 'bulk' | 'action' | 'extension' | 'revert';
+	source: 'quick' | 'bulk' | 'action' | 'extension' | 'revert' | 'i18n';
 	action: string;
-	object_type: 'product' | 'variation';
+	/** `term`: a gds-woo-i18n attribute-term translation (action `translate_term`); `object_id` is the term's id. */
+	object_type: 'product' | 'variation' | 'term';
 	object_id: number;
 	parent_id: number;
 	object_name: string;

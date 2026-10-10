@@ -32,6 +32,18 @@ final class Logger
 
     public const INSERT_CHUNK = 200;
 
+    /**
+     * The objects a row can be about. `term` rows (gds-woo-i18n's
+     * attribute-term translations, action `translate_term`) are shown in
+     * History but never reverted (`Revert::NOT_REVERTABLE`) and never match
+     * a product's `object_id` filter. An integration checks for `term` here
+     * before logging one: an older log stored any unknown type as `product`.
+     */
+    public const OBJECT_TYPES = ['product', 'variation', 'term'];
+
+    /** The action of a term translation row. */
+    public const ACTION_TRANSLATE_TERM = 'translate_term';
+
     public const STATUS_OK = 'ok';
 
     public const STATUS_ERROR = 'error';
@@ -208,7 +220,7 @@ final class Logger
                 'user_id' => (int) ($row['user_id'] ?? $userId),
                 'source' => self::normaliseSource($row['source'] ?? $source),
                 'action' => substr((string) ($row['action'] ?? 'update'), 0, 40),
-                'object_type' => (string) ($row['object_type'] ?? 'product') === 'variation' ? 'variation' : 'product',
+                'object_type' => in_array((string) ($row['object_type'] ?? ''), self::OBJECT_TYPES, true) ? (string) $row['object_type'] : 'product',
                 'object_id' => (int) ($row['object_id'] ?? 0),
                 'parent_id' => (int) ($row['parent_id'] ?? 0),
                 'field' => substr((string) ($row['field'] ?? ''), 0, 100),
