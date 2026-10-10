@@ -4,12 +4,13 @@ import { hydrateSelection } from '../../resources/edit/hydrate';
 import { isRowPending } from '../../resources/store/save-activity';
 import type { ProductListItem } from '../../resources/types';
 import type * as ClientModule from '../../resources/api/client';
+import type * as HydrateModule from '../../resources/edit/hydrate';
 import { optimisticBatch } from '../../resources/actions/status';
 import { dropFromSelection } from '../../resources/actions/context';
 import { notify } from '../../resources/actions/notices';
 import { patchItems, removeItems } from '../../resources/store/products';
 import { setSettings } from '../../resources/settings';
-import { coreFields, editSettings, simple, variation } from './edit-fixtures';
+import { coreFields, editSettings, simple, variable, variation } from './edit-fixtures';
 
 /** What the server echoes for a written row: the request item without the app's request-only keys. */
 function echo( row: Record< string, unknown > ): Record< string, unknown > {
@@ -35,7 +36,7 @@ vi.mock( '../../resources/api/client', async ( importOriginal ) => {
 		toRow: ( row: unknown ) => row,
 	};
 } );
-vi.mock( '../../resources/edit/hydrate', () => ( { hydrateSelection: vi.fn() } ) );
+vi.mock( '../../resources/edit/hydrate', async ( importOriginal ) => ( { withoutUnaskedIdentity: ( await importOriginal< typeof HydrateModule >() ).withoutUnaskedIdentity, hydrateSelection: vi.fn() } ) );
 vi.mock( '../../resources/actions/notices', () => ( { notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), remove: vi.fn() } } ) );
 vi.mock( '../../resources/store/products', () => ( { patchItems: vi.fn(), invalidateProducts: vi.fn(), removeItems: vi.fn() } ) );
 vi.mock( '../../resources/edit/undo', () => ( { undoBatch: vi.fn( async () => undefined ) } ) );
@@ -243,6 +244,36 @@ describe( 'optimisticBatch', () => {
 		expect( row2.map( ( patch ) => patch.status ) ).toEqual( [ 'publish', 'draft', 'private' ] );
 		expect( vi.mocked( notify.error ).mock.calls[ 0 ]?.[ 0 ] ).toContain( 'Changed by someone else since it was loaded' );
 		expect( notify.success ).toHaveBeenCalledWith( '1 published', expect.anything() );
+	} );
+
+	it( 'keeps a refused or uncertain variable parent variable: the narrow re-read does not patch the client defaults (type simple, no children)', async () => {
+		// What a read of `id,status,date_modified_gmt,...` comes back as from the client: normalised, so type defaulted to simple.
+		const asRead = ( id: number, status: string ) => ( { id, status, date_modified_gmt: '2026-10-10T10:00:00', type: 'simple', name: `#${ id }`, _kind: 'product', _level: 0, _parentId: null, _hasChildren: false, _childCount: 0 } );
+
+		vi.mocked( batchProducts ).mockImplementationOnce( ( async () => ( {
+			update: [ { id: 2, error: { code: 'wc_products_list_conflict', message: 'Changed meanwhile.', data: { status: 409 } } } ],
+		} ) ) as never );
+		vi.mocked( hydrateSelection ).mockResolvedValue( { items: [ asRead( 2, 'private' ) ] as unknown as ProductListItem[], missing: [] } as never );
+
+		await optimisticBatch( [ variable( 2, { status: 'publish', name: 'Parent' } ) ], { patch: ( item ) => ( { id: item.id, status: 'draft' } ), refetch: false, success: () => '' } );
+
+		const conflicted = vi.mocked( patchItems ).mock.calls.flatMap( ( [ patches ] ) => patches as Array< Record< string, unknown > > ).filter( ( patch ) => patch.id === 2 ).pop();
+		expect( conflicted ).toMatchObject( { status: 'private', date_modified_gmt: '2026-10-10T10:00:00' } );
+		for ( const key of [ 'type', 'name', '_kind', '_hasChildren', '_childCount', '_parentId', '_level' ] ) {
+			expect( conflicted ).not.toHaveProperty( key );
+		}
+
+		// The same for a request whose outcome is unknown.
+		vi.mocked( patchItems ).mockClear();
+		vi.mocked( batchProducts ).mockRejectedValueOnce( Object.assign( new Error( 'Gateway Timeout' ), { code: 'http_error', status: 504 } ) );
+		vi.mocked( hydrateSelection ).mockResolvedValue( { items: [ asRead( 2, 'draft' ) ] as unknown as ProductListItem[], missing: [] } as never );
+
+		expect( await optimisticBatch( [ variable( 2, { status: 'publish' } ) ], { patch: ( item ) => ( { id: item.id, status: 'draft' } ), refetch: false, success: () => '' } ) ).toEqual( [ 2 ] );
+
+		const uncertain = vi.mocked( patchItems ).mock.calls.flatMap( ( [ patches ] ) => patches as Array< Record< string, unknown > > ).filter( ( patch ) => patch.id === 2 ).pop();
+		expect( uncertain ).toMatchObject( { status: 'draft' } );
+		expect( uncertain ).not.toHaveProperty( 'type' );
+		expect( uncertain ).not.toHaveProperty( '_hasChildren' );
 	} );
 
 	it( 'drops a row deleted meanwhile (404 wc_products_list_deleted) from the list and says so', async () => {

@@ -4,7 +4,7 @@
  * and the bulk list names a variation by its parent and its SKU.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf } from '../../resources/edit/hydrate';
+import { hydrateSelection, mergeHydrated, recheckStatuses, rootKeysOf, withoutUnaskedIdentity } from '../../resources/edit/hydrate';
 import type { HydrateDeps } from '../../resources/edit/hydrate';
 import { itemLabel, parentNameOf, skuOf } from '../../resources/edit/item-label';
 import { resetCurrentRows, setCurrentRows } from '../../resources/store/rows';
@@ -48,6 +48,27 @@ describe( 'a partial (per-tab) load', () => {
 		const merged = mergeHydrated( variation( 221, 219, { name: '25-34' } ) as Record< string, unknown >, items[ 0 ] as Record< string, unknown >, only );
 
 		expect( merged.name ).toBe( '25-34' );
+	} );
+} );
+
+describe( 'a narrow re-read (conflict, unknown outcome)', () => {
+	it( 'keeps a variable parent variable with its children when `type` was not asked for', async () => {
+		const deps: HydrateDeps = {
+			// The client normalises a row read with `_fields=id,status,date_modified_gmt`: type simple, no children.
+			listProducts: vi.fn( async () => ( { items: [ normalizeProduct( { id: 219, status: 'private', date_modified_gmt: '2026-10-10T10:00:00' } as unknown as RawProduct ) ], total: 1, totalPages: 1 } ) ),
+			getVariations: vi.fn(),
+		};
+		const { items } = await hydrateSelection( [ variable( 219, { name: 'Omaking Fresh' } ) ], [ 'date_modified_gmt', 'id', 'status' ], deps );
+
+		expect( items[ 0 ] ).toMatchObject( { type: 'variable', name: 'Omaking Fresh', status: 'private', _hasChildren: true, _childCount: 2, date_modified_gmt: '2026-10-10T10:00:00' } );
+	} );
+
+	it( 'takes `type` and `name` when asked, keeps the hierarchy keys, and fills keys the row lacks', () => {
+		const fetched = { id: 1, type: 'variable', name: 'New', _hasChildren: false, _childCount: 0 };
+
+		expect( withoutUnaskedIdentity( fetched, [ 'id', 'type', 'name' ], { id: 1, type: 'simple', name: 'Old', _hasChildren: true, _childCount: 3 } ) ).toEqual( { id: 1, type: 'variable', name: 'New' } );
+		expect( withoutUnaskedIdentity( fetched, [ 'id' ], { id: 1 } ) ).toEqual( fetched );
+		expect( withoutUnaskedIdentity( fetched, [ 'id', 'status' ] ) ).toEqual( { id: 1 } );
 	} );
 } );
 

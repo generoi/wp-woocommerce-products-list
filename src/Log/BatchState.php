@@ -256,6 +256,85 @@ final class BatchState
     }
 
     /**
+     * A row action is about to change variations of `$parents`: list
+     * them on the batch's marker (one entry each), so a request killed
+     * before it syncs them leaves them for `repair()` / `close()`, as a
+     * save's own parents are (`begin()`). Creates an unplanned marker for
+     * a batch that has none (an action request without a batch header):
+     * it lives until `dropParents()` or, after a kill, until `state()` or
+     * the daily prune repairs and drops it. Never touches another user's
+     * marker.
+     *
+     * @param  array<int, int>  $parents
+     */
+    public static function addParents(string $batchId, array $parents): void
+    {
+        $user = get_current_user_id();
+
+        if ($parents === [] || $user <= 0 || ! ListMode::isBatchId($batchId)) {
+            return;
+        }
+
+        self::mutate($batchId, static function (?array $marker) use ($user, $parents) {
+            if ($marker !== null && (int) ($marker['user'] ?? 0) !== $user) {
+                return false;
+            }
+
+            $now = time();
+
+            return [
+                'user' => $user,
+                'planned' => (int) ($marker['planned'] ?? 0),
+                'started' => (int) ($marker['started'] ?? $now),
+                'updated' => $now,
+                'parents' => array_merge(array_map('intval', (array) ($marker['parents'] ?? [])), array_map('intval', $parents)),
+            ];
+        });
+    }
+
+    /**
+     * The parents an `addParents()` listed are synced: take one entry of
+     * each away. `$own` (the marker was created by `addParents()`, not by
+     * `begin()`): an unplanned marker left with no parents is dropped,
+     * since no `end()` will.
+     *
+     * @param  array<int, int>  $parents
+     */
+    public static function dropParents(string $batchId, array $parents, bool $own = false): void
+    {
+        $user = get_current_user_id();
+
+        if ($parents === [] || ! ListMode::isBatchId($batchId)) {
+            return;
+        }
+
+        self::mutate($batchId, static function (?array $marker) use ($user, $parents, $own) {
+            if ($marker === null || (int) ($marker['user'] ?? 0) !== $user) {
+                return false;
+            }
+
+            $left = array_map('intval', (array) ($marker['parents'] ?? []));
+
+            foreach ($parents as $parent) {
+                $at = array_search((int) $parent, $left, true);
+
+                if ($at !== false) {
+                    unset($left[$at]);
+                }
+            }
+
+            if ($own && $left === [] && (int) ($marker['planned'] ?? 0) <= 0) {
+                return null;
+            }
+
+            $marker['updated'] = time();
+            $marker['parents'] = array_values($left);
+
+            return $marker;
+        });
+    }
+
+    /**
      * The client is done with the batch. True when there was a marker.
      */
     public static function close(string $batchId): bool

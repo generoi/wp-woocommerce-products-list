@@ -62,6 +62,30 @@ export const EDIT_BASE_FIELDS = [ 'id', 'type', 'status', 'parent_id', 'wc_produ
  */
 export const IDENTITY_KEYS: ReadonlySet< string > = new Set( [ 'type', 'name', 'parent_id', '_kind', '_level', '_parentId', '_parentName', '_hasChildren', '_childCount', '_placeholder' ] );
 
+/**
+ * A re-read row without the identity keys its request did not answer for:
+ * `type`, `name` and `parent_id` unless `fields` asked for them, and the
+ * hierarchy meta (`_kind`, `_hasChildren`, `_childCount`...) always, which
+ * the client derives from those defaults (a read of `id,status` says
+ * `type: 'simple'`, no children). With `cached`, only the keys that row
+ * holds are dropped (the fetched value fills a key the row lacks). Every
+ * re-read that is merged or patched over a list row goes through this, so
+ * a refused status change or a conflicted save never turns a variable
+ * parent into a simple product without its variations.
+ */
+export function withoutUnaskedIdentity< Row extends Record< string, unknown > >( row: Row, fields: string[], cached?: Record< string, unknown > ): Row {
+	const asked = rootKeysOf( fields );
+	const copy: Record< string, unknown > = { ...row };
+
+	for ( const key of IDENTITY_KEYS ) {
+		if ( ( key.startsWith( '_' ) || ! asked.has( key ) ) && ( ! cached || cached[ key ] !== undefined ) ) {
+			delete copy[ key ];
+		}
+	}
+
+	return copy as Row;
+}
+
 /** The projected sale < regular check reads both prices whichever one is edited. */
 export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_to', 'manage_stock' ] as const;
 
@@ -332,7 +356,8 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 			trashed.push( item.id );
 		}
 
-		return full ? ( mergeHydrated( item as Record< string, unknown >, full as Record< string, unknown > ) as ProductListItem ) : item;
+		// The identity keys the request did not ask for are the client's defaults, not data: the row keeps its own.
+		return full ? ( mergeHydrated( item as Record< string, unknown >, withoutUnaskedIdentity( full as Record< string, unknown >, wanted, item as Record< string, unknown > ) ) as ProductListItem ) : item;
 	} );
 
 	return { items: merged, missing, trashed, parentStamps };

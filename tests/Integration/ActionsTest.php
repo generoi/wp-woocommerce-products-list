@@ -6,8 +6,11 @@ use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\Actions\Duplicate;
 use GeneroWP\ProductsList\Bootstrap;
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Table;
+use GeneroWP\ProductsList\Rest\ActionsController;
+use GeneroWP\ProductsList\Rest\Concurrency;
 use GeneroWP\ProductsList\Rest\LogController;
 use WC_Product;
 use WP_Error;
@@ -561,6 +564,106 @@ class ActionsTest extends RestTestCase
         $parent = wc_get_product($parent->get_id());
         $this->assertCount(2, $parent->get_children());
         $this->assertEquals(5, (float) $parent->get_variation_price('min'));
+    }
+
+    /**
+     * Run POST /actions/{action} in-process and die (an uncaught exception,
+     * as a killed PHP process stops) when the lock of the `$dieAt`-th id
+     * (1-based) is asked for: outside the per-id try, after the ids before
+     * it are done.
+     *
+     * @param  array<int, int>  $ids
+     */
+    private function actAndDie(string $action, array $ids, int $dieAt): void
+    {
+        $calls = 0;
+        $die = static function ($seconds) use (&$calls, $dieAt) {
+            if (++$calls === $dieAt) {
+                throw new \RuntimeException('killed');
+            }
+
+            return $seconds;
+        };
+        add_filter(Concurrency::FILTER_LOCK_TIMEOUT, $die);
+
+        $request = new WP_REST_Request('POST', '/wc-products-list/v1/actions/'.$action);
+        $request->set_url_params(['action' => $action]);
+        $request->set_body_params(['ids' => $ids, 'args' => []]);
+        $request->set_header(ListMode::HEADER, '1');
+        $request->set_header(ListMode::BATCH_HEADER, $this->batchId());
+        ListMode::force(true, $this->batchId());
+        $died = false;
+
+        try {
+            (new ActionsController)->handle($request);
+        } catch (\RuntimeException $e) {
+            $died = $e->getMessage() === 'killed';
+        } finally {
+            remove_filter(Concurrency::FILTER_LOCK_TIMEOUT, $die);
+            Concurrency::unlockObjects();
+            Logger::setSource(null);
+            ListMode::force(null);
+            ListMode::reset();
+        }
+
+        $this->assertTrue($died, 'the request died part-way');
+    }
+
+    public function test_a_request_killed_part_way_keeps_the_rows_of_the_ids_it_finished(): void
+    {
+        $first = $this->simpleProduct();
+        $second = $this->simpleProduct();
+
+        $this->actAndDie('trash', [$first->get_id(), $second->get_id()], 2);
+
+        $this->assertSame('trash', get_post_status($first->get_id()));
+        $this->assertSame('publish', get_post_status($second->get_id()));
+
+        $rows = $this->rows();
+        $this->assertCount(1, $rows, 'the finished trash is logged before the next id starts');
+        $this->assertSame($first->get_id(), (int) $rows[0]['object_id']);
+        $this->assertSame('trash', $rows[0]['action']);
+        $this->assertSame(Logger::STATUS_OK, $rows[0]['status']);
+    }
+
+    public function test_a_request_killed_part_way_syncs_finished_parents_and_lists_the_rest(): void
+    {
+        $p1 = $this->variableProduct(['38', '39']);
+        $p2 = $this->variableProduct(['40', '41']);
+        [$a1, $a2] = $p1->get_children();
+        [$b1, $b2] = $p2->get_children();
+
+        foreach ([$a1 => '5', $a2 => '50', $b1 => '6', $b2 => '60'] as $id => $price) {
+            $variation = wc_get_product($id);
+            $variation->set_regular_price($price);
+            $variation->save();
+        }
+
+        ActionsController::syncParents([$p1->get_id(), $p2->get_id()]);
+        $this->assertContains('6', get_post_meta($p2->get_id(), '_price'));
+
+        // Dies when b2's lock is asked for: p1's group is done, b1 is trashed.
+        $this->actAndDie('trash', [$a1, $a2, $b1, $b2], 4);
+
+        $this->assertSame([], wc_get_product($p1->get_id())->get_children(), "p1's group was synced as soon as it was done");
+        $this->assertSame([$p2->get_id()], BatchState::get($this->batchId())['parents'], 'the parent in flight stays listed');
+        $this->assertContains('6', get_post_meta($p2->get_id(), '_price'), 'p2 was not synced yet');
+
+        // The client closes the batch (or the TTL lapses): the listed parent is repaired.
+        $this->assertTrue(BatchState::close($this->batchId()));
+        $this->assertEquals(60, (float) wc_get_product($p2->get_id())->get_variation_price('min'));
+        $this->assertCount(3, $this->rows());
+    }
+
+    public function test_variation_actions_leave_no_marker_behind(): void
+    {
+        $parent = $this->variableProduct(['38', '39']);
+        [$a, $b] = $parent->get_children();
+
+        $this->act('trash', [$a, $b]);
+
+        $this->assertNull(BatchState::get($this->batchId()));
+        $this->assertSame([], wc_get_product($parent->get_id())->get_children());
     }
 
     public function test_an_action_that_changes_nothing_logs_a_skipped_row(): void

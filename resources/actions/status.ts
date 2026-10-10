@@ -24,7 +24,7 @@ import { outcomeUnknown, UNCERTAIN_CODE, uncertainMessage, withoutUntouchedImage
 import { humanizeError, isConflictCode, isGoneCode } from '../edit/errors';
 import { writeItem } from '../edit/expect';
 import { failureMessage, failureNoticeActions, namesById, recordFailedRows } from '../edit/failed-rows';
-import { hydrateSelection } from '../edit/hydrate';
+import { hydrateSelection, withoutUnaskedIdentity } from '../edit/hydrate';
 import { getSettings } from '../settings';
 import { beginSaveJob, finishSaveJob, updateSaveJob } from '../store/save-activity';
 import { isBatchItemError } from '../types';
@@ -255,7 +255,8 @@ export async function optimisticBatch( items: ProductListItem[], options: Optimi
 				);
 				const gone = new Set( missing );
 
-				fresh = new Map( read.filter( ( row ) => ! gone.has( row.id ) ).map( ( row ) => [ row.id, row ] ) );
+				// Patched over the list row: only what was read, never the client's defaults for `type` and the hierarchy keys.
+				fresh = new Map( read.filter( ( row ) => ! gone.has( row.id ) ).map( ( row ) => [ row.id, withoutUnaskedIdentity( row as Record< string, unknown >, keys ) as ProductListItem ] ) );
 			} catch {
 				fresh = null;
 			}

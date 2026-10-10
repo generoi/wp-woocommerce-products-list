@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList\Rest;
 use GeneroWP\ProductsList\Actions\Action;
 use GeneroWP\ProductsList\Bootstrap;
 use GeneroWP\ProductsList\ListMode;
+use GeneroWP\ProductsList\Log\BatchState;
 use GeneroWP\ProductsList\Log\Logger;
 use GeneroWP\ProductsList\Log\Recorder;
 use GeneroWP\ProductsList\Plugin;
@@ -21,7 +22,10 @@ use WP_REST_Response;
  * any `context` it returns stored next to the args), and returns per-id
  * results (`changed`: how many fields the handler reported) plus the
  * refreshed rows of the ids that still exist, so the app can patch its
- * cache without a reload.
+ * cache without a reload. Each id's rows are written as soon as it is
+ * done, and each variable parent is synced as soon as its last variation
+ * in the request is (listed on the batch marker until then), so a request
+ * killed part-way loses neither (docs/contracts.md §3.6).
  */
 final class ActionsController
 {
@@ -140,31 +144,53 @@ final class ActionsController
         Logger::setSource('action');
         $batchId = Logger::batchId();
         $results = [];
-        $rows = [];
         $survivors = [];
-        $parents = [];
+        $groups = self::variationParents($parsed['ids']);
+        $touched = [];
+        // The batch's marker was set by `BatchState::begin()` only when
+        // the request named this batch id; otherwise the parents below
+        // live on a marker of their own, dropped once they are synced.
+        $ownMarker = ListMode::batchId() !== $batchId;
 
-        foreach ($parsed['ids'] as $id) {
+        foreach ($parsed['ids'] as $index => $id) {
+            $parent = $groups['parents'][$id] ?? 0;
+
+            if ($parent > 0 && ! isset($touched[$parent])) {
+                // Listed before the first of its variations is written: a
+                // request killed before the sync below leaves it for
+                // `BatchState::repair()` / `close()` (§3.6).
+                $touched[$parent] = false;
+                BatchState::addParents($batchId, [$parent]);
+            }
+
             [$result, $logRows, $product] = $this->runOne($action, $id, $args, $request, $batchId);
             $results[] = $result;
 
-            if ($product instanceof WC_Product_Variation && ($result['changed'] ?? 0) > 0 && $product->get_parent_id() > 0) {
-                $parents[$product->get_parent_id()] = true;
+            if ($parent > 0 && ($result['changed'] ?? 0) > 0) {
+                $touched[$parent] = true;
             }
 
-            foreach ($logRows as $row) {
-                $rows[] = $row;
-            }
+            // Per id, as `Saves::inserted()` does per item: a request killed
+            // or timed out part-way leaves no done trash, delete or status
+            // change without its row (History, Undo).
+            Logger::log($logRows);
+            Logger::flush();
 
             if ($product !== null && get_post($id) !== null) {
                 $survivors[] = $id;
             }
+
+            if ($parent > 0 && $groups['last'][$parent] === $index) {
+                // The parent's last variation in this request is done:
+                // sync it now, not at the end, so a request killed later
+                // leaves no finished parent with a stale price range.
+                if ($touched[$parent]) {
+                    self::syncParents([$parent]);
+                }
+
+                BatchState::dropParents($batchId, [$parent], $ownMarker);
+            }
         }
-
-        self::syncParents(array_keys($parents));
-
-        Logger::log($rows);
-        Logger::flush();
 
         $fields = $request->get_param('fields');
 
@@ -173,6 +199,35 @@ final class ActionsController
             'results' => $results,
             'items' => $this->refresh($survivors, is_string($fields) ? $fields : null),
         ]);
+    }
+
+    /**
+     * The parent of each variation among `$ids` (products are left out)
+     * and the index of each parent's last variation in `$ids`. One query
+     * for the posts (primed).
+     *
+     * @param  array<int, int>  $ids
+     * @return array{parents: array<int, int>, last: array<int, int>}
+     */
+    public static function variationParents(array $ids): array
+    {
+        _prime_post_caches($ids, false, false);
+
+        $parents = [];
+        $last = [];
+
+        foreach ($ids as $index => $id) {
+            $post = get_post($id);
+
+            if ($post === null || $post->post_type !== 'product_variation' || (int) $post->post_parent <= 0) {
+                continue;
+            }
+
+            $parents[$id] = (int) $post->post_parent;
+            $last[(int) $post->post_parent] = $index;
+        }
+
+        return ['parents' => $parents, 'last' => $last];
     }
 
     /**
