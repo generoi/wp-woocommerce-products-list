@@ -237,3 +237,17 @@ describe( 'clearing a number in a quick edit', () => {
 		expect( buildPayload( item, { low_stock_amount: 5 }, fields, settings ) ).toEqual( { low_stock_amount: 5 } );
 	} );
 } );
+
+describe( 'a negative menu order', () => {
+	it( 'is a valid menu order in a quick edit (WooCommerce sorts -1 first), while a negative quantity is not', async () => {
+		const { validateBulkNumericEdits } = await import( '../../resources/edit/bulk-numeric' );
+		const menuOrder = field( 'menu_order', { type: 'integer', rest: { fields: [ 'menu_order' ], applies: { product: true, variation: true } }, edit: { group: 'advanced', bulk: 'integer' } } );
+		const stock = field( 'stock_quantity', { type: 'integer', rest: { fields: [ 'stock_quantity' ], applies: { product: true, variation: true } }, edit: { group: 'inventory', bulk: 'integer' } } );
+		const item = simple( 1, { menu_order: 0, manage_stock: true, stock_quantity: 3 } );
+		const { formFields } = formFor( [ menuOrder, stock ], [ item ], false );
+		const messages = validateFormData( { menu_order: '-2', stock_quantity: '-2' }, formFields as never ).map( ( entry ) => `${ entry.field }: ${ entry.message }` );
+
+		expect( messages ).toEqual( [ 'stock_quantity: The quantity cannot be negative.' ] );
+		expect( validateBulkNumericEdits( [ item ], { menu_order: -2 }, [ menuOrder, stock ], settings ) ).toEqual( [] );
+	} );
+} );

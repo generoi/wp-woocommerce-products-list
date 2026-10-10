@@ -179,6 +179,14 @@ export function isSalePriceField( fieldOrId: ProductField | string ): boolean {
 }
 
 /**
+ * Whole-number fields that take a value below zero: the menu order (WordPress and WooCommerce's product screen accept
+ * -1 to sort a product first). Quantities, prices and the rest stay non-negative.
+ */
+export function allowsNegative( fieldId: string ): boolean {
+	return fieldId === 'menu_order';
+}
+
+/**
  * The bulk kind of a field: from `edit.bulk`, or `money`/`integer` for ids the
  * `wcProductsList.bulkNumericFields` filter adds (`regular_price`, `sale_price`,
  * `stock_quantity`, `cost_of_goods_sold` by default).
@@ -673,7 +681,7 @@ export function validateBulkNumericEdits( items: ProductListItem[], edits: Recor
 				continue;
 			}
 
-			if ( number < 0 && ! ( isNumericOp( own[ id ] ) && stockMayGoNegative( id, item, readFieldValue( field, item ), settings ) ) ) {
+			if ( number < 0 && ! allowsNegative( id ) && ! ( isNumericOp( own[ id ] ) && stockMayGoNegative( id, item, readFieldValue( field, item ), settings ) ) ) {
 				errors.push( { id: item.id, field: id, message: sprintf( /* translators: %s: field label */ __( '%s cannot be negative.', 'wp-woocommerce-products-list' ), field.label ?? id ) } );
 				continue;
 			}

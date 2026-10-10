@@ -20,7 +20,7 @@ import type { FieldCurrency } from '../extensions/declarative';
 import { formatPrice } from '../fields/currency';
 import { toInput } from '../fields/components/price-edit';
 import type { ProductField, ProductListItem, Settings } from '../types';
-import { isSalePriceField, numericKindOf } from './bulk-numeric';
+import { allowsNegative, isSalePriceField, numericKindOf } from './bulk-numeric';
 import { createBulkNumericControl } from './bulk-numeric-control';
 import type { FormData } from './bulk-numeric-control';
 import { createDateTimeControl } from './datetime-control';
@@ -147,7 +147,7 @@ export function isPlainTextField( field: ProductField ): boolean {
 	return ( field.type === 'text' || field.type === undefined ) && ! field.Edit && ! hasOptionList( field ) && numericKindOf( field ) === null;
 }
 
-function integerMessage( value: unknown ): string | null {
+function integerMessage( value: unknown, signed = false ): string | null {
 	if ( value === undefined || value === null || value === '' ) {
 		return null;
 	}
@@ -158,7 +158,7 @@ function integerMessage( value: unknown ): string | null {
 		return __( 'Enter a whole number.', 'wp-woocommerce-products-list' );
 	}
 
-	return Number( text ) < 0 ? __( 'The quantity cannot be negative.', 'wp-woocommerce-products-list' ) : null;
+	return ! signed && Number( text ) < 0 ? __( 'The quantity cannot be negative.', 'wp-woocommerce-products-list' ) : null;
 }
 
 export function toFormFields( fields: ProductField[], options: FormFieldOptions ): Field< FormData >[] {
@@ -400,7 +400,7 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 				formField.isValid = {
 					...formField.isValid,
-					custom: ( item, def ) => integerMessage( item[ field.id ] ) ?? ( custom ? custom( item, def as never ) : null ),
+					custom: ( item, def ) => integerMessage( item[ field.id ], allowsNegative( field.id ) ) ?? ( custom ? custom( item, def as never ) : null ),
 				};
 			}
 		}
