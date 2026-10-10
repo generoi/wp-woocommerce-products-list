@@ -32,6 +32,16 @@ export function moreActionsFor( actions: ProductAction[], rows: ProductListItem[
 	return { regular: eligible.filter( ( action ) => ! isDestructiveAction( action ) ), destructive: eligible.filter( isDestructiveAction ) };
 }
 
+/**
+ * Whether the bulk actions other than the primary ones are offered in the selection bar's "More actions" menu instead
+ * of the footer: in split view, and whenever the selection holds rows that are not on this page. DataViews' footer
+ * decides which actions to show from the page's selected rows only, so with every page row already featured it offers
+ * no "Mark as featured" for the rows selected on other pages; the menu judges the whole selection (`moreActionsFor()`).
+ */
+export function usesMoreActionsMenu( panelOpen: boolean, offPageCount: number ): boolean {
+	return panelOpen || offPageCount > 0;
+}
+
 /** The footer's actions in split view: the ones the menu offers no longer show as footer buttons. */
 export function withoutFooterBulk( actions: ProductAction[] ): ProductAction[] {
 	return actions.map( ( action ) => ( action.supportsBulk && ! action.isPrimary ? ( { ...action, supportsBulk: false } as ProductAction ) : action ) );

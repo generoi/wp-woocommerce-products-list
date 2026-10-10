@@ -58,6 +58,21 @@ describe( 'hydrateSelection across parents', () => {
 	} );
 } );
 
+describe( 'hydrateSelection image size', () => {
+	it( 'asks for the list\'s thumbnail size, so a re-read merged over a list row keeps its 150 px image', async () => {
+		const listProducts = listDeps();
+		const fetcher = vi.fn( async ( query: Record< string, string | number > ) => ( { items: String( query.include ).split( ',' ).map( ( id ) => ( { id: Number( id ), parent_id: 1 } ) as unknown as RawVariation ), totalPages: 1 } ) );
+
+		setAcrossFetch( fetcher );
+
+		await hydrateSelection( [ simple( 5 ), variation( 11, 1 ) ], [ 'id', 'images', 'image' ], { listProducts, getVariations: vi.fn(), getVariationsByIds } as unknown as HydrateDeps );
+		await getVariationsOfParents( [ 1 ], { fields: [ 'image' ] } );
+
+		expect( listProducts.mock.calls[ 0 ]?.[ 0 ] ).toMatchObject( { include: '5', image_size: 'thumbnail' } );
+		expect( fetcher.mock.calls.map( ( call ) => call[ 0 ].image_size ) ).toEqual( [ 'thumbnail', 'thumbnail' ] );
+	} );
+} );
+
 describe( 'recheckBases', () => {
 	it( 'checks products and the parents of variations in one light request, without reading variations', async () => {
 		const listProducts = listDeps( { 1: 'new', 2: 'same', 5: 'moved' }, { 3: 'trash', 4: 'deleted' } );

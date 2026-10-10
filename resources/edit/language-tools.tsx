@@ -643,8 +643,10 @@ export function previewPrices( def: DeclarativeAction, data: Record< string, unk
 		}
 
 		const newRegular = next.regular_price ?? current.regular_price;
+		// As the server (gds_woo_i18n_sale_not_below_regular): a new regular price is checked against the sale price the shop shows too.
+		const newSale = next.sale_price ?? current.sale_price;
 
-		if ( next.sale_price !== undefined && newRegular !== '' && Number( next.sale_price ) >= Number( newRegular ) ) {
+		if ( Object.keys( next ).length > 0 && newSale !== '' && newRegular !== '' && Number( newSale ) >= Number( newRegular ) ) {
 			invalid += 1;
 			continue;
 		}

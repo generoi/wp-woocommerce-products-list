@@ -413,6 +413,15 @@ function snapshotOf( target: SaveTarget, patch: Record< string, unknown > ): Rec
 	return snapshot;
 }
 
+/**
+ * Whether a row's write replaces the sale it has: only a new sale price does (unticking "Schedule sale" or moving its
+ * dates keeps the row's sale price), and a new sale whose price and dates the row already has is not sent and
+ * replaces nothing. `own` is the row's resolved edits, `payload` what is sent for them.
+ */
+export function replacesSale( item: ProductListItem, own: Record< string, unknown >, payload: Record< string, unknown > ): boolean {
+	return hasSale( item ) && hasSaleEdit( own ) && own.sale_price !== undefined && [ 'sale_price', 'date_on_sale_from', 'date_on_sale_to' ].some( ( key ) => key in payload );
+}
+
 /** Turn resolved targets into the plan: payloads for the rows that change, counts for the rest. */
 export function planTargets( targets: SaveTarget[], fields: ProductField[], settings: Settings, options: RowEditOptions = {} ): SavePlan {
 	const plan: SavePlan = { writes: [], products: 0, variations: 0, unchanged: 0, stockSkipped: [], saleSkipped: [], notLowerSkipped: [], replacedSales: 0, endedRunningSales: 0, skippedItems: [] };
@@ -460,9 +469,7 @@ export function planTargets( targets: SaveTarget[], fields: ProductField[], sett
 		}
 
 		if ( hasSale( target.item ) && hasSaleEdit( own ) ) {
-			// Only a new sale price replaces the sale: unticking "Schedule sale" or moving its dates keeps the row's sale price.
-			// A new sale whose price and dates the row already has is not sent and replaces nothing.
-			if ( own.sale_price !== undefined && [ 'sale_price', 'date_on_sale_from', 'date_on_sale_to' ].some( ( key ) => key in payload ) ) {
+			if ( replacesSale( target.item, own, payload ) ) {
 				plan.replacedSales += 1;
 			}
 

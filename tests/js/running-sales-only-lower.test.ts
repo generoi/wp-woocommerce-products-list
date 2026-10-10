@@ -30,3 +30,21 @@ describe( 'the existing-sales notice with "Only where lower"', () => {
 		expect( describeRunningSales( reached, edits, settings ) ).toEqual( { count: 0, message: '' } );
 	} );
 } );
+
+describe( 'the existing-sales notice with rows already at the resulting price', () => {
+	it( 'counts only the running sales whose sale the update changes, as the save does', () => {
+		// "Regular − 20 %" of 189 is 151.20: variation 51 already sells at it, so the save sends it nothing.
+		const sameAlready = [
+			variation( 51, 1, { regular_price: '189', sale_price: '151.20', on_sale: true } ),
+			variation( 52, 1, { regular_price: '189', sale_price: '120', on_sale: true } ),
+		];
+		const existing = rowsWithExistingSale( sameAlready, edits ).rows;
+
+		expect( existing.map( ( item ) => item.id ) ).toEqual( [ 51, 52 ] );
+
+		const reached = salesTheEditReaches( existing, edits, {}, fields, settings );
+
+		expect( reached.map( ( item ) => item.id ) ).toEqual( [ 52 ] );
+		expect( describeRunningSales( reached, edits, settings ).count ).toBe( 1 );
+	} );
+} );

@@ -20,6 +20,9 @@ import type { ProductListItem, RawVariation } from '../types';
 
 const ROUTE = '/wc-products-list/v1/variations';
 
+/** The list's image size (api/query.ts): rows read here are shown in, or merged over, list rows. */
+const IMAGE_SIZE = 'thumbnail';
+
 /** Ids per request: the server's limit. */
 export const ACROSS_CHUNK = 100;
 
@@ -153,14 +156,14 @@ export async function getVariationsByIds( ids: number[], parentOf: ReadonlyMap< 
 	const context: Record< string, string > = options.context === 'edit' ? { context: 'edit' } : {};
 	const parts = chunks( ids, ACROSS_CHUNK );
 	// The first request tells whether the route exists; the rest follow side by side.
-	const first = await attempt( { include: parts[ 0 ]!.join( ',' ), per_page: parts[ 0 ]!.length, _fields, ...context }, options.signal );
+	const first = await attempt( { include: parts[ 0 ]!.join( ',' ), per_page: parts[ 0 ]!.length, _fields, image_size: IMAGE_SIZE, ...context }, options.signal );
 
 	if ( first === null ) {
 		return null;
 	}
 
 	const rest = await inParallel(
-		parts.slice( 1 ).map( ( part ) => async () => ( await attempt( { include: part.join( ',' ), per_page: part.length, _fields, ...context }, options.signal ) )?.items ?? [] ),
+		parts.slice( 1 ).map( ( part ) => async () => ( await attempt( { include: part.join( ',' ), per_page: part.length, _fields, image_size: IMAGE_SIZE, ...context }, options.signal ) )?.items ?? [] ),
 		options.concurrency ?? 4
 	);
 
@@ -183,7 +186,7 @@ export async function getVariationsOfParents( parentIds: number[], options: Acro
 	const _fields = Array.from( new Set( [ ...options.fields, 'id', 'parent_id' ] ) ).join( ',' );
 	const concurrency = options.concurrency ?? 4;
 	const parts = chunks( parentIds, ACROSS_CHUNK );
-	const query = ( part: number[], page: number ) => ( { parent: part.join( ',' ), per_page: ACROSS_CHUNK, page, _fields } );
+	const query = ( part: number[], page: number ) => ( { parent: part.join( ',' ), per_page: ACROSS_CHUNK, page, _fields, image_size: IMAGE_SIZE } );
 	let loaded = 0;
 	const counted = < T extends { items: unknown[] } | null >( page: T ): T => {
 		if ( page ) {

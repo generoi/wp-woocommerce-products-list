@@ -169,6 +169,20 @@ describe( 'market price tool', () => {
 		expect( sale ).toMatchObject( { changes: 0, invalid: 1 } );
 	} );
 
+	it( 'warns about a regular price lowered to or below the sale price the shop shows, as the server refuses it', () => {
+		// 1 799,10 kr − 10 % = 1 619,19 kr, below the 1 799 kr sale: gds_woo_i18n_sale_not_below_regular.
+		const items = [
+			simple( 6, { i18n: { se: { regular_price: { value: '1799.10', source: '' }, sale_price: { value: '1799', source: '' } } } } ),
+			// A converted (not own) sale price counts too.
+			simple( 7, { i18n: { se: { regular_price: { value: '', source: '200' }, sale_price: { value: '', source: '185' } } } } ),
+			simple( 8, { i18n: { se: { regular_price: { value: '300', source: '' }, sale_price: { value: '', source: '' } } } } ),
+		];
+		const preview = previewPrices( pricesAction(), { fields: [ 'regular' ], operation: 'decrease_percent', amount: '10', rounding: 'none' }, 'i18n:se', items, fields, settings );
+
+		expect( preview ).toMatchObject( { invalid: 2, changes: 1 } );
+		expect( preview?.lines.map( ( line ) => line.id ) ).toEqual( [ 8 ] );
+	} );
+
 	it( 'reaches the variations of selected variable parents only as a price tool', () => {
 		const parent = variable( 10 );
 		const reached = [ variation( 11, 10 ), variation( 12, 10 ) ];

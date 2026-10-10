@@ -63,7 +63,7 @@ import { captureFocusOrigin, focusWithin, restoreFocus } from './focus';
 import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, buildTabs, fieldsOfTab, formLabelOf, GENERAL_TAB_ID, layoutGroupOf, sectionNoteFieldId, tabOf, withScheduleSale } from './form-layouts';
 import { ApplyControlContext, applyControlField, sectionNoteField, SectionNotesContext } from './apply-control';
 import type { ApplyControlState } from './apply-control';
-import { labelsOf, stockStatusTakers, toFormFields } from './form-fields';
+import { labelsOf, messageLabelOf, stockStatusTakers, toFormFields } from './form-fields';
 import type { FormData } from './form-fields';
 import { EditErrors, SaveProgress } from './progress';
 import type { EditError } from './progress';
@@ -73,7 +73,8 @@ import { saveEdits, saveFields } from './save';
 import { resetHtmlEditorMode } from './html-text-control';
 import { TranslationGrid, TranslationStore, translationWriteItem } from './translation-grid';
 import type { SaveResult } from './save';
-import { planSave, runConcurrently, UNCERTAIN_CODE } from './save-runner';
+import { buildPayload } from './payload';
+import { planSave, replacesSale, runConcurrently, UNCERTAIN_CODE } from './save-runner';
 import type { SavePlan } from './save-runner';
 import { undoBatch } from './undo';
 import { canUndo } from './log-access';
@@ -587,9 +588,23 @@ export function variationPriceRange( rows: ProductListItem[], settings: Settings
 		  );
 }
 
-/** The rows with a sale whose sale the edits still change once the per-row rules ran ("Only where lower" keeps some). */
-export function salesTheEditReaches( rows: ProductListItem[], edits: Record< string, unknown >, options: RowEditOptions ): ProductListItem[] {
-	return options.keepSale ? rows.filter( ( item ) => hasSaleEdit( resolveRowEdits( item, edits, { keepSale: options.keepSale } ) ) ) : rows;
+/**
+ * The rows with a sale whose sale the edits still change once the per-row rules ran ("Only where lower" keeps some).
+ * With `fields` and `settings`, also not the rows that already have the resulting sale (the save sends nothing for
+ * them and counts them unchanged, `replacesSale()`): "regular − 20 %" on a row already on sale at that price ends no sale.
+ */
+export function salesTheEditReaches( rows: ProductListItem[], edits: Record< string, unknown >, options: RowEditOptions, fields?: ProductField[], settings?: Settings ): ProductListItem[] {
+	const ruled = { keepSale: options.keepSale };
+
+	return rows.filter( ( item ) => {
+		const own = resolveRowEdits( item, edits, ruled );
+
+		if ( ! hasSaleEdit( own ) ) {
+			return false;
+		}
+
+		return fields && settings ? replacesSale( item, own, buildPayload( item, own, fields, settings, ruled ) ) : true;
+	} );
 }
 
 /**
@@ -1323,7 +1338,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	}, [ changedFields, visibleFields, tab ] );
 	const changedLine = ( entry: ChangedField ): string => {
 		const field = editFieldsById.get( entry.id );
-		const label = field?.label ?? entry.id;
+		const label = field ? messageLabelOf( field ) : entry.id;
 		const now = Array.isArray( entry.now ) && items.length > 1 ? __( 'different on the selected rows', 'wp-woocommerce-products-list' ) : field ? describeValue( field, entry.now, settings ) : String( entry.now ?? '' );
 
 		return entry.edited
@@ -1432,8 +1447,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	// Sales running now that the edits would end: the user says replace or skip before anything is written.
 	// A row "Only where lower" leaves out keeps its sale: it is no running sale the edit ends.
 	const runningSales = useMemo(
-		() => describeRunningSales( salesTheEditReaches( existingSales.rows, plannedEdits, rowOptions ), plannedEdits, settings ),
-		[ existingSales.rows, plannedEdits, rowOptions, settings ]
+		() => describeRunningSales( salesTheEditReaches( existingSales.rows, plannedEdits, rowOptions, editFields, settings ), plannedEdits, settings ),
+		[ existingSales.rows, plannedEdits, rowOptions, editFields, settings ]
 	);
 	const saleChoiceNeeded = priceOps && runningSales.count > 0 && saleChoice === null;
 

@@ -196,6 +196,9 @@ describe( 'conflict reports', () => {
 
 	it( 'names the item, the field label and the value kept', () => {
 		expect( describeConflict( conflict ) ).toBe( 'Pelsi Black 37-38: Stock quantity 10 → 9 kept' );
+		// A screen that names its fields (History's Field column) names the field the same way in the conflict line.
+		expect( describeConflict( conflict, ( key ) => ( key === 'stock_quantity' ? 'Quantity' : key ) ) ).toBe( 'Pelsi Black 37-38: Quantity 10 → 9 kept' );
+		expect( describeConflict( conflict, ( key ) => key ) ).toBe( 'Pelsi Black 37-38: Stock quantity 10 → 9 kept' );
 		// An older server without labels or values: the mapped label alone.
 		expect( describeConflict( { id: 3, ok: false, code: 'conflict', fields: [ 'sale_price' ] }, () => 'Sale price' ) ).toBe( '#3: Sale price' );
 	} );

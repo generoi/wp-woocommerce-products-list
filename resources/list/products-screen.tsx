@@ -54,7 +54,7 @@ import type { SelectionApi } from './selection';
 import { useVariationFilter } from './variation-filter';
 import { SelectionBar } from './selection-bar';
 import { fromSplitView, toSplitView } from './split-view';
-import { destructiveLast, withoutFooterBulk } from './more-actions';
+import { destructiveLast, usesMoreActionsMenu, withoutFooterBulk } from './more-actions';
 import { StatusTabs } from './status-tabs';
 import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
@@ -582,8 +582,10 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	// Destructive actions (Move to Trash, Delete permanently) come last in row menus and the footer.
 	// eslint-disable-next-line react-hooks/exhaustive-deps -- lockVersion only makes DataViews re-run isEligible (which reads the locks itself).
 	const actions = useMemo( () => withWholeSelection( destructiveLast( baseActions ), () => wholeRef.current ), [ baseActions, lockVersion ] );
-	// Split view: the footer keeps Bulk edit; the other bulk actions are in the selection bar's "More actions" menu.
-	const tableActions = useMemo( () => ( panelOpen ? withoutFooterBulk( actions ) : actions ), [ panelOpen, actions ] );
+	// Split view, or rows selected on other pages: the footer keeps Bulk edit; the other bulk actions are in the selection
+	// bar's "More actions" menu, which offers what fits the whole selection (the footer judges the page's rows only).
+	const moreActionsMenu = usesMoreActionsMenu( panelOpen, selected.offPageCount );
+	const tableActions = useMemo( () => ( moreActionsMenu ? withoutFooterBulk( actions ) : actions ), [ moreActionsMenu, actions ] );
 
 	// `window.wcProductsList.getItems()` reads what is on screen.
 	useEffect( () => {
@@ -659,7 +661,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 				{ countLabel }
 			</span>
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
-			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } moreActions={ panelOpen } />
+			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } moreActions={ moreActionsMenu } />
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
 			{ hasExpandable && (
 				<>

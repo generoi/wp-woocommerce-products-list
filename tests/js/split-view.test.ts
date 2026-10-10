@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { destructiveLast, moreActionsFor, withoutFooterBulk } from '../../resources/list/more-actions';
+import { destructiveLast, moreActionsFor, usesMoreActionsMenu, withoutFooterBulk } from '../../resources/list/more-actions';
 import { fromSplitView, splitViewFields, SPLIT_NAME_STYLE, toSplitView } from '../../resources/list/split-view';
 import { withStickyBulkUndo } from '../../resources/actions/notices';
 import type { View } from '../../resources/dataviews';
@@ -68,6 +68,21 @@ describe( 'More actions', () => {
 		const footer = withoutFooterBulk( actions ).filter( ( a ) => a.supportsBulk ).map( ( a ) => a.id );
 
 		expect( footer ).toEqual( [ 'quick-edit' ] );
+	} );
+
+	it( 'moves the bulk actions into the menu when rows on other pages are selected, offering both directions of a toggle', () => {
+		expect( usesMoreActionsMenu( false, 0 ) ).toBe( false );
+		expect( usesMoreActionsMenu( true, 0 ) ).toBe( true );
+		expect( usesMoreActionsMenu( false, 80 ) ).toBe( true );
+
+		const featured = ( item: ProductListItem ) => Boolean( ( item as { featured?: boolean } ).featured );
+		const toggles = [ action( 'feature', { isEligible: ( item ) => ! featured( item ) } ), action( 'unfeature', { isEligible: featured } ) ];
+		// Every row on this page is featured, the ones selected on page 2 are not: "Mark as featured" is still offered.
+		const page = [ { ...row( 1 ), featured: true }, { ...row( 2 ), featured: true } ] as ProductListItem[];
+		const offPage = [ { ...row( 3 ), featured: false } ] as ProductListItem[];
+
+		expect( moreActionsFor( toggles, page ).regular.map( ( a ) => a.id ) ).toEqual( [ 'unfeature' ] );
+		expect( moreActionsFor( toggles, [ ...page, ...offPage ] ).regular.map( ( a ) => a.id ) ).toEqual( [ 'feature', 'unfeature' ] );
 	} );
 } );
 

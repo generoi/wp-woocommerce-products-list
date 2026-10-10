@@ -288,13 +288,17 @@ function shown( value: unknown, key = '', format?: ConflictValueFormat ): string
 /**
  * One conflict as a sentence: "Pelsi Black 37-38: Stock quantity 10 → 9
  * kept" (the value the batch left → the value now, which the revert kept).
- * `label` maps a field key to its label when the server sent none.
+ * `label` maps a field key to its label: a screen that names its fields
+ * (History's Field column) passes its own, so a conflict line names the
+ * field as the rest of the screen does; the server's label is used for a
+ * key it does not know (it answers the key itself), and when none is passed.
  */
 export function describeConflict( result: ActionResult, label: ( key: string ) => string = ( key ) => key, format?: ConflictValueFormat ): string {
 	const name = result.name || `#${ result.id }`;
 	const keys = result.fields ?? [];
 	const parts = keys.map( ( key, index ) => {
-		const fieldLabel = result.labels?.[ index ] || label( key );
+		const mapped = label( key );
+		const fieldLabel = mapped && mapped !== key ? mapped : result.labels?.[ index ] || mapped;
 
 		if ( result.batch && result.current && key in result.batch && key in result.current ) {
 			return sprintf(

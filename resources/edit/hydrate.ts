@@ -89,6 +89,12 @@ export function withoutUnaskedIdentity< Row extends Record< string, unknown > >(
 /** The projected sale < regular check reads both prices whichever one is edited. */
 export const PRICE_SIBLING_FIELDS = [ 'price', 'regular_price', 'sale_price', 'on_sale', 'date_on_sale_from', 'date_on_sale_to', 'manage_stock' ] as const;
 
+/**
+ * The image size every list read asks for (api/query.ts). A re-read merged over a list row asks for it too: wc/v3
+ * answers `full` otherwise, and a row re-read after a refused save would load the original image.
+ */
+export const LIST_IMAGE_SIZE = 'thumbnail';
+
 /** Every status, trash included: a selection may hold rows of any tab. */
 export const ANY_STATUS = 'publish,future,draft,pending,private,trash';
 
@@ -252,7 +258,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 
 		jobs.push(
 			limit( async () => {
-				const result = await deps.listProducts( { include: ids.join( ',' ), per_page: ids.length, include_status: ANY_STATUS, _fields, ...contextParam } );
+				const result = await deps.listProducts( { include: ids.join( ',' ), per_page: ids.length, include_status: ANY_STATUS, _fields, image_size: LIST_IMAGE_SIZE, ...contextParam } );
 
 				result.items.forEach( ( row ) => byId.set( row.id, row ) );
 			} )

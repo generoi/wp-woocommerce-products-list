@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { APPLY_TO_VARIATIONS_FIELD_ID, buildInlineForm, formLabelOf, GENERAL_TAB_ID, layoutGroupOf, sectionNoteFieldId, sectionsOfTab } from '../../resources/edit/form-layouts';
 import { applyControlField } from '../../resources/edit/apply-control';
+import { labelsOf } from '../../resources/edit/form-fields';
 import type { Form, FormField } from '../../resources/dataviews';
 import type { ProductField } from '../../resources/types';
 import { editSettings, field, simple } from './edit-fixtures';
@@ -218,6 +219,17 @@ describe( 'formLabelOf', () => {
 		expect( formLabelOf( field( 'i18n:se.name', { label: 'i18n:se.name', edit: { group: 'i18n:se', bulk: false } } ), translated ) ).toBe( 'i18n:se.name' );
 		expect( formLabelOf( field( 'stock_status', { label: 'Stock', edit: { group: 'inventory', bulk: 'default', label: 'Stock status' } } ), translated ) ).toBe( 'Stock status' );
 		expect( formLabelOf( field( 'name', { label: 'Name' } ), translated ) ).toBe( 'Name' );
+	} );
+} );
+
+describe( 'labelsOf', () => {
+	it( 'names a field in the editor\'s messages as the form shows it ("Stock quantity", not the column\'s "Quantity")', () => {
+		const labels = labelsOf( [
+			field( 'stock_quantity', { label: 'Quantity', edit: { group: 'inventory', bulk: 'integer', label: 'Stock quantity' } } ),
+			field( 'i18n:se.name', { label: 'Svenska: Name', edit: { group: 'i18n:se', bulk: false } } ),
+		] );
+
+		expect( labels ).toEqual( { stock_quantity: 'Stock quantity', 'i18n:se.name': 'Svenska: Name' } );
 	} );
 } );
 

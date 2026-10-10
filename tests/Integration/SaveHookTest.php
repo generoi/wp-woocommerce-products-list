@@ -816,4 +816,24 @@ class SaveHookTest extends RestTestCase
         $response = $this->request('POST', '/wc/v3/products/'.$product->get_id(), ['name' => 'Elsewhere'], [ListMode::HEADER => '', ListMode::BATCH_HEADER => '']);
         $this->assertStringEndsWith('boot.jpg', $this->data($response)['images'][0]['src']);
     }
+
+    public function test_the_cross_parent_variations_read_passes_the_image_size_on(): void
+    {
+        $parent = $this->variableProduct(['38']);
+        $variation = wc_get_product($parent->get_children()[0]);
+        $variation->set_image_id($this->imageWithThumbnail('across'));
+        $variation->save();
+        $route = '/wc-products-list/v1/variations';
+
+        // The list (and a re-read merged over a list row) asks for the thumbnail: wc/v3 answers `full` without it.
+        $response = $this->request('GET', $route, ['include' => (string) $variation->get_id(), '_fields' => 'id,image', 'image_size' => 'thumbnail']);
+        $this->assertStatus(200, $response);
+        $this->assertStringEndsWith('across-150x150.jpg', $this->data($response)[0]['image']['src']);
+
+        $response = $this->request('GET', $route, ['parent' => (string) $parent->get_id(), '_fields' => 'id,image', 'image_size' => 'thumbnail']);
+        $this->assertStringEndsWith('across-150x150.jpg', $this->data($response)[0]['image']['src']);
+
+        $response = $this->request('GET', $route, ['include' => (string) $variation->get_id(), '_fields' => 'id,image']);
+        $this->assertStringEndsWith('across.jpg', $this->data($response)[0]['image']['src']);
+    }
 }

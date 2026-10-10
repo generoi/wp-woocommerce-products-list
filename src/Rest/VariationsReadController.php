@@ -51,6 +51,8 @@ final class VariationsReadController
                 // wc/v3's own, passed on: `edit` answers `description` raw, as stored, for an editor
                 // (docs/contracts.md §3.6). Same permissions as wc/v3's per-parent read.
                 'context' => ['type' => 'string', 'enum' => ['view', 'edit'], 'default' => 'view'],
+                // wc/v3's own, passed on: the list's rows show `thumbnail` images (wc/v3 answers `full` without it).
+                'image_size' => ['type' => 'string'],
             ],
         ]);
     }
@@ -86,6 +88,12 @@ final class VariationsReadController
 
         if ($request->get_param('context') === 'edit') {
             $query['context'] = 'edit';
+        }
+
+        $size = $request->get_param('image_size');
+
+        if (is_string($size) && $size !== '') {
+            $query['image_size'] = $size;
         }
 
         $fields = $request->get_param('_fields');

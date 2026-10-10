@@ -432,5 +432,14 @@ export function toFormFields( fields: ProductField[], options: FormFieldOptions 
 
 /** Field labels by id, for error lists. */
 export function labelsOf( fields: ProductField[] ): Record< string, string > {
-	return Object.fromEntries( fields.map( ( field ) => [ field.id, field.label ?? field.id ] ) );
+	return Object.fromEntries( fields.map( ( field ) => [ field.id, messageLabelOf( field ) ] ) );
+}
+
+/**
+ * The label the editor's messages (problems, conflicts, "changed by someone else") name a field by: the WooCommerce
+ * wording the form shows for it (`edit.label`: "Stock quantity", not the list column's "Quantity"), else its full label
+ * (with the language name, which the form leaves to the tab).
+ */
+export function messageLabelOf( field: ProductField ): string {
+	return ( field.edit && field.edit.label ) || field.label || field.id;
 }
