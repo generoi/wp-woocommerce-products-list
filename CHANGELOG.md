@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4 - 2026-10-10
+
+Fixes for the last errors of the final verification on 0.3.3.
+
+- History names stock quantity "Quantity" everywhere, as its Field column: in the "changed again after this batch (…)" summary of a revert and in the Result text of the rows a revert left as they are (the stored messages are unchanged). The editor and Undo keep "Stock quantity".
+- History shows names stored with "&amp;" (saved by a shop manager) as "&": the change column, the item column, the revert preview and conflict lines. The stored log values are unchanged.
+- Quick edit: typing a name stored with "&amp;" back to the shown text (a character typed, then deleted) is no change ("Nothing changed"), not a dirty form that reports "1 item updated" while nothing is stored. The expected value is still the stored text.
+- Bulk edit: a variable product deleted while the save writes its variations is checked until the deletion is over before it is read again. WordPress removes its terms, meta and variations before the product itself, so a read meanwhile found it still there: it was not named as deleted, and its emptied Categories, Tags and Brands showed as "changed by someone else".
+
 ## 0.3.3 - 2026-10-10
 
 - Quick edit shows a product name stored with "&amp;" (saved by a user without unfiltered_html, such as a shop manager) as "&", like the product screen. The stored value stays the form value and the expected value until the user types, so nothing changes for saves or clash checks.
