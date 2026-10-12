@@ -5,6 +5,7 @@ namespace GeneroWP\ProductsList;
 use Automattic\WooCommerce\Utilities\FeaturesUtil;
 use GeneroWP\ProductsList\Modules\Actions;
 use GeneroWP\ProductsList\Modules\AdminPage;
+use GeneroWP\ProductsList\Modules\BlockEditorAssets;
 use GeneroWP\ProductsList\Modules\Log;
 use GeneroWP\ProductsList\Modules\Rest;
 
@@ -18,6 +19,7 @@ class Plugin
     public const MODULES = [
         Rest::class,
         AdminPage::class,
+        BlockEditorAssets::class,
         Log::class,
         Actions::class,
     ];

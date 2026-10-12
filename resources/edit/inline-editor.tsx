@@ -25,7 +25,7 @@
 import { Button, Notice, ProgressBar, RadioControl, Spinner, __experimentalConfirmDialog as ConfirmDialog } from '@wordpress/components';
 import { CheckboxControl } from '../ui/checkbox-control';
 import { outcomeNoticeId } from '../ui/notices';
-import { createPortal, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
+import { createPortal, lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from '@wordpress/element';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { addQueryArgs } from '@wordpress/url';
 import { closeSmall, Icon } from '@wordpress/icons';
@@ -85,6 +85,11 @@ import { clearFlaggedControls, collectInvalidFields, controlForField, flagInvali
 import type { InvalidField, ValidatedField } from './validity';
 import { isSellableField, visibleEditFields } from './visibility';
 import { useFormColumns } from './use-form-columns';
+import { DescriptionModalContext } from './description-modal/context';
+import { canLoadBlockEditor } from './description-modal/load-block-editor';
+import type { DescriptionLanguage } from './description-modal/description-modal';
+
+const DescriptionModal = lazy( () => import( /* webpackChunkName: "description-modal" */ './description-modal/description-modal' ).then( ( module ) => ( { default: module.DescriptionModal } ) ) );
 
 export interface InlineEditorProps {
 	host: EditorHost;
@@ -931,6 +936,25 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		[ enableManageStock, skipExistingSales, onlyLowerSale, editFields, settings ]
 	);
 	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
+	// Prototype: the description in the block editor, in a modal with a tab per language (quick edit of one product).
+	const [ descriptionFieldId, setDescriptionFieldId ] = useState< string | null >( null );
+	const descriptionLanguages = useMemo( (): DescriptionLanguage[] => {
+		if ( bulk || ! canLoadBlockEditor() ) {
+			return [];
+		}
+
+		const languages = settings.languages;
+
+		return visibleFields
+			.filter( ( field ) => field.id === 'description' || ( tabOf( field ).startsWith( 'i18n:' ) && field.id.endsWith( '.description' ) ) )
+			.map( ( field ) => {
+				const isDefault = field.id === 'description';
+				const lang = isDefault ? languages?.default ?? '' : tabOf( field ).slice( 'i18n:'.length );
+
+				return { lang, label: languages?.labels[ lang ] ?? ( lang.toUpperCase() || __( 'Default', 'wp-woocommerce-products-list' ) ), fieldId: field.id, tabId: tabOf( field ), isDefault };
+			} );
+	}, [ bulk, visibleFields, settings.languages ] );
+	const openDescription = useMemo( () => ( descriptionLanguages.length ? ( fieldId: string ) => setDescriptionFieldId( fieldId ) : null ), [ descriptionLanguages ] );
 	// A quick edit setting the price of all of a variable product's variations is a campaign on those variations: the
 	// price fields take the bulk operations ("regular price minus 20 %"), and the sale checks of a bulk edit apply.
 	const sellableOps = ! bulk && applyToVariations && variableParents.length > 0;
@@ -3441,11 +3465,28 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 					) : (
 						<ApplyControlContext.Provider value={ applyControl }>
 							<SectionNotesContext.Provider value={ sectionNotes }>
-								<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+								<DescriptionModalContext.Provider value={ openDescription }>
+									<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+								</DescriptionModalContext.Provider>
 							</SectionNotesContext.Provider>
 						</ApplyControlContext.Provider>
 					) }
 				</div>
+
+				{ descriptionFieldId ? (
+					<Suspense fallback={ null }>
+						<DescriptionModal
+							languages={ descriptionLanguages }
+							initialFieldId={ descriptionFieldId }
+							data={ state.data }
+							loadedTabs={ loadedTabs }
+							activeTab={ tabId }
+							showTab={ setTabId }
+							onApply={ ( changes ) => Object.keys( changes ).length && onChange( changes ) }
+							onClose={ () => setDescriptionFieldId( null ) }
+						/>
+					</Suspense>
+				) : null }
 
 				{ noteSections.includes( 'inventory' ) ? null : inventoryNote }
 				{ noteSections.includes( 'pricing' ) ? null : pricingNote }

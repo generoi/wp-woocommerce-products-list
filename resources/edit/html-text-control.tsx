@@ -25,7 +25,8 @@
  * Part of the edit chunk: it loads with the editor, not with the list.
  */
 import { Button } from '@wordpress/components';
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
+import { DescriptionModalContext } from './description-modal/context';
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { formatBold, formatItalic, formatListBullets, formatListNumbered, link as linkIcon, linkOff } from '@wordpress/icons';
 import type { ClipboardEvent, ComponentType, KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
@@ -441,6 +442,8 @@ export function createHtmlTextControl( { rows = 4 }: { rows?: number } = {} ): C
 		const [ chosen, setChosen ] = useState< HtmlEditorMode >( readMode );
 		const mode: HtmlEditorMode = problem ? 'code' : chosen;
 		const change = useCallback( ( next: string ) => onChange( { [ field.id ]: next } ), [ field.id, onChange ] );
+		const openDescription = useContext( DescriptionModalContext );
+		const isDescription = field.id === 'description' || field.id.endsWith( '.description' );
 
 		useEffect( () => {
 			modeListeners.add( setChosen );
@@ -465,6 +468,11 @@ export function createHtmlTextControl( { rows = 4 }: { rows?: number } = {} ): C
 						<Button size="small" isPressed={ mode === 'code' } onClick={ () => choose( 'code' ) }>
 							{ __( 'Code', 'wp-woocommerce-products-list' ) }
 						</Button>
+						{ openDescription && isDescription ? (
+							<Button size="small" variant="secondary" onClick={ () => openDescription( field.id ) }>
+								{ __( 'Open in block editor', 'wp-woocommerce-products-list' ) }
+							</Button>
+						) : null }
 					</div>
 				</div>
 				{ mode === 'visual' ? (
