@@ -469,7 +469,7 @@ export function createHtmlTextControl( { rows = 4 }: { rows?: number } = {} ): C
 							{ __( 'Code', 'wp-woocommerce-products-list' ) }
 						</Button>
 						{ openDescription && isDescription ? (
-							<Button size="small" variant="secondary" onClick={ () => openDescription( field.id ) }>
+							<Button size="small" variant="secondary" onClick={ ( event: ReactMouseEvent< HTMLButtonElement > ) => openDescription( field.id, event.currentTarget ) }>
 								{ __( 'Open in block editor', 'wp-woocommerce-products-list' ) }
 							</Button>
 						) : null }

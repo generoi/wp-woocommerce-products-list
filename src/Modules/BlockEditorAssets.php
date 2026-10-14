@@ -17,6 +17,8 @@ class BlockEditorAssets implements Module
 {
     public const TEMPLATE_ID = 'wc-products-list-block-editor-assets';
 
+    public const SETTINGS_ID = 'wc-products-list-block-editor-settings';
+
     /** Scripts the modal needs; their dependencies come along. */
     private const SCRIPTS = ['wp-block-library', 'wp-format-library', 'wp-block-editor', 'wp-media-utils', 'editor', 'media-editor', 'media-audiovideo'];
 
@@ -69,5 +71,28 @@ class BlockEditorAssets implements Module
         $html = (string) ob_get_clean();
 
         echo '<template id="'.esc_attr(self::TEMPLATE_ID).'">'.$html.'</template>'."\n";
+        echo '<script type="application/json" id="'.esc_attr(self::SETTINGS_ID).'">'.wp_json_encode($this->settings(), JSON_HEX_TAG | JSON_HEX_AMP).'</script>'."\n";
+    }
+
+    /**
+     * The block editor settings the description needs from the server, as the
+     * post editor gets them: the image sizes to choose from (a description's
+     * image is inserted at "large", not full size) and the upload limits.
+     *
+     * @return array<string, mixed>
+     */
+    public function settings(): array
+    {
+        $settings = get_block_editor_settings([], new \WP_Block_Editor_Context(['name' => 'core/edit-post']));
+        $sizes = array_column($settings['imageSizes'] ?? [], 'slug');
+
+        return [
+            'imageSizes' => $settings['imageSizes'] ?? [],
+            'imageDefaultSize' => in_array('large', $sizes, true) ? 'large' : ($settings['imageDefaultSize'] ?? 'full'),
+            'imageDimensions' => $settings['imageDimensions'] ?? [],
+            'imageEditing' => true,
+            'maxUploadFileSize' => $settings['maxUploadFileSize'] ?? wp_max_upload_size(),
+            'allowedMimeTypes' => get_allowed_mime_types(),
+        ];
     }
 }

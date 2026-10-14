@@ -1356,13 +1356,31 @@ html.wc-pl-panel-open .wc-products-list__notices {
 	}
 }
 
-// Prototype: the description in the block editor (edit/description-modal/).
+// The description in the block editor (edit/description-modal/).
+.wc-pl-desc-modal__boundary {
+	display: contents;
+}
+
 .wc-pl-desc-modal {
 	.components-modal__content {
 		display: flex;
 		flex-direction: column;
+		padding-bottom: 16px;
+	}
+
+	.components-modal__children-container {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		min-height: 0;
+	}
+
+	&__layout {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
 		gap: 12px;
-		padding-bottom: 8px;
+		min-height: 0;
 	}
 
 	&__actions {
@@ -1410,11 +1428,13 @@ html.wc-pl-panel-open .wc-products-list__notices {
 		border: 1px solid #e0e0e0;
 		border-radius: 4px;
 		background: #f6f7f7;
+		overflow: hidden;
 
 		h3 {
 			margin: 0;
-			padding: 8px 16px;
-			font-size: 12px;
+			padding: 10px 16px;
+			font-size: 11px;
+			font-weight: 600;
 			text-transform: uppercase;
 			letter-spacing: 0.04em;
 			color: #50575e;
@@ -1424,38 +1444,197 @@ html.wc-pl-panel-open .wc-products-list__notices {
 		iframe {
 			flex: 1;
 			width: 100%;
-			min-height: 360px;
+			min-height: 0;
 			border: 0;
 			background: #fff;
 		}
 	}
 
 	&__main {
-		min-width: 0;
-		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		gap: 8px;
+		min-width: 0;
+		min-height: 0;
+	}
 
-		> div {
-			flex: 1;
-			display: flex;
-			flex-direction: column;
-		}
+	&__empty {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+		padding: 8px 12px;
+		border-radius: 4px;
+		background: #f0f6fc;
+		color: #1e1e1e;
+	}
+
+	&__shortcuts {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		min-height: 0;
 	}
 
 	&__editor {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) 280px;
+		grid-template-rows: auto minmax(0, 1fr);
 		flex: 1;
 		min-height: 0;
 		border: 1px solid #e0e0e0;
 		border-radius: 4px;
 	}
 
+	&__toolbar {
+		display: flex;
+		grid-column: 1 / -1;
+		align-items: center;
+		gap: 4px;
+		padding: 6px 8px;
+		border-bottom: 1px solid #e0e0e0;
+
+		.block-editor-inserter__toggle.components-button.has-icon {
+			min-width: 32px;
+			height: 32px;
+			padding: 0;
+			border-radius: 2px;
+			background: var(--wp-admin-theme-color, #3858e9);
+			color: #fff;
+		}
+	}
+
+	& &__block-toolbar {
+		display: flex;
+		flex-shrink: 0;
+		max-width: 100%;
+		margin-left: 4px;
+		padding-left: 8px;
+		border-left: 1px solid #e0e0e0;
+
+		&:empty {
+			display: none;
+		}
+
+		// WordPress lets a fixed toolbar scroll sideways; this one fits, and a scrollbar under it only got in the way.
+		.block-editor-block-contextual-toolbar .block-editor-block-toolbar {
+			flex-wrap: nowrap;
+			overflow: visible;
+		}
+
+		.components-toolbar-group,
+		.components-toolbar {
+			border-right-color: #e0e0e0;
+		}
+	}
+
+	&__hint {
+		min-width: 0;
+		margin-left: auto;
+		padding-left: 12px;
+		overflow: hidden;
+		font-size: 12px;
+		color: #757575;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+
+	// The inserter's Patterns tab: a description has none (they are the theme's page sections).
+	.block-editor-tabbed-sidebar__tab[id$="-patterns"] {
+		display: none;
+	}
+
+	// The text as it reads on the shop, more or less: no theme styles load here.
 	&__canvas {
 		overflow: auto;
-		padding: 24px 32px 96px;
-		min-height: 360px;
+		padding: 24px 32px 120px;
+		font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+		font-size: 16px;
+		line-height: 1.6;
+		color: #1e1e1e;
+
+		&:focus {
+			outline: none;
+		}
+
+		.block-editor-block-list__layout.is-root-container {
+			max-width: 760px;
+			margin: 0 auto;
+		}
+
+		p,
+		ul,
+		ol,
+		h2,
+		h3,
+		h4,
+		h5,
+		h6 {
+			margin-top: 0;
+			margin-bottom: 1em;
+		}
+
+		h2,
+		h3,
+		h4,
+		h5,
+		h6 {
+			line-height: 1.25;
+		}
+
+		h1 {
+			font-size: 2em;
+		}
+
+		h2 {
+			font-size: 1.5em;
+		}
+
+		h3 {
+			font-size: 1.25em;
+		}
+
+		h4 {
+			font-size: 1.1em;
+		}
+
+		ul,
+		ol {
+			padding-left: 1.5em;
+		}
+
+		ul {
+			list-style: disc;
+		}
+
+		ol {
+			list-style: decimal;
+		}
+
+		li {
+			margin-bottom: 0.25em;
+		}
+
+		img {
+			max-width: 100%;
+			height: auto;
+		}
+
+		table {
+			border-collapse: collapse;
+		}
+
+		td,
+		th {
+			padding: 4px 8px;
+			border: 1px solid #ddd;
+		}
+
+		blockquote {
+			margin-left: 0;
+			padding-left: 1em;
+			border-left: 3px solid #1e1e1e;
+		}
 	}
 
 	&__inspector {
@@ -1473,22 +1652,40 @@ html.wc-pl-panel-open .wc-products-list__notices {
 	&__error {
 		color: #cc1818;
 	}
+}
 
-	&__timing {
-		margin: 0;
-		font-size: 12px;
-		color: #757575;
+@media (max-width: 1280px) {
+	.wc-pl-desc-modal__body.has-reference {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+	}
+
+	.wc-pl-desc-modal__editor {
+		grid-template-columns: minmax(0, 1fr) 240px;
+	}
+
+	.wc-pl-desc-modal__canvas {
+		padding-right: 24px;
+		padding-left: 24px;
 	}
 }
 
 @media (max-width: 960px) {
-	.wc-pl-desc-modal__body.has-reference,
+	.wc-pl-desc-modal__body.has-reference {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: minmax(160px, 1fr) minmax(0, 2fr);
+	}
+
 	.wc-pl-desc-modal__editor {
 		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: auto minmax(0, 2fr) minmax(0, 1fr);
 	}
 
 	.wc-pl-desc-modal__inspector {
-		border-left: 0;
 		border-top: 1px solid #e0e0e0;
+		border-left: 0;
+	}
+
+	.wc-pl-desc-modal__hint {
+		display: none;
 	}
 }

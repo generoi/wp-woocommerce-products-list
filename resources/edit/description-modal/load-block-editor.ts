@@ -5,6 +5,7 @@
  * before the next one runs, as WordPress would have printed them.
  */
 const TEMPLATE_ID = 'wc-products-list-block-editor-assets';
+const SETTINGS_ID = 'wc-products-list-block-editor-settings';
 
 let loading: Promise< number > | null = null;
 
@@ -76,4 +77,13 @@ export function loadBlockEditor(): Promise< number > {
 	} );
 
 	return loading;
+}
+
+/** The block editor settings the server gives (image sizes, upload limits); empty when the page has none. */
+export function serverSettings(): Record< string, unknown > {
+	try {
+		return JSON.parse( document.getElementById( SETTINGS_ID )?.textContent ?? '{}' ) as Record< string, unknown >;
+	} catch {
+		return {};
+	}
 }

@@ -936,7 +936,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 		[ enableManageStock, skipExistingSales, onlyLowerSale, editFields, settings ]
 	);
 	const visibleFields = useMemo( () => visibleEditFields( editFields, items, { mode, applyToVariations } ), [ editFields, items, mode, applyToVariations ] );
-	// Prototype: the description in the block editor, in a modal with a tab per language (quick edit of one product).
+	// The description in the block editor, in a modal with a tab per language (quick edit of one product).
 	const [ descriptionFieldId, setDescriptionFieldId ] = useState< string | null >( null );
 	const descriptionLanguages = useMemo( (): DescriptionLanguage[] => {
 		if ( bulk || ! canLoadBlockEditor() ) {
@@ -954,7 +954,22 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				return { lang, label: languages?.labels[ lang ] ?? ( lang.toUpperCase() || __( 'Default', 'wp-woocommerce-products-list' ) ), fieldId: field.id, tabId: tabOf( field ), isDefault };
 			} );
 	}, [ bulk, visibleFields, settings.languages ] );
-	const openDescription = useMemo( () => ( descriptionLanguages.length ? ( fieldId: string ) => setDescriptionFieldId( fieldId ) : null ), [ descriptionLanguages ] );
+	const descriptionOpener = useRef< HTMLElement | null >( null );
+	const openDescription = useMemo(
+		() =>
+			descriptionLanguages.length
+				? ( fieldId: string, opener?: HTMLElement ) => {
+						descriptionOpener.current = opener ?? null;
+						setDescriptionFieldId( fieldId );
+				  }
+				: null,
+		[ descriptionLanguages ]
+	);
+	const closeDescription = useCallback( () => {
+		setDescriptionFieldId( null );
+		// Back to the button that opened the modal (Safari does not focus a clicked button, so the modal cannot know it).
+		window.requestAnimationFrame( () => descriptionOpener.current?.isConnected && descriptionOpener.current.focus() );
+	}, [] );
 	// A quick edit setting the price of all of a variable product's variations is a campaign on those variations: the
 	// price fields take the bulk operations ("regular price minus 20 %"), and the sale checks of a bulk edit apply.
 	const sellableOps = ! bulk && applyToVariations && variableParents.length > 0;
@@ -3483,7 +3498,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 							activeTab={ tabId }
 							showTab={ setTabId }
 							onApply={ ( changes ) => Object.keys( changes ).length && onChange( changes ) }
-							onClose={ () => setDescriptionFieldId( null ) }
+							onClose={ closeDescription }
 						/>
 					</Suspense>
 				) : null }
