@@ -153,8 +153,8 @@ export function isBlockMarkup( html: string ): boolean {
 /**
  * Tables and embeds the way WordPress reads them back from HTML: a table
  * without the editor's <figure> (and its fixed-layout class) around it, an
- * embed as its URL alone in a paragraph (which the shop turns into the
- * player). Pasted-HTML conversion takes neither figure back, so they would
+ * embed (or a URL alone on a line) as its URL alone in a paragraph (which
+ * the shop turns into the player). Pasted-HTML conversion takes neither figure back, so they would
  * reopen as raw HTML blocks. One with a caption keeps its figure: the
  * caption has nowhere else to go.
  */
@@ -162,7 +162,10 @@ export function plainFigures( html: string ): string {
 	return html
 		// The table's inside never crosses a figure: a captioned table must not reach into the next table's figure.
 		.replace( /<figure class="wp-block-table[^"]*">\s*<table(?: class="has-fixed-layout")?>((?:(?!<\/?figure)[\s\S])*?<\/table>)\s*<\/figure>/g, '<table>$1' )
-		.replace( /<figure class="wp-block-embed\b[^"]*">\s*<div class="wp-block-embed__wrapper">\s*(https?:\/\/[^\s<]+)\s*<\/div>\s*<\/figure>/g, '<p>$1</p>' );
+		.replace( /<figure class="wp-block-embed\b[^"]*">\s*<div class="wp-block-embed__wrapper">\s*(https?:\/\/[^\s<]+)\s*<\/div>\s*<\/figure>/g, '<p>$1</p>' )
+		// A URL alone on a line, as most videos in the descriptions are stored: the shop plays it (oEmbed), but
+		// pasted-HTML conversion would join it to the paragraph before it, where it would stop playing.
+		.replace( /(^|\n)[ \t]*(https?:\/\/[^\s<>"]+)[ \t]*(?=\n|$)/g, '$1<p>$2</p>' );
 }
 
 /** What a reader gets from HTML: its text, images, links and embedded media (whitespace aside). */
@@ -175,6 +178,42 @@ export function contentOf( html: string ): string {
 			.join( ' ' );
 
 	return [ body.textContent?.replace( /\s+/g, '' ) ?? '', sources( 'img', 'src' ), sources( 'a', 'href' ), sources( 'iframe, video, audio, source', 'src' ) ].join( '|' );
+}
+
+/**
+ * A table or an embed with a caption keeps the editor's <figure> when stored
+ * (plainFigures()), which pasted-HTML conversion reads as raw HTML: this
+ * reads it back as the block it was, when that block's own markup matches.
+ */
+function captionedFigure( block: Any ): Any {
+	const w = wp();
+	// The HTML block's text is its raw source, not an attribute, until edited.
+	const html: string = block.name === 'core/html' ? String( w.blocks.getBlockContent( block ) ?? '' ).trim() : '';
+	let markup = '';
+
+	if ( /^<figure class="wp-block-table[^"]*">[\s\S]*<figcaption\b[\s\S]*<\/figure>$/.test( html ) ) {
+		markup = `<!-- wp:table ${ JSON.stringify( { hasFixedLayout: /<table class="has-fixed-layout"/.test( html ) } ) } -->\n${ html }\n<!-- /wp:table -->`;
+	} else if ( /^<figure class="wp-block-embed\b[^"]*">[\s\S]*<figcaption\b[\s\S]*<\/figure>$/.test( html ) ) {
+		const classes = html.match( /^<figure class="([^"]*)"/ )?.[ 1 ] ?? '';
+		const url = html.match( /<div class="wp-block-embed__wrapper">\s*(https?:\/\/[^\s<]+)/ )?.[ 1 ];
+		const attributes = {
+			url,
+			type: classes.match( /\bis-type-([\w-]+)/ )?.[ 1 ],
+			providerNameSlug: classes.match( /\bis-provider-([\w-]+)/ )?.[ 1 ],
+			responsive: /\bwp-has-aspect-ratio\b/.test( classes ),
+			className: classes.match( /\bwp-embed-aspect-[\w-]+ wp-has-aspect-ratio\b/ )?.[ 0 ],
+		};
+
+		markup = url ? `<!-- wp:embed ${ JSON.stringify( attributes ) } -->\n${ html }\n<!-- /wp:embed -->` : '';
+	}
+
+	if ( ! markup ) {
+		return block;
+	}
+
+	const [ parsed, ...rest ] = w.blocks.parse( markup );
+
+	return parsed && ! rest.length && parsed.isValid && parsed.name !== 'core/freeform' ? parsed : block;
 }
 
 /**
@@ -194,7 +233,7 @@ export function toBlocks( html: string ): Any[] {
 		return w.blocks.parse( html );
 	}
 
-	const blocks = w.blocks.rawHandler( { HTML: plainFigures( html ) } );
+	const blocks = w.blocks.rawHandler( { HTML: plainFigures( html ) } ).map( captionedFigure );
 
 	return contentOf( withoutBlockMarkup( w.blocks.serialize( blocks ) ) ) === contentOf( html ) ? blocks : [ w.blocks.createBlock( 'core/freeform', { content: html } ) ];
 }
@@ -378,7 +417,7 @@ function Editor( { html, placeholder, autoFocus, onChange }: { html: string; pla
 						}
 					} }
 				>
-					<div className="wc-pl-desc-modal__toolbar" role="toolbar" aria-label={ __( 'Description tools', 'wp-woocommerce-products-list' ) }>
+					<div className="wc-pl-desc-modal__toolbar" role="group" aria-label={ __( 'Description tools', 'wp-woocommerce-products-list' ) }>
 						<be.Inserter position="bottom right" />
 						<Button size="compact" icon={ undoIcon } label={ __( 'Undo', 'wp-woocommerce-products-list' ) } shortcut="⌘Z" disabled={ ! hasUndo } accessibleWhenDisabled onClick={ () => undo() } />
 						<Button size="compact" icon={ redoIcon } label={ __( 'Redo', 'wp-woocommerce-products-list' ) } shortcut="⇧⌘Z" disabled={ ! hasRedo } accessibleWhenDisabled onClick={ () => redo() } />
@@ -387,7 +426,8 @@ function Editor( { html, placeholder, autoFocus, onChange }: { html: string; pla
 						</div>
 						<span className="wc-pl-desc-modal__hint">{ __( 'Type / in an empty line to add a heading, list, image or table.', 'wp-woocommerce-products-list' ) }</span>
 					</div>
-					<div className="wc-pl-desc-modal__canvas editor-styles-wrapper" ref={ canvas } tabIndex={ -1 }>
+					{ /* wp-embed-responsive: videos take their 16:9 height (block library styles size them under it). */ }
+					<div className="wc-pl-desc-modal__canvas editor-styles-wrapper wp-embed-responsive" ref={ canvas } tabIndex={ -1 }>
 						<be.BlockTools>
 							<be.WritingFlow>
 								<Typing>
@@ -547,6 +587,8 @@ export function DescriptionModal( { languages, initialFieldId, data, loadedTabs,
 							<Button
 								key={ entry.fieldId }
 								data-field={ entry.fieldId }
+								id={ `wc-pl-desc-tab-${ entry.lang || 'default' }` }
+								aria-controls="wc-pl-desc-panel"
 								role="tab"
 								tabIndex={ entry.fieldId === fieldId ? 0 : -1 }
 								aria-selected={ entry.fieldId === fieldId }
@@ -566,7 +608,12 @@ export function DescriptionModal( { languages, initialFieldId, data, loadedTabs,
 							</Button>
 						) ) }
 					</div>
-					<div className={ `wc-pl-desc-modal__body${ showsReference ? ' has-reference' : '' }` }>
+					<div
+						className={ `wc-pl-desc-modal__body${ showsReference ? ' has-reference' : '' }` }
+						id="wc-pl-desc-panel"
+						role="tabpanel"
+						aria-labelledby={ current ? `wc-pl-desc-tab-${ current.lang || 'default' }` : undefined }
+					>
 						{ showsReference && reference ? <Reference html={ referenceHtml } label={ reference.label } /> : null }
 						<div className="wc-pl-desc-modal__main">
 							{ failed ? <p className="wc-pl-desc-modal__error">{ sprintf( /* translators: %s: error message */ __( 'The block editor could not be loaded: %s', 'wp-woocommerce-products-list' ), failed ) }</p> : null }

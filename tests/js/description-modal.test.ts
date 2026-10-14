@@ -57,6 +57,12 @@ describe( 'plainFigures', () => {
 		);
 	} );
 
+	it( 'puts a URL alone on a line in a paragraph of its own, and leaves a URL inside text alone', () => {
+		expect( plainFigures( '<p>a</p>\nhttps://www.youtube.com/watch?v=x\n<p>b</p>' ) ).toBe( '<p>a</p>\n<p>https://www.youtube.com/watch?v=x</p>\n<p>b</p>' );
+		expect( plainFigures( '<p>a</p>\nhttps://youtu.be/x' ) ).toBe( '<p>a</p>\n<p>https://youtu.be/x</p>' );
+		expect( plainFigures( '<p>see https://x.fi now</p>' ) ).toBe( '<p>see https://x.fi now</p>' );
+	} );
+
 	it( 'keeps a figure that has a caption', () => {
 		const html = '<figure class="wp-block-table"><table><tbody><tr><td>a</td></tr></tbody></table><figcaption class="wp-element-caption">C</figcaption></figure>';
 
