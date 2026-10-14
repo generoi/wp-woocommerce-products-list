@@ -965,10 +965,17 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				: null,
 		[ descriptionLanguages ]
 	);
-	const closeDescription = useCallback( () => {
+	const closeDescription = useCallback( ( lastFieldId?: string ) => {
 		setDescriptionFieldId( null );
-		// Back to the button that opened the modal (Safari does not focus a clicked button, so the modal cannot know it).
-		window.requestAnimationFrame( () => descriptionOpener.current?.isConnected && descriptionOpener.current.focus() );
+		// Back to the "Open in block editor" button of the language the modal ended on (the panel shows that
+		// language's tab now), else the one that opened it. Safari does not focus a clicked button, so the modal
+		// cannot know it; the form may have drawn the field anew with Done's text, so the button is looked up.
+		window.requestAnimationFrame( () => {
+			const find = ( id: string ) => rootRef.current?.querySelector< HTMLElement >( `[data-description-opener="${ CSS.escape( id ) }"]` );
+			const opener = ( lastFieldId ? find( lastFieldId ) : null ) ?? ( descriptionOpener.current?.isConnected ? descriptionOpener.current : null );
+
+			opener?.focus();
+		} );
 	}, [] );
 	// A quick edit setting the price of all of a variable product's variations is a campaign on those variations: the
 	// price fields take the bulk operations ("regular price minus 20 %"), and the sale checks of a bulk edit apply.

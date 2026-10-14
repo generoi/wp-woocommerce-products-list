@@ -78,7 +78,8 @@ export interface DescriptionModalProps {
 	/** Load a language's values: the panel switches to its tab. */
 	showTab( tabId: string ): void;
 	onApply( changes: Record< string, string > ): void;
-	onClose(): void;
+	/** Closes the modal; `fieldId` is the language it was on (the panel under it shows that language). */
+	onClose( fieldId?: string ): void;
 }
 
 const stop = ( event: { stopPropagation(): void } ) => event.stopPropagation();
@@ -282,7 +283,7 @@ function Reference( { html, label }: { html: string | null; label: string } ) {
 	if ( html === null ) {
 		return (
 			<section className="wc-pl-desc-modal__reference">
-				<h3>{ heading }</h3>
+				<h2>{ heading }</h2>
 				<p className="wc-pl-desc-modal__loading">
 					<Spinner /> { __( 'Loading…', 'wp-woocommerce-products-list' ) }
 				</p>
@@ -294,7 +295,7 @@ function Reference( { html, label }: { html: string | null; label: string } ) {
 
 	return (
 		<section className="wc-pl-desc-modal__reference" aria-label={ heading }>
-			<h3>{ heading }</h3>
+			<h2>{ heading }</h2>
 			<iframe title={ heading } sandbox="" srcDoc={ doc } />
 		</section>
 	);
@@ -513,11 +514,12 @@ export function DescriptionModal( { languages, initialFieldId, data, loadedTabs,
 
 	const changed = Object.keys( edits ).filter( ( id ) => edits[ id ] !== baselines[ id ] && edits[ id ] !== stringValue( data[ id ] ) );
 
+	const close = () => onClose( current?.fieldId );
 	const done = () => {
 		onApply( Object.fromEntries( changed.map( ( id ) => [ id, edits[ id ] ?? '' ] ) ) );
-		onClose();
+		close();
 	};
-	const requestClose = () => ( changed.length ? setConfirming( true ) : onClose() );
+	const requestClose = () => ( changed.length ? setConfirming( true ) : close() );
 
 	const startFromReference = () => {
 		if ( current && referenceHtml ) {
@@ -592,8 +594,8 @@ export function DescriptionModal( { languages, initialFieldId, data, loadedTabs,
 								role="tab"
 								tabIndex={ entry.fieldId === fieldId ? 0 : -1 }
 								aria-selected={ entry.fieldId === fieldId }
+								// Not isPressed: aria-pressed is not allowed on a tab; aria-selected styles it.
 								className="wc-pl-desc-modal__tab"
-								isPressed={ entry.fieldId === fieldId }
 								onClick={ () => {
 									setEditorTakesFocus( true );
 									setFieldId( entry.fieldId );
@@ -650,7 +652,7 @@ export function DescriptionModal( { languages, initialFieldId, data, loadedTabs,
 						isOpen
 						confirmButtonText={ __( 'Discard changes', 'wp-woocommerce-products-list' ) }
 						cancelButtonText={ __( 'Keep editing', 'wp-woocommerce-products-list' ) }
-						onConfirm={ onClose }
+						onConfirm={ close }
 						onCancel={ () => setConfirming( false ) }
 					>
 						{ sprintf(
