@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 - 2026-10-15
+
+The description in the block editor.
+
+- Quick edit's description field (and each translation's) has an "Open in block editor" button. It opens WordPress's block editor in a large modal with a tab per language; another language shows the default language's text alongside for reference, and an empty translation can start from it. Done puts the texts back into the form; they save with Update, like any field. Closing with changes asks first.
+- Paragraphs, headings, lists, quotes, images (upload, drop or media library), YouTube and other embeds, separators and tables, with links that find the shop's own pages. No colours, font sizes, text alignment or patterns. Undo and redo, Cmd+Enter for Done.
+- Descriptions stay plain HTML. A description opens as blocks and is written back without block comments; text, links, images and videos come through unchanged, and one the conversion would not keep whole opens as a single Classic block, unchanged. A language that was not edited is never written back.
+- The block editor loads the first time the modal opens, not with the list.
+
 ## 0.3.11 - 2026-10-11
 
 Fixes for the closeout pass 4 errors on 0.3.10.
