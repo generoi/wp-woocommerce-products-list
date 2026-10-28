@@ -84,7 +84,7 @@ describe( 'loading images for the editor', () => {
 
 		await hydrateSelection( [ simple( 1, { images: [ img( 5 ) ] } ) ], [ 'id', 'images' ], deps );
 
-		expect( listProducts.mock.calls[ 0 ]?.[ 0 ] ).toMatchObject( { wcpl_gallery: 1 } );
+		expect( ( listProducts.mock.calls as unknown[][] )[ 0 ]?.[ 0 ] ).toMatchObject( { wcpl_gallery: 1 } );
 	} );
 
 	it( 'reads a variation’s image in the edit context, its own image or none (not the parent’s)', async () => {
@@ -95,7 +95,7 @@ describe( 'loading images for the editor', () => {
 
 		const { items } = await hydrateSelection( [ row ], [ 'id', 'images' ], deps );
 
-		expect( getVariationsByIds.mock.calls[ 0 ]?.[ 2 ] ).toMatchObject( { context: 'edit', fields: expect.arrayContaining( [ 'image' ] ) } );
+		expect( ( getVariationsByIds.mock.calls as unknown[][] )[ 0 ]?.[ 2 ] ).toMatchObject( { context: 'edit', fields: expect.arrayContaining( [ 'image' ] ) } );
 		expect( ( items[ 0 ] as { image?: unknown } ).image ).toBeNull();
 		expect( ownImages( items[ 0 ] as ProductListItem ) ).toEqual( [] );
 	} );

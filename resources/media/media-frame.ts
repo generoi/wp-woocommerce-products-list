@@ -27,7 +27,8 @@ interface MediaSelection {
 
 interface MediaFrame {
 	on( event: string, callback: () => void ): void;
-	off( event: string ): void;
+	off(): void;
+	remove?(): void;
 	open(): void;
 	close(): void;
 	state(): { get( key: 'selection' ): MediaSelection };
@@ -141,7 +142,10 @@ export async function pickImages( options: PickImagesOptions ): Promise< RawImag
 				entry.post = { ...( entry.post ?? {} ), id: previous[ index ] };
 			} );
 			window.setTimeout( () => {
+				// A frame per pick: its views and their library queries go with it.
+				frame.off();
 				frame.detach?.();
+				frame.remove?.();
 				resolve( picked && picked.length ? picked : null );
 			}, 0 );
 		} );

@@ -65,6 +65,7 @@ import { InlineEditContext, useInlineEditing } from './inline-edit/mode';
 import type { InlineEditValue } from './inline-edit/mode';
 import { withInlineEditing } from './inline-edit/cells';
 import { useDraftsLeaveGuard } from './inline-edit/leave-guard';
+import { pruneDrafts, reportDropped } from './inline-edit/drafts';
 
 export interface ProductsScreenProps {
 	fields: ProductField[];
@@ -357,10 +358,13 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const { counts } = useCounts();
 	// "Edit in table": the table's cells are inputs (a table view only; the grid and list layouts read).
 	const inlineEditing = useInlineEditing();
-	const inlineContext = useMemo< InlineEditValue >( () => ( { fields, byId: new Map( fields.map( ( field ) => [ field.id, field ] ) ), settings } ), [ fields, settings ] );
-	const tableFields = useMemo( () => withInlineEditing( fields, inlineEditing && view.type === 'table' && settings.caps.edit ), [ fields, inlineEditing, view.type, settings.caps.edit ] );
+	const inlineOn = inlineEditing && view.type === 'table' && settings.caps.edit;
+	const byId = useMemo( () => new Map( fields.map( ( field ) => [ field.id, field ] ) ), [ fields ] );
+	const inlineContext = useMemo< InlineEditValue >( () => ( { enabled: inlineOn, fields, byId, settings } ), [ inlineOn, fields, byId, settings ] );
+	// The same field objects whether the mode is on or off: switching it re-renders the cells, it does not remount them.
+	const tableFields = useMemo( () => withInlineEditing( fields ), [ fields ] );
 
-	useDraftsLeaveGuard();
+
 	const parents = useMemo( () => list.items.filter( isProductRow ) as ProductRow[], [ list.items ] );
 	// Variations are fetched with the visible columns' fields only, like the products.
 	const visibleFields = useMemo( () => {
@@ -383,6 +387,13 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const variationFilterSpec = useMemo( () => ( { key: variationFilter.key, params: variationFilter.params } ), [ variationFilter.key, variationFilter.params ] );
 	const hierarchyOptions = useMemo( () => ( { confirmExpandAll, variationFilter: variationFilterSpec } ), [ confirmExpandAll, variationFilterSpec ] );
 	const hierarchy = useHierarchy( parents, visibleFields, hierarchyOptions );
+
+	useDraftsLeaveGuard();
+
+	// A typed change of a row that left the table (another page, a search) is not kept where nothing shows it.
+	useEffect( () => {
+		reportDropped( pruneDrafts( new Set( hierarchy.rows.map( ( row ) => row.id ) ) ) );
+	}, [ hierarchy.rows ] );
 	// The selection spans pages, searches, filters and sorts; a status tab is another list.
 	// A variation SKU / barcode search opens the parent at the matching variation.
 	const searchMatchIds = useSearchReveal( {
@@ -674,7 +685,6 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
 			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } moreActions={ moreActionsMenu } />
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
-			{ settings.caps.edit && view.type === 'table' && <InlineEditToggle /> }
 			{ hasExpandable && (
 				<>
 					<ExpandAllButton
@@ -714,7 +724,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 	return (
 		<HierarchyProvider value={ guardedHierarchy }>
-				<div className={ `wc-products-list${ inlineEditing && view.type === 'table' && settings.caps.edit ? ' is-inline-editing' : '' }${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
+				<div className={ `wc-products-list${ inlineOn ? ' is-inline-editing' : '' }${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
 					<CatalogTitle />
 					<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>
 						{ __( 'Skip to products', 'wp-woocommerce-products-list' ) }
@@ -732,9 +742,12 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 							{ expandAllConfirmMessage( expandConfirm.plan ) }
 						</ConfirmDialog>
 					) }
-					<StatusTabs tab={ tab } onChange={ guardedSetTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />
+					<div className="wc-products-list__tabs-row">
+						<StatusTabs tab={ tab } onChange={ guardedSetTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />
+						{ settings.caps.edit && view.type === 'table' && <InlineEditToggle /> }
+					</div>
 					<SaveActivityBar />
-					{ inlineEditing && view.type === 'table' && settings.caps.edit && <InlineEditHint /> }
+					{ inlineOn && <InlineEditHint /> }
 					{ staleError && (
 						<Notice
 							status="error"

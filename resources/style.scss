@@ -67,6 +67,25 @@ $link: #2271b1;
 	border-bottom: 1px solid $border;
 }
 
+// The status tabs, and at their end the "Edit in table" switch.
+.wc-products-list__tabs-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	border-bottom: 1px solid $border;
+
+	.wc-products-list__tabs {
+		flex: 1 1 auto;
+		border-bottom: 0;
+	}
+}
+
+.wc-products-list__inline-toggle {
+	margin-left: auto;
+	padding: 8px 16px 10px;
+	white-space: nowrap;
+}
+
 .wc-products-list__tab {
 	appearance: none;
 	background: none;
@@ -707,13 +726,13 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 	// Inside the thumbnail: the media cell clips what overflows it.
 	.wc-products-list__image-edit {
 		position: absolute;
-		right: 1px;
-		bottom: 1px;
+		right: 2px;
+		bottom: 2px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 16px;
-		height: 16px;
+		width: 20px;
+		height: 20px;
 		border-radius: 2px;
 		background: #fff;
 		color: #1e1e1e;
@@ -722,8 +741,8 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 		transition: opacity 100ms ease;
 
 		svg {
-			width: 12px;
-			height: 12px;
+			width: 16px;
+			height: 16px;
 			fill: currentColor;
 		}
 	}
@@ -801,17 +820,33 @@ body.wc-pl-media-open .wc-pl-images-popover {
 }
 
 .wc-pl-images-popover__name {
+	display: -webkit-box;
+	overflow: hidden;
 	color: $muted;
 	font-size: 12px;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+}
+
+.wc-pl-images-popover__body:focus {
+	outline: none;
 }
 
 .wc-pl-images-popover__loading {
 	display: flex;
 	justify-content: center;
 	padding: 24px 0;
+}
+
+.wc-pl-images-popover__confirm {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 12px;
+	padding: 8px 12px;
+	border-radius: 2px;
+	background: #fcf9e8;
+	font-size: 12px;
 }
 
 .wc-pl-images-popover__footer {
@@ -843,8 +878,10 @@ body.wc-pl-media-open .wc-pl-images-popover {
 }
 
 .wc-pl-images__list {
-	display: flex;
-	flex-wrap: wrap;
+	// A grid that fills the slots beside the double-size main image.
+	display: grid;
+	grid-template-columns: repeat(auto-fill, var(--wc-pl-tile));
+	grid-auto-flow: dense;
 	gap: 8px;
 	margin: 0;
 	padding: 0;
@@ -873,10 +910,21 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	}
 
 	&.is-main {
-		--wc-pl-tile-main: calc(var(--wc-pl-tile) * 2 + 8px);
+		grid-column: span 2;
+		grid-row: span 2;
+		width: auto;
+		height: auto;
+		aspect-ratio: 1;
+	}
 
-		width: var(--wc-pl-tile-main);
-		height: var(--wc-pl-tile-main);
+	// The tile's edge drawn over the photo: white product shots would otherwise have none.
+	&:not(.is-add)::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: 4px;
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+		pointer-events: none;
 	}
 
 	&.is-dragging {
@@ -1002,7 +1050,9 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	display: flex;
 	align-items: center;
 	min-width: 0;
-	width: 100%;
+	// The input's padding and border sit outside the column, so its text lines up with the header and other rows.
+	width: calc(100% + 14px);
+	margin-inline: -7px;
 }
 
 // Specific enough to win over wp-admin's own `input[type="text"]` and `select` styles (forms.css).
@@ -1087,12 +1137,40 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	pointer-events: none;
 }
 
-// Typed, not saved yet.
+// An empty cell reads empty: no lone currency, no "Sale" placeholder, until the row is pointed at or the cell focused.
+.wc-products-list .wc-pl-inline.is-empty input.wc-pl-inline__input:not(:focus) ~ .wc-pl-inline__suffix {
+	visibility: hidden;
+}
+
+.wc-products-list .dataviews-view-table__row:not(:hover) .wc-pl-inline input.wc-pl-inline__input:not(:focus)::placeholder {
+	color: transparent;
+}
+
+// The problem of an invalid cell, under it while it is focused.
+.wc-pl-inline__message {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	z-index: 10;
+	width: max-content;
+	max-width: 260px;
+	padding: 4px 8px;
+	border-radius: 2px;
+	background: #cc1818;
+	color: #fff;
+	font-size: 12px;
+	line-height: 1.4;
+	white-space: normal;
+	pointer-events: none;
+}
+
+// Typed, not saved yet: a bar on the start edge as well as the colour.
 .wc-products-list .wc-pl-inline.is-dirty {
 	input.wc-pl-inline__input,
 	select.wc-pl-inline__select {
 		border-color: #dba617;
 		background-color: #fcf9e8;
+		box-shadow: inset 3px 0 0 #dba617;
 	}
 }
 
@@ -1120,6 +1198,15 @@ body.wc-pl-media-open .wc-pl-images-popover {
 
 .wc-pl-inline--text {
 	min-width: 120px;
+}
+
+// A SKU is told apart from a sibling's by its end ("…663" and "…663-1"): shown whole.
+.wc-products-list .wc-pl-inline--sku {
+	min-width: 150px;
+
+	input.wc-pl-inline__input:not(:focus) {
+		text-overflow: clip;
+	}
 }
 
 .wc-pl-inline--select {

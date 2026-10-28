@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Images from the list, and editing in the table.
+
+- A row's thumbnail opens its images: the main image and the gallery (a variation's own image), changed in the media library or by dropping image files on it (uploaded at once), reordered by dragging or from a tile's menu (Set as main image, Move earlier, Move later, Replace…), removed with ×. Nothing is written until Save; the snackbar offers Undo. A variation without an image of its own says that it shows the product's main image.
+- Quick edit has an Images field on the General tab with the same editor.
+- **Edit in table** (toolbar): the table's cells become inputs for what quick edit would show for that row: name, SKU, status, the regular and sale price (in the Price column), the stock quantity of a row that manages stock or else its stock status (in the Stock column), and plain extension columns such as a translated name or a market price. A row's changes save together when Enter is pressed (which moves down the column) or the row is left; a choice in a menu saves at once; Esc takes a cell back. A change that would not save (a sale price above the regular price, a taken SKU) is marked in its cell and named in the snackbar. Leaving the page with an unsaved cell asks first. The choice is remembered in the browser.
+- The media library loads the first time it is needed (a thumbnail is pointed at), not with the list, and before the block editor of the description modal, which shares it.
+- List reads can ask for a product's whole gallery (`wcpl_gallery=1`); a variation's image is read in the edit context, so its own image is told apart from the parent's it falls back to (also in the change log, whose `image` value was the parent's for a variation without one).
+
 ## 0.4.0 - 2026-10-15
 
 The description in the block editor.

@@ -9,7 +9,7 @@
  * and the snackbar offers Undo.
  */
 import { speak } from '@wordpress/a11y';
-import { createElement, useContext, useEffect, useState } from '@wordpress/element';
+import { createElement, useContext, useEffect, useRef, useState } from '@wordpress/element';
 import { decodeEntities } from '@wordpress/html-entities';
 import { __, sprintf } from '@wordpress/i18n';
 import type { ComponentType, FocusEvent, KeyboardEvent, ReactNode, SyntheticEvent } from 'react';
@@ -27,7 +27,7 @@ import { parsePrice } from '../../fields/currency';
 import { toInput } from '../../fields/components/price-edit';
 import { NameCell as HierarchyNameCell } from '../../hierarchy/chevron';
 import { memoRender } from '../../fields/helpers';
-import { invalidateProducts } from '../../store/products';
+import { findCachedRow, invalidateProducts } from '../../store/products';
 import type { Option, ProductField, ProductListItem, Settings } from '../../types';
 import { clearDrafts, flagDrafts, getDraft, isRowSaving, rowDrafts, setDraft, setRowSaving, useRowDrafts } from './drafts';
 import type { CellDraft } from './drafts';
@@ -160,8 +160,50 @@ export function parseText( field: ProductField, kind: InlineKind, text: string, 
 	return { value: typeof stored === 'string' && decodeEntities( stored ) === text ? stored : text };
 }
 
-/** Drafts that would not save: their own parse errors, then what quick edit checks across fields (a sale price above the regular price). */
-export function validateRow( item: ProductListItem, drafts: ReadonlyMap< string, CellDraft >, context: InlineEditValue ): Array< { field: string; message: string } > {
+/** How far a typed price may move from the stored one before it is asked about (a digit too many, a missing comma). */
+const PRICE_JUMP = 10;
+
+/**
+ * A typed price ten times the stored one or more, or a tenth or less: most often a slip ("1050" for "10,50", or
+ * typed after the old value). Asked about once; the same text again saves.
+ */
+export function priceJumps( item: ProductListItem, drafts: ReadonlyMap< string, CellDraft >, context: InlineEditValue ): Array< { field: string; message: string; confirm: true } > {
+	const out: Array< { field: string; message: string; confirm: true } > = [];
+
+	for ( const [ id, draft ] of drafts ) {
+		const field = context.byId.get( id );
+
+		if ( ! field || draft.error || draft.confirmed === draft.text || inlineKindOf( field ) !== 'money' ) {
+			continue;
+		}
+
+		const before = Number( readFieldValue( field, item ) );
+		const after = Number( draft.value );
+
+		if ( ! ( before > 0 ) || ! ( after > 0 ) || ( after < before * PRICE_JUMP && after > before / PRICE_JUMP ) ) {
+			continue;
+		}
+
+		const shown = `${ displayText( field, item, 'money', context.settings ) } ${ moneySettings( field, context.settings ).currency.symbol }`;
+
+		out.push( {
+			field: id,
+			confirm: true,
+			message: sprintf(
+				/* translators: 1: the price now, e.g. "105,00 €" */
+				after > before
+					? __( 'This is ten times the price now (%1$s) or more. Press Enter again to save it.', 'wp-woocommerce-products-list' )
+					: __( 'This is a tenth of the price now (%1$s) or less. Press Enter again to save it.', 'wp-woocommerce-products-list' ),
+				shown
+			),
+		} );
+	}
+
+	return out;
+}
+
+/** Drafts that would not save: their own parse errors, then what quick edit checks across fields (a sale price above the regular price), then a price jump to confirm. */
+export function validateRow( item: ProductListItem, drafts: ReadonlyMap< string, CellDraft >, context: InlineEditValue ): Array< { field: string; message: string; confirm?: boolean } > {
 	const own = Array.from( drafts ).filter( ( [ , draft ] ) => draft.error ).map( ( [ field, draft ] ) => ( { field, message: draft.error as string } ) );
 
 	if ( own.length ) {
@@ -170,48 +212,64 @@ export function validateRow( item: ProductListItem, drafts: ReadonlyMap< string,
 
 	const edits = Object.fromEntries( Array.from( drafts ).map( ( [ id, draft ] ) => [ id, draft.value ] ) );
 
-	return validateBulkNumericEdits( [ item ], edits, context.fields, context.settings ).map( ( entry ) => ( { field: entry.field, message: entry.message } ) );
+	const rules = validateBulkNumericEdits( [ item ], edits, context.fields, context.settings ).map( ( entry ) => ( { field: entry.field, message: entry.message } ) );
+
+	return rules.length ? rules : priceJumps( item, drafts, context );
 }
 
 function labelOf( field: ProductField ): string {
 	return ( field.edit && field.edit.label ) || field.label || field.id;
 }
 
+/** Whether a draft is still the one sent (its text and value; being flagged is no change). */
+function stillSent( now: CellDraft | undefined, sent: CellDraft | undefined ): boolean {
+	return !! now && !! sent && now.text === sent.text && now.value === sent.value;
+}
+
 /**
- * Saves the row's drafts. A row already saving saves again when that save is
- * back (what was typed meanwhile is not lost); a row whose drafts do not
- * validate is not saved, its cells say why.
+ * Saves the row's drafts. What the last attempt said about them is cleared
+ * first and checked again (a sale price that was too high is fine once the
+ * regular price is raised; a failed request is tried again). A row already
+ * saving is left to that save, which saves again when it is back if more was
+ * typed meanwhile; a row whose drafts do not validate is not saved, its cells
+ * say why.
  */
 export async function commitRow( item: ProductListItem, context: InlineEditValue ): Promise< void > {
-	const drafts = rowDrafts( item.id );
-
-	if ( ! drafts.size || isRowSaving( item.id ) ) {
+	if ( ! rowDrafts( item.id ).size || isRowSaving( item.id ) ) {
 		return;
 	}
 
+	flagDrafts( item.id, undefined );
+
+	const drafts = rowDrafts( item.id );
 	const problems = validateRow( item, drafts, context );
 	const name = itemLabel( item );
 
 	if ( problems.length ) {
 		for ( const problem of problems ) {
-			flagDrafts( item.id, problem.message, [ problem.field ] );
+			flagDrafts( item.id, problem.message, [ problem.field ], problem.confirm === true );
 		}
 
-		notify.error( sprintf( /* translators: 1: product name, 2: what is wrong */ __( '%1$s was not saved: %2$s', 'wp-woocommerce-products-list' ), name, problems.map( ( problem ) => problem.message ).join( ' ' ) ), { id: 'wc-pl-inline-saved' } );
+		const text = sprintf( /* translators: 1: product name, 2: what is wrong */ __( '%1$s was not saved: %2$s', 'wp-woocommerce-products-list' ), name, problems.map( ( problem ) => problem.message ).join( ' ' ) );
+
+		notify.error( text, { id: 'wc-pl-inline-saved' } );
+		speak( text, 'assertive' );
 
 		return;
 	}
 
 	const sent = new Map( drafts );
 	const edits = Object.fromEntries( Array.from( sent ).map( ( [ id, draft ] ) => [ id, draft.value ] ) );
+	let saved = false;
 
 	setRowSaving( item.id, true );
 
 	try {
 		const outcome = await saveRow( item, edits, context.fields );
-
 		// Drafts typed while it saved stay (and save next); the ones sent are done or flagged.
-		const settled = Array.from( sent.keys() ).filter( ( id ) => getDraft( item.id, id ) === sent.get( id ) );
+		const settled = Array.from( sent.keys() ).filter( ( id ) => stillSent( getDraft( item.id, id ), sent.get( id ) ) );
+
+		saved = outcome.ok;
 
 		if ( outcome.ok ) {
 			clearDrafts( item.id, settled );
@@ -224,6 +282,13 @@ export async function commitRow( item: ProductListItem, context: InlineEditValue
 		}
 	} finally {
 		setRowSaving( item.id, false );
+	}
+
+	// Typed (or picked in a menu) while the row saved: saved now, on the row as that save left it.
+	const left = rowDrafts( item.id );
+
+	if ( saved && left.size && Array.from( left.values() ).every( ( draft ) => ! draft.error && ! draft.problem ) ) {
+		await commitRow( findCachedRow( item.id ) ?? item, context );
 	}
 }
 
@@ -263,7 +328,14 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 	const saved = displayText( field, item, kind, context.settings );
 	const text = draft?.text ?? saved;
 	const errorId = `wcpl-inline-error-${ item.id }-${ field.id.replace( /[^a-z0-9_-]+/gi, '-' ) }`;
+	const message = draft?.error ?? draft?.problem;
 	const symbol = kind === 'money' ? moneySettings( field, context.settings ).currency.symbol : null;
+	const [ focused, setFocused ] = useState( false );
+	// A click places the caret (the cell looks like an input, not a spreadsheet cell); a number, or a cell reached
+	// by keyboard, is selected whole, ready to be typed over.
+	const pointerRef = useRef( false );
+	// Safari drops a selection made on focus at the mouseup of the click that focused: it is made there again.
+	const selectOnMouseUpRef = useRef( false );
 
 	const change = ( next: string ) => {
 		if ( next === saved ) {
@@ -292,26 +364,47 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 		if ( event.key === 'Enter' && ! event.nativeEvent.isComposing ) {
 			event.preventDefault();
 			const target = event.currentTarget;
+
+			// A change that would not save keeps the focus here, where its message is.
+			if ( rowDrafts( item.id ).size && validateRow( item, rowDrafts( item.id ), context ).length ) {
+				void commitRow( item, context );
+
+				return;
+			}
+
 			const next = siblingCell( target, field.id, event.shiftKey ? -1 : 1 );
 
-			// Down the column, as in a spreadsheet; the row saves (its inputs are locked while it does).
-			next?.focus();
+			// Down the column, as in a spreadsheet; the row saves (its inputs are locked while it does). The last row
+			// keeps the focus.
+			if ( next ) {
+				next.focus();
 
-			if ( next instanceof HTMLInputElement && next.type === 'text' ) {
-				next.select();
+				if ( next instanceof HTMLInputElement && next.type === 'text' ) {
+					next.select();
+				}
+			} else {
+				target.select();
 			}
+
 			void commitRow( item, context );
 		}
 	};
 
 	const onBlur = ( event: FocusEvent< HTMLInputElement > ) => {
+		setFocused( false );
+		// A long text scrolled to its end while typed reads from its start again.
+		event.currentTarget.scrollLeft = 0;
+
 		if ( ! sameRow( event.relatedTarget, item.id ) ) {
 			void commitRow( item, context );
 		}
 	};
 
 	return (
-		<span className={ [ 'wc-pl-inline', `wc-pl-inline--${ kind }`, draft ? 'is-dirty' : '', draft?.error ? 'is-invalid' : '', className ?? '' ].filter( Boolean ).join( ' ' ) } data-wcpl-inline-row={ item.id }>
+		<span
+			className={ [ 'wc-pl-inline', `wc-pl-inline--${ kind }`, leafOf( field.id ) === 'sku' ? 'wc-pl-inline--sku' : '', text === '' ? 'is-empty' : '', draft ? 'is-dirty' : '', message ? 'is-invalid' : '', className ?? '' ].filter( Boolean ).join( ' ' ) }
+			data-wcpl-inline-row={ item.id }
+		>
 			<input
 				type="text"
 				className="wc-pl-inline__input"
@@ -319,22 +412,40 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 				value={ text }
 				placeholder={ placeholder }
 				aria-label={ label }
-				aria-invalid={ draft?.error ? true : undefined }
-				aria-describedby={ draft?.error ? errorId : undefined }
-				title={ draft?.error ?? undefined }
+				aria-invalid={ message ? true : undefined }
+				aria-describedby={ message ? errorId : undefined }
 				readOnly={ isRowSaving( item.id ) }
 				data-wcpl-inline-field={ field.id }
 				onChange={ ( event ) => change( event.target.value ) }
 				onKeyDown={ onKeyDown }
 				onBlur={ onBlur }
-				onFocus={ ( event ) => event.currentTarget.select() }
+				onFocus={ ( event ) => {
+					setFocused( true );
+
+					if ( kind !== 'text' || ! pointerRef.current ) {
+						event.currentTarget.select();
+						selectOnMouseUpRef.current = pointerRef.current;
+					}
+
+					pointerRef.current = false;
+				} }
 				onClick={ stop }
-				onMouseDown={ stop }
+				onMouseDown={ ( event ) => {
+					stop( event );
+					pointerRef.current = document.activeElement !== event.currentTarget;
+				} }
+				onMouseUp={ ( event ) => {
+					if ( selectOnMouseUpRef.current ) {
+						selectOnMouseUpRef.current = false;
+						event.preventDefault();
+						event.currentTarget.select();
+					}
+				} }
 			/>
 			{ symbol && <span className="wc-pl-inline__suffix" aria-hidden="true">{ symbol }</span> }
-			{ draft?.error && (
-				<span id={ errorId } className="screen-reader-text">
-					{ draft.error }
+			{ message && (
+				<span id={ errorId } className={ focused ? 'wc-pl-inline__message' : 'screen-reader-text' }>
+					{ message }
 				</span>
 			) }
 		</span>
@@ -378,11 +489,13 @@ function InlineSelectControl( { item, field, context, label, className }: Contro
 	const known = options.some( ( option ) => String( option.value ) === value );
 
 	return (
-		<span className={ [ 'wc-pl-inline', 'wc-pl-inline--select', draft ? 'is-dirty' : '', draft?.error ? 'is-invalid' : '', className ?? '' ].filter( Boolean ).join( ' ' ) } data-wcpl-inline-row={ item.id }>
+		<span className={ [ 'wc-pl-inline', 'wc-pl-inline--select', draft ? 'is-dirty' : '', draft?.error || draft?.problem ? 'is-invalid' : '', className ?? '' ].filter( Boolean ).join( ' ' ) } data-wcpl-inline-row={ item.id }>
 			<select
 				className="wc-pl-inline__select"
 				value={ value }
 				aria-label={ label }
+				aria-invalid={ draft?.problem ? true : undefined }
+				title={ draft?.problem }
 				data-wcpl-inline-field={ field.id }
 				onChange={ ( event ) => {
 					const next = event.target.value;
@@ -415,12 +528,14 @@ function InlineCheckboxControl( { item, field, context, label, className }: Cont
 	const checked = draft ? draft.value === true : saved;
 
 	return (
-		<span className={ [ 'wc-pl-inline', 'wc-pl-inline--boolean', draft ? 'is-dirty' : '', className ?? '' ].filter( Boolean ).join( ' ' ) } data-wcpl-inline-row={ item.id }>
+		<span className={ [ 'wc-pl-inline', 'wc-pl-inline--boolean', draft ? 'is-dirty' : '', draft?.problem ? 'is-invalid' : '', className ?? '' ].filter( Boolean ).join( ' ' ) } data-wcpl-inline-row={ item.id }>
 			<input
 				type="checkbox"
 				className="wc-pl-inline__checkbox"
 				checked={ checked }
 				aria-label={ label }
+				aria-invalid={ draft?.problem ? true : undefined }
+				title={ draft?.problem }
 				data-wcpl-inline-field={ field.id }
 				onChange={ ( event ) => {
 					const next = event.target.checked;
@@ -468,7 +583,7 @@ function fieldCell( field: ProductField, kind: InlineKind ): Render {
 	return function InlineFieldCell( props ) {
 		const context = useContext( InlineEditContext );
 
-		if ( ! context || ! rowEditableIds( props.item, context ).has( field.id ) ) {
+		if ( ! context?.enabled || ! rowEditableIds( props.item, context ).has( field.id ) ) {
 			return render ? createElement( render, props ) : null;
 		}
 
@@ -483,7 +598,7 @@ function nameCell( field: ProductField ): Render {
 	return function InlineNameCell( props ) {
 		const context = useContext( InlineEditContext );
 
-		if ( ! context || ! rowEditableIds( props.item, context ).has( field.id ) ) {
+		if ( ! context?.enabled || ! rowEditableIds( props.item, context ).has( field.id ) ) {
 			return render ? createElement( render, props ) : null;
 		}
 
@@ -505,7 +620,7 @@ function priceCell( field: ProductField ): Render {
 		const sale = context?.byId.get( 'sale_price' );
 		const ids = context ? rowEditableIds( props.item, context ) : null;
 
-		if ( ! context || ! regular || ! sale || ! ids?.has( 'regular_price' ) ) {
+		if ( ! context?.enabled || ! regular || ! sale || ! ids?.has( 'regular_price' ) ) {
 			return render ? createElement( render, props ) : null;
 		}
 
@@ -524,7 +639,7 @@ function stockCell( field: ProductField ): Render {
 
 	return function InlineStockCell( props ) {
 		const context = useContext( InlineEditContext );
-		const ids = context ? rowEditableIds( props.item, context ) : null;
+		const ids = context?.enabled ? rowEditableIds( props.item, context ) : null;
 		const quantity = context?.byId.get( 'stock_quantity' );
 
 		if ( context && quantity && ids?.has( 'stock_quantity' ) ) {
@@ -539,16 +654,23 @@ function stockCell( field: ProductField ): Render {
 	};
 }
 
-/**
- * The fields with their cells made editable (`enabled`), or as they are. A
- * field's id, filters and sorting stay; only `render` changes.
- */
-export function withInlineEditing( fields: ProductField[], enabled: boolean ): ProductField[] {
-	if ( ! enabled ) {
-		return fields;
-	}
+const wrapped = new WeakMap< ProductField, ProductField >();
 
+/**
+ * The fields with cells that turn into inputs while Edit in table is on
+ * (`InlineEditContext.enabled`), else render the column's own cell. A field's
+ * id, filters and sorting stay; only `render` changes. The wrapped field is
+ * kept per field, so switching the mode re-renders the cells, never remounts
+ * them (a hundred-row page has thousands).
+ */
+export function withInlineEditing( fields: ProductField[] ): ProductField[] {
 	return fields.map( ( field ) => {
+		const known = wrapped.get( field );
+
+		if ( known ) {
+			return known;
+		}
+
 		let render: Render | null = null;
 
 		if ( field.id === 'name' ) {
@@ -563,6 +685,10 @@ export function withInlineEditing( fields: ProductField[], enabled: boolean ): P
 			render = kind ? fieldCell( field, kind ) : null;
 		}
 
-		return render ? { ...field, render: memoRender( render as ProductField[ 'render' ] ) } : field;
+		const next = render ? { ...field, render: memoRender( render as ProductField[ 'render' ] ) } : field;
+
+		wrapped.set( field, next );
+
+		return next;
 	} );
 }

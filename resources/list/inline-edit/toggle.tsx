@@ -3,28 +3,27 @@
  * the table on how the table saves (a typed change saves on Enter or when
  * leaving the row).
  */
+import { ToggleControl } from '@wordpress/components';
 import { __ } from '@wordpress/i18n';
-import { pencil } from '@wordpress/icons';
 import { Button } from '../../ui';
 import { setInlineEditing, useInlineEditing } from './mode';
 
 export const INLINE_HINT_ID = 'wc-products-list-inline-hint';
 
+/** A mode, so a switch (beside the status tabs, where the crowded toolbar never pushes it out of view). */
 export function InlineEditToggle() {
 	const enabled = useInlineEditing();
 
 	return (
-		<Button
-			size="compact"
-			variant="tertiary"
-			icon={ pencil }
-			isPressed={ enabled }
-			aria-describedby={ enabled ? INLINE_HINT_ID : undefined }
-			className="wc-products-list__inline-toggle"
-			onClick={ () => setInlineEditing( ! enabled ) }
-		>
-			{ __( 'Edit in table', 'wp-woocommerce-products-list' ) }
-		</Button>
+		<div className="wc-products-list__inline-toggle">
+			<ToggleControl
+				__nextHasNoMarginBottom
+				label={ __( 'Edit in table', 'wp-woocommerce-products-list' ) }
+				checked={ enabled }
+				aria-describedby={ enabled ? INLINE_HINT_ID : undefined }
+				onChange={ ( next: boolean ) => setInlineEditing( next ) }
+			/>
+		</div>
 	);
 }
 

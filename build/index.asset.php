@@ -6,6 +6,7 @@
 		'wp-a11y',
 		'wp-api-fetch',
 		'wp-components',
+		'wp-compose',
 		'wp-data',
 		'wp-date',
 		'wp-dom-ready',
@@ -18,5 +19,5 @@
 		'wp-primitives',
 		'wp-url'
 	),
-	'version' => '0866db345420bbf270fb'
+	'version' => 'cd1178c1a530e4ec0467'
 );

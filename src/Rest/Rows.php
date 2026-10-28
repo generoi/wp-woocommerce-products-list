@@ -38,13 +38,13 @@ final class Rows
      * translation group (Polylang for WooCommerce reads both while a
      * variation loads). Primed per page when they exist.
      */
+    /** The read param that keeps the gallery in list mode (the image editor's load). */
+    public const GALLERY_PARAM = 'wcpl_gallery';
+
     public const KNOWN_VARIATION_TAXONOMIES = ['language', 'post_translations'];
 
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */
     private static ?WeakMap $fields = null;
-
-    /** The read param that keeps the gallery in list mode (the image editor's load). */
-    public const GALLERY_PARAM = 'wcpl_gallery';
 
     /** @var WeakMap<WP_REST_Request, bool>|null whether a write request carries `images`, per request object */
     private static ?WeakMap $writesImages = null;
@@ -313,13 +313,6 @@ final class Rows
     }
 
     /**
-     * Whether the request being dispatched sets `images`: at its top level
-     * (a single write) or in any `create`/`update` item (a batch). Outside
-     * a dispatched request nothing is known about the write, and the
-     * gallery is kept. Memoised per request object: it is asked for on
-     * every row of a batch.
-     */
-    /**
      * A read that asks for the whole gallery (`GALLERY_PARAM`): the image
      * editor loads a product's images with it, as WooCommerce stores them.
      */
@@ -330,6 +323,13 @@ final class Rows
         return $value !== null && $value !== '' && $value !== '0' && $value !== false;
     }
 
+    /**
+     * Whether the request being dispatched sets `images`: at its top level
+     * (a single write) or in any `create`/`update` item (a batch). Outside
+     * a dispatched request nothing is known about the write, and the
+     * gallery is kept. Memoised per request object: it is asked for on
+     * every row of a batch.
+     */
     private static function requestWritesImages(): bool
     {
         $request = ListMode::request();

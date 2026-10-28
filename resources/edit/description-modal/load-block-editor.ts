@@ -83,11 +83,6 @@ function loadTemplate( id: string ): Promise< number > {
 	return load;
 }
 
-/** Whether the page carries the media library's assets (the products list screen does). */
-export function canLoadMedia(): boolean {
-	return !! document.getElementById( MEDIA_TEMPLATE_ID ) || typeof ( window as { wp?: { media?: unknown } } ).wp?.media === 'function';
-}
-
 /** Loads the media library (`wp.media`); resolves with the milliseconds the load took (0 when it was there before). */
 export function loadMedia(): Promise< number > {
 	if ( ! document.getElementById( MEDIA_TEMPLATE_ID ) && typeof ( window as { wp?: { media?: unknown } } ).wp?.media === 'function' ) {

@@ -956,6 +956,8 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				return { lang, label: languages?.labels[ lang ] ?? ( lang.toUpperCase() || __( 'Default', 'wp-woocommerce-products-list' ) ), fieldId: field.id, tabId: tabOf( field ), isDefault };
 			} );
 	}, [ bulk, visibleFields, settings.languages ] );
+	// The Images field's upload or media library in progress: Update waits for it (the images it brings are part of it).
+	const [ imagesBusy, setImagesBusy ] = useState( false );
 	// The Images field's row: uploads attach to the product (a variation's to its parent), a variation has one image.
 	const imagesTarget = useMemo< ImagesControlTarget | null >( () => {
 		const only = selectedRows.length === 1 ? selectedRows[ 0 ] : undefined;
@@ -966,7 +968,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 		const variation = isVariation( only );
 
-		return { postId: variation ? parentIdOf( only ) || only.id : only.id, single: variation, itemName: nameOf( only ) };
+		return { postId: variation ? parentIdOf( only ) || only.id : only.id, single: variation, itemName: nameOf( only ), onBusyChange: setImagesBusy };
 	}, [ bulk, selectedRows ] );
 	const descriptionOpener = useRef< HTMLElement | null >( null );
 	const openDescription = useMemo(
@@ -1978,6 +1980,12 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 	const save = async ( advance = false, implicit = false ) => {
 		if ( saving || loading ) {
+			return;
+		}
+
+		if ( imagesBusy ) {
+			notify.info( __( 'An image is still uploading: Update when it is done.', 'wp-woocommerce-products-list' ) );
+
 			return;
 		}
 
@@ -3011,10 +3019,10 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 	} )();
 
 	// Busy buttons stay focusable (a disabled button drops keyboard focus to <body>); the handlers ignore the extra press.
-	const saveBlocked = saving || loading || needsEditOthers || awaitingOverwrite || ( ! failedButNothingToRetry && stagedCount === 0 && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
+	const saveBlocked = saving || loading || imagesBusy || needsEditOthers || awaitingOverwrite || ( ! failedButNothingToRetry && stagedCount === 0 && ( ( pendingCount === 0 && ! state.hasInput ) || nothingToWrite ) );
 	const showNext = ! bulk && nextRow !== null && ! failedIds;
 	// "Save & next" with nothing typed just moves on; with edits it saves them first.
-	const nextBlocked = saving || loading || needsEditOthers || nothingToWrite;
+	const nextBlocked = saving || loading || imagesBusy || needsEditOthers || nothingToWrite;
 	// Edits typed, yet nothing reaches any row: why, next to the greyed-out Update, not only in a note up the form.
 	const nothingReason =
 		! saving && ! loading && nothingToWrite && pendingCount > 0 && stagedCount === 0 && ! failedIds

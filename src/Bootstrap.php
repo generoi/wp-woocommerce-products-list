@@ -174,6 +174,8 @@ final class Bootstrap
             'deleteOthers' => current_user_can('delete_others_products'),
             'manageWoocommerce' => current_user_can('manage_woocommerce'),
             'manageTerms' => current_user_can('manage_product_terms'),
+            // The media library and uploads (images from the list and in quick edit).
+            'upload' => current_user_can('upload_files'),
             // History and Undo/Revert (GET /log*, POST /log/batch/{id}/revert).
             'viewLog' => current_user_can(Plugin::logCapability()),
         ];

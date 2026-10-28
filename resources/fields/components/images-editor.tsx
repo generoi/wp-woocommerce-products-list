@@ -9,13 +9,14 @@
  */
 import { speak } from '@wordpress/a11y';
 import { DropdownMenu } from '@wordpress/components';
-import { useLayoutEffect, useRef, useState } from '@wordpress/element';
+import { useEffect, useLayoutEffect, useRef, useState } from '@wordpress/element';
 import { decodeEntities } from '@wordpress/html-entities';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { closeSmall, moreVertical, plus } from '@wordpress/icons';
 import type { DragEvent } from 'react';
 import { isImageFile, pickImages, uploadImage } from '../../media/media-frame';
 import type { RawImage } from '../../types';
+import { getSettings } from '../../settings';
 import { Button, Spinner } from '../../ui';
 
 export interface ImagesEditorProps {
@@ -99,7 +100,25 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 		valueRef.current = value;
 	}, [ value ] );
 
+	// Unmounted mid-upload (the tab or the panel closed): whoever waits is not left waiting.
+	const busyChangeRef = useRef( onBusyChange );
+
+	useLayoutEffect( () => {
+		busyChangeRef.current = onBusyChange;
+	}, [ onBusyChange ] );
+
+	useEffect(
+		() => () => {
+			if ( busyRef.current > 0 ) {
+				busyChangeRef.current?.( false );
+			}
+		},
+		[]
+	);
+
 	const images = single ? value.slice( 0, 1 ) : value;
+	// Without `upload_files` there is no media library to pick from: images can be reordered and removed only.
+	const canUpload = getSettings().caps.upload !== false;
 	const busy = ( delta: number ) => {
 		const before = busyRef.current > 0;
 
@@ -203,7 +222,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 	const hasFiles = ( event: DragEvent ) => Array.from( event.dataTransfer?.types ?? [] ).includes( 'Files' );
 
 	const onZoneDragOver = ( event: DragEvent ) => {
-		if ( disabled || ! hasFiles( event ) ) {
+		if ( disabled || ! canUpload || ! hasFiles( event ) ) {
 			return;
 		}
 
@@ -213,7 +232,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 	};
 
 	const onZoneDrop = ( event: DragEvent ) => {
-		if ( disabled || ! hasFiles( event ) ) {
+		if ( disabled || ! canUpload || ! hasFiles( event ) ) {
 			return;
 		}
 
@@ -255,20 +274,33 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 		}
 	};
 
+	const rootRef = useRef< HTMLDivElement | null >( null );
+
 	const remove = ( index: number ) => {
 		set(
 			images.filter( ( _image, i ) => i !== index ),
 			__( 'Image removed.', 'wp-woocommerce-products-list' )
 		);
+
+		// The focus was on the removed tile's button: it goes to the tile now in its place (or the one before), else "Add images".
+		window.requestAnimationFrame( () => {
+			const tiles = Array.from( rootRef.current?.querySelectorAll< HTMLElement >( '.wc-pl-images__tile:not(.is-add):not(.is-uploading)' ) ?? [] );
+			const tile = tiles[ Math.min( index, tiles.length - 1 ) ];
+
+			( tile?.querySelector< HTMLElement >( '.wc-pl-images__tool' ) ?? rootRef.current?.querySelector< HTMLElement >( '.wc-pl-images__add' ) )?.focus();
+		} );
 	};
 
-	const canAdd = ! disabled && ( ! single || images.length === 0 );
+	const canAdd = ! disabled && canUpload && ( ! single || images.length === 0 );
 	const hint = single
-		? __( 'Drop an image file here to upload it, or choose one from the media library.', 'wp-woocommerce-products-list' )
+		? images.length === 0
+			? __( 'Until one is set, the variation shows the product’s main image. Drop an image file here, or choose one from the media library.', 'wp-woocommerce-products-list' )
+			: __( 'Drop an image file here to replace it, or choose another from the media library.', 'wp-woocommerce-products-list' )
 		: __( 'The first image is the main image, the others the gallery. Drag to reorder, or drop image files here to upload them.', 'wp-woocommerce-products-list' );
 
 	return (
 		<div
+			ref={ rootRef }
 			className={ `wc-pl-images${ filesOver ? ' is-files-over' : '' }${ disabled ? ' is-disabled' : '' }` }
 			onDragOver={ onZoneDragOver }
 			onDragLeave={ ( event ) => {
@@ -327,11 +359,11 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 														},
 												  ]
 												: [] ),
-											{ title: __( 'Replace…', 'wp-woocommerce-products-list' ), onClick: () => void pick( index ) },
+											...( canUpload ? [ { title: __( 'Replace…', 'wp-woocommerce-products-list' ), onClick: () => void pick( index ) } ] : [] ),
 										] }
 									/>
 								) }
-								{ single && (
+								{ single && canUpload && (
 									<Button size="small" className="wc-pl-images__tool" onClick={ () => void pick( 0 ) }>
 										{ __( 'Replace', 'wp-woocommerce-products-list' ) }
 									</Button>
@@ -360,7 +392,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 					</li>
 				) }
 			</ul>
-			{ ! disabled && <p className="wc-pl-images__hint">{ hint }</p> }
+			{ ! disabled && canUpload && <p className="wc-pl-images__hint">{ hint }</p> }
 			{ error && (
 				<p className="wc-pl-images__error" role="alert">
 					{ error }

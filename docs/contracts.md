@@ -95,7 +95,7 @@ All own routes: namespace `wc-products-list/v1`, permission `current_user_can(Pl
 
 | `search_name_or_sku` | in list mode the plugin's own search, not WooCommerce's: tokens split on whitespace, each must match the product's name or SKU **or the SKU of one of its variations**. Rows are always products (WooCommerce's search lists matching variations as rows of their own). |
 
-The app always sends `_fields` (union of visible fields' `rest.fields` + `id,type,status,parent_id,featured,wc_products_list` on products — `featured` because the feature/unfeature actions decide on it whatever columns are shown — and `id,type,status,parent_id,wc_products_list` on variations), `image_size=thumbnail`, `per_page ≤ 100`, `search_name_or_sku` instead of `search`. Response headers `X-WP-Total`, `X-WP-TotalPages` are read. On list-mode reads `images` carries the featured image only (`wc_products_list/drop_gallery`).
+The app always sends `_fields` (union of visible fields' `rest.fields` + `id,type,status,parent_id,featured,wc_products_list` on products — `featured` because the feature/unfeature actions decide on it whatever columns are shown — and `id,type,status,parent_id,wc_products_list` on variations), `image_size=thumbnail`, `per_page ≤ 100`, `search_name_or_sku` instead of `search`. Response headers `X-WP-Total`, `X-WP-TotalPages` are read. On list-mode reads `images` carries the featured image only (`wc_products_list/drop_gallery`), unless the read asks for the whole gallery with `wcpl_gallery=1` (`Rows::GALLERY_PARAM`; the image editor's and quick edit's loads, `hydrate.ts`). A variation's `image` is its parent's in the view context when it has none of its own: the editor reads it with `context=edit` (null without one).
 
 Row (`Rest\Rows`, list mode only) adds:
 
@@ -484,6 +484,19 @@ Round 8 edit rules. `date_modified_gmt` is in `EDIT_BASE_FIELDS`: every hydrated
 
 
 Bulk save details: products go out in `products/batch` requests side by side (`runConcurrently`, `concurrency` default 3), cut so every slot has work (100 rows → 34 + 34 + 32); variations in lanes of whole parents (`packVariationLanes`). A partial failure always names the failed items and the reason in a snackbar that stays until dismissed and links to History (`links.history?batch=…`). A declarative action with a non-null `group` and a select arg with id `lang` (gds-woo-i18n's `i18n_copy`, `i18n_clear`) is hosted inline in the editor's `<group>:<lang>` tab (language-tools.tsx, hosted-actions.ts) and removed from the row action menu whenever an editor is available. `toolTabIds(settings, items)` (form-layouts.ts) keeps a `<group>:<lang>` tab for the tools even when the selection has no editable field of that language (bulk: names, slugs, SEO title and SEO description are not bulk fields, `BULK_UNSUPPORTED_EXTENSION_LEAVES`; one SEO text on many products goes through the tools' templates); in bulk the tools panel starts unfolded. Variation quick edit focuses the regular price first. The editor's lazy chunk sits in an `ErrorBoundary` (context `editor`) whose fallback offers Reload (a chunk error) or Try again, plus Cancel (closes the panel). A declarative text cell whose value object (the path minus its last segment) carries `referenceLabel` uses it as the cell title, and `untranslated: [{id, taxonomy, name, edit_link}]` adds an "untranslated term" tag linking to the term (gds-woo-i18n variation names). The editor reports a running save through `EditorHost.setBusy(busy)`; while busy the screen never closes it (an emptied selection, a refetched list).
+
+### `resources/list/inline-edit/` (images from the list, Edit in table)
+
+```ts
+export function EditableImageCell({ item }): JSX.Element   // image-cell-editor.tsx: the images field's render; a button opening the images popover (ImagesEditor), saved through saveRow
+export function saveRow(item, edits, fields): Promise<{ ok: boolean; row?; message?; code?; unchanged? }>   // save-row.ts: saveEdits for one row under a save job that locks that row only (not a variation's parent and siblings), snackbar with Undo (INLINE_SAVED_NOTICE_ID)
+export function withInlineEditing(fields, enabled): ProductField[]   // cells.tsx: the table's fields with input cells for inlineKindOf() fields (text | money | integer | select | boolean), the name, Price (regular + sale) and Stock (quantity or status) columns
+export function rowEditableIds(item, context): ReadonlySet<string>   // visibleEditFields(quick) for that row, stock-gated leaves only when it manages stock; none without caps.edit, on a row with can_edit false, in the Trash or a placeholder
+export function commitRow(item, context): Promise<void>   // saves the row's drafts (drafts.ts) after validateRow (parse errors, then validateBulkNumericEdits); a conflict drops the drafts and refetches
+export function useInlineEditing(): boolean; export function setInlineEditing(on: boolean): void; export const InlineEditContext   // mode.ts; localStorage `wc-products-list:inline-editing`
+```
+
+The images editor (`resources/fields/components/images-editor.tsx`) is shared with quick edit's Images field (`images-control.tsx`, `ImagesControlContext` for the row). The media library (`resources/media/media-frame.ts`: `pickImages`, `uploadImage`) loads from its own template (`BlockEditorAssets::MEDIA_TEMPLATE_ID`, `loadMedia()`).
 
 ### `resources/history/`
 

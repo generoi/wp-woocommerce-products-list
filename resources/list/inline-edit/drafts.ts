@@ -4,15 +4,21 @@
  * leaves the row or Enter is pressed, so a price and its sale price typed
  * one after the other are one change, checked against each other.
  */
-import { useSyncExternalStore } from '@wordpress/element';
+import { useCallback, useSyncExternalStore } from '@wordpress/element';
+import { _n, sprintf } from '@wordpress/i18n';
+import { notify } from '../../actions/notices';
 
 export interface CellDraft {
 	/** The value to save, in the row's stored form ('15.50', 12, 'instock'). */
 	value: unknown;
 	/** What the cell shows (the typed text). */
 	text: string;
-	/** Why the value cannot be saved as it is. */
+	/** Why the typed text is not a value (not a price, not a whole number): it stays until the text changes. */
 	error?: string;
+	/** Why the last save of the row did not take it (a sale price above the regular price, a taken SKU, a failed request): cleared by the next attempt. */
+	problem?: string;
+	/** The text the user was asked to confirm (a price ten times the old one): saved as it is on the next attempt. */
+	confirmed?: string;
 }
 
 export type RowState = 'idle' | 'saving';
@@ -44,7 +50,7 @@ export function setDraft( rowId: number, fieldId: string, draft: CellDraft | und
 	const row = drafts.get( rowId ) ?? new Map< string, CellDraft >();
 	const before = row.get( fieldId );
 
-	if ( draft === undefined ? before === undefined : before && before.value === draft.value && before.text === draft.text && before.error === draft.error ) {
+	if ( draft === undefined ? before === undefined : before && before.value === draft.value && before.text === draft.text && before.error === draft.error && before.problem === draft.problem ) {
 		return;
 	}
 
@@ -63,21 +69,54 @@ export function setDraft( rowId: number, fieldId: string, draft: CellDraft | und
 	emit( rowId );
 }
 
-/** Marks the drafts of `fieldIds` (all when omitted) with an error, or clears their errors (`undefined`). */
-export function flagDrafts( rowId: number, error: string | undefined, fieldIds?: string[] ): void {
+/** Marks the drafts of `fieldIds` (all when omitted) with why the save did not take them, or clears that (`undefined`). */
+export function flagDrafts( rowId: number, problem: string | undefined, fieldIds?: string[], confirm = false ): void {
 	const row = drafts.get( rowId );
 
 	if ( ! row ) {
 		return;
 	}
 
+	let changed = false;
+
 	for ( const [ fieldId, draft ] of row ) {
-		if ( ! fieldIds || fieldIds.includes( fieldId ) ) {
-			row.set( fieldId, { ...draft, error } );
+		if ( ( ! fieldIds || fieldIds.includes( fieldId ) ) && ( draft.problem !== problem || confirm ) ) {
+			row.set( fieldId, { ...draft, problem, ...( confirm ? { confirmed: draft.text } : {} ) } );
+			changed = true;
 		}
 	}
 
-	emit( rowId );
+	if ( changed ) {
+		emit( rowId );
+	}
+}
+
+/** Drops the drafts of rows that are not among `rowIds` (they left the list: another page, a search). */
+export function pruneDrafts( rowIds: ReadonlySet< number > ): number {
+	let dropped = 0;
+
+	for ( const rowId of Array.from( drafts.keys() ) ) {
+		if ( ! rowIds.has( rowId ) && ! saving.has( rowId ) ) {
+			dropped += drafts.get( rowId )?.size ?? 0;
+			drafts.delete( rowId );
+			emit( rowId );
+		}
+	}
+
+	return dropped;
+}
+
+/** Drops every draft (Edit in table turned off: a change that did not save is not kept out of sight). */
+export function clearAllDrafts(): number {
+	let dropped = 0;
+
+	for ( const rowId of Array.from( drafts.keys() ) ) {
+		dropped += drafts.get( rowId )?.size ?? 0;
+		drafts.delete( rowId );
+		emit( rowId );
+	}
+
+	return dropped;
 }
 
 export function clearDrafts( rowId: number, fieldIds?: string[] ): void {
@@ -136,11 +175,10 @@ function subscribeRow( rowId: number, listener: () => void ): () => void {
 
 /** Re-renders when this row's drafts or saving state change. */
 export function useRowDrafts( rowId: number ): number {
-	return useSyncExternalStore(
-		( listener ) => subscribeRow( rowId, listener ),
-		() => versions.get( rowId ) ?? 0,
-		() => 0
-	);
+	const subscribe = useCallback( ( listener: () => void ) => subscribeRow( rowId, listener ), [ rowId ] );
+	const snapshot = useCallback( () => versions.get( rowId ) ?? 0, [ rowId ] );
+
+	return useSyncExternalStore( subscribe, snapshot, () => 0 );
 }
 
 export function useDraftCount(): number {
@@ -161,4 +199,18 @@ export function resetDrafts(): void {
 	saving.clear();
 	versions.clear();
 	total = 0;
+}
+
+/** Says that changes which did not save were dropped (they are never kept where nothing shows them). */
+export function reportDropped( count: number ): void {
+	if ( count > 0 ) {
+		notify.info(
+			sprintf(
+				/* translators: %d: number of table cells */
+				_n( '%d change in the table did not save and was dropped.', '%d changes in the table did not save and were dropped.', count, 'wp-woocommerce-products-list' ),
+				count
+			),
+			{ id: 'wc-pl-inline-dropped' }
+		);
+	}
 }

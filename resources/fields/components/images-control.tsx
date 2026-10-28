@@ -14,6 +14,8 @@ export interface ImagesControlTarget {
 	/** A variation: one image. */
 	single: boolean;
 	itemName?: string;
+	/** An upload or the media library is in progress (the editor's Update waits). */
+	onBusyChange?: ( busy: boolean ) => void;
 }
 
 export const ImagesControlContext = createContext< ImagesControlTarget | null >( null );
@@ -35,6 +37,7 @@ export function ImagesControl< Item >( { data, field, onChange, hideLabelFromVis
 				single={ target?.single ?? false }
 				postId={ target?.postId }
 				itemName={ target?.itemName }
+				onBusyChange={ target?.onBusyChange }
 			/>
 		</div>
 	);

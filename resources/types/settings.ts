@@ -26,6 +26,8 @@ export interface Caps {
 	deleteOthers: boolean;
 	manageWoocommerce: boolean;
 	manageTerms: boolean;
+	/** The media library and uploads (`upload_files`): without it images can be reordered and removed, not added. */
+	upload?: boolean;
 	/** History, Undo and Revert (`wc_products_list/log_capability`, default edit_others_products). */
 	viewLog?: boolean;
 }

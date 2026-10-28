@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { displayText, inlineKindOf, parseText, rowEditableIds, validateRow, withInlineEditing } from '../../resources/list/inline-edit/cells';
-import { clearDrafts, draftCount, flagDrafts, getDraft, resetDrafts, rowDrafts, setDraft } from '../../resources/list/inline-edit/drafts';
+import { clearAllDrafts, clearDrafts, draftCount, flagDrafts, getDraft, pruneDrafts, resetDrafts, rowDrafts, setDraft } from '../../resources/list/inline-edit/drafts';
 import type { InlineEditValue } from '../../resources/list/inline-edit/mode';
 import { fieldList } from '../../resources/list/inline-edit/save-row';
 import { createCoreFields } from '../../resources/fields/registry';
@@ -10,7 +10,7 @@ import { editSettings, simple, variable, variation } from './edit-fixtures';
 const settings = editSettings();
 const fields = createCoreFields( settings );
 const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
-const context: InlineEditValue = { fields, byId, settings };
+const context: InlineEditValue = { enabled: true, fields, byId, settings };
 const get = ( id: string ) => byId.get( id ) as ProductField;
 
 afterEach( () => resetDrafts() );
@@ -50,15 +50,15 @@ describe( 'which cells are inputs', () => {
 		expect( rowEditableIds( simple( 1 ), { ...context, settings: editSettings( { caps: { ...settings.caps, edit: false } } ) } ).size ).toBe( 0 );
 	} );
 
-	it( 'changes only the cells of the fields it edits, and nothing when off', () => {
-		expect( withInlineEditing( fields, false ) ).toBe( fields );
-
-		const inline = withInlineEditing( fields, true );
+	it( 'changes only the cells of the fields it edits, with the same field objects every time (a toggle never remounts cells)', () => {
+		const inline = withInlineEditing( fields );
 
 		expect( inline.find( ( field ) => field.id === 'sku' )?.render ).not.toBe( get( 'sku' ).render );
 		expect( inline.find( ( field ) => field.id === 'price' )?.render ).not.toBe( get( 'price' ).render );
-		expect( inline.find( ( field ) => field.id === 'categories' )?.render ).toBe( get( 'categories' ).render );
+		expect( inline.find( ( field ) => field.id === 'categories' ) ).toBe( get( 'categories' ) );
 		expect( inline.map( ( field ) => field.id ) ).toEqual( fields.map( ( field ) => field.id ) );
+		expect( withInlineEditing( fields ) ).toEqual( inline );
+		expect( withInlineEditing( fields )[ 0 ] ).toBe( inline[ 0 ] );
 	} );
 } );
 
@@ -118,8 +118,8 @@ describe( 'drafts', () => {
 		expect( Array.from( rowDrafts( 1 ).keys() ) ).toEqual( [ 'sku', 'name' ] );
 
 		flagDrafts( 1, 'Taken', [ 'sku' ] );
-		expect( getDraft( 1, 'sku' )?.error ).toBe( 'Taken' );
-		expect( getDraft( 1, 'name' )?.error ).toBeUndefined();
+		expect( getDraft( 1, 'sku' )?.problem ).toBe( 'Taken' );
+		expect( getDraft( 1, 'name' )?.problem ).toBeUndefined();
 
 		clearDrafts( 1, [ 'sku' ] );
 		expect( draftCount() ).toBe( 2 );
@@ -134,5 +134,48 @@ describe( 'the saved notice', () => {
 		expect( fieldList( [ 'Price' ] ) ).toBe( 'Price' );
 		expect( fieldList( [ 'Regular price', 'Sale price' ] ) ).toBe( 'Regular price and Sale price' );
 		expect( fieldList( [ 'Name', 'SKU', 'Price' ] ) ).toBe( 'Name, SKU and Price' );
+	} );
+} );
+
+describe( 'a row that did not save', () => {
+	it( 'is checked again on the next attempt: a refused sale price is fine once the regular price is raised', () => {
+		const row = simple( 1, { regular_price: '10' } );
+
+		setDraft( 1, 'sale_price', { text: '15', value: '15' } );
+		expect( validateRow( row, rowDrafts( 1 ), context ).map( ( entry ) => entry.field ) ).toEqual( [ 'sale_price' ] );
+		flagDrafts( 1, 'The sale price must be lower than the regular price.', [ 'sale_price' ] );
+
+		setDraft( 1, 'regular_price', { text: '20', value: '20' } );
+		// A flagged problem is not a parse error: the row validates anew.
+		expect( validateRow( row, rowDrafts( 1 ), context ) ).toEqual( [] );
+	} );
+
+	it( 'asks once about a price ten times the stored one, and saves it the second time', () => {
+		const row = simple( 1, { regular_price: '105' } );
+
+		setDraft( 1, 'regular_price', { text: '99105,00', value: '99105' } );
+		const first = validateRow( row, rowDrafts( 1 ), context );
+
+		expect( first ).toHaveLength( 1 );
+		expect( first[ 0 ]?.confirm ).toBe( true );
+
+		flagDrafts( 1, first[ 0 ]!.message, [ 'regular_price' ], true );
+		expect( validateRow( row, rowDrafts( 1 ), context ) ).toEqual( [] );
+
+		// Typed again differently: asked again.
+		setDraft( 1, 'regular_price', { text: '9,5', value: '9.5' } );
+		expect( validateRow( row, rowDrafts( 1 ), context ) ).toHaveLength( 1 );
+		// An ordinary change is not asked about.
+		setDraft( 1, 'regular_price', { text: '99', value: '99' } );
+		expect( validateRow( row, rowDrafts( 1 ), context ) ).toEqual( [] );
+	} );
+
+	it( 'drops the drafts of rows that left the table, and all of them when the mode is turned off', () => {
+		setDraft( 1, 'sku', { text: 'A', value: 'A' } );
+		setDraft( 2, 'sku', { text: 'B', value: 'B' } );
+		expect( pruneDrafts( new Set( [ 1 ] ) ) ).toBe( 1 );
+		expect( draftCount() ).toBe( 1 );
+		expect( clearAllDrafts() ).toBe( 1 );
+		expect( draftCount() ).toBe( 0 );
 	} );
 } );

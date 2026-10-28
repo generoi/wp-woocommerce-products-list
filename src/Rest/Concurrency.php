@@ -476,7 +476,9 @@ final class Concurrency
      *   bare number; no value is 0;
      * - `images`: the full id list, or only the featured image (the list
      *   rows drop the gallery): a list of at most one entry matches when
-     *   it names the stored featured image (or none when there is none).
+     *   it names the stored featured image (or none when there is none);
+     * - a variation's `image`: its own (`{id}`, null without one), or the
+     *   parent's image the view context shows for one without its own.
      *
      * - `attributes` / `default_attributes`: the stored form
      *   (`Recorder::read()`) or wc/v3's (`{id, name, options|option}`),
@@ -521,6 +523,13 @@ final class Concurrency
                 $have = self::cogsNumber((string) $current);
 
                 return $want !== null && $have !== null && abs($want - $have) < 0.0000001;
+            case 'image':
+                // A variation's image as a list row read it (view context):
+                // the parent's when it has none of its own.
+                $image = $expected === '' ? null : json_decode($expected, true);
+                $id = is_array($image) && is_numeric($image['id'] ?? null) ? (int) $image['id'] : 0;
+
+                return $isVariation && $id > 0 && $id === (int) $stored->get_image_id('view');
             case 'images':
                 $list = $expected === '' ? [] : json_decode($expected, true);
 
