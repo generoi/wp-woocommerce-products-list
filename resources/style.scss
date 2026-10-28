@@ -1153,6 +1153,12 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	left: auto;
 }
 
+// On the last rows the table's footer would cover a message below the cell: above it there.
+.wc-products-list .dataviews-view-table tbody tr:nth-last-child(-n + 2) .wc-pl-inline__message {
+	top: auto;
+	bottom: calc(100% + 4px);
+}
+
 // The problem of an invalid cell, under it while it is focused.
 .wc-pl-inline__message {
 	position: absolute;

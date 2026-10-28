@@ -138,7 +138,7 @@ function ImageButton( { item }: { item: ProductListItem } ) {
 					onClose={ close }
 					onSave={ async ( base, images ) => {
 						// The popover stays (Save busy) until the save is in: a refused one keeps the images as arranged.
-						const outcome = await saveRow( base, { images }, context.fields );
+						const outcome = await saveRow( base, { images }, context.fields, false );
 
 						forgetImagesRows();
 

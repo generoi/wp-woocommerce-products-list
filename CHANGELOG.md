@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-10-28
 
 Images from the list, and editing in the table.
 
@@ -8,6 +8,9 @@ Images from the list, and editing in the table.
 - Quick edit has an Images field on the General tab with the same editor.
 - **Edit in table** (toolbar): the table's cells become inputs for what quick edit would show for that row: name, SKU, status, the regular and sale price (in the Price column), the stock quantity of a row that manages stock or else its stock status (in the Stock column), and plain extension columns such as a translated name or a market price. A row's changes save together when Enter is pressed (which moves down the column) or the row is left; a choice in a menu saves at once; Esc takes a cell back. A change that would not save (a sale price above the regular price, a taken SKU) is marked in its cell and named in the snackbar. Leaving the page with an unsaved cell asks first. The choice is remembered in the browser.
 - The media library loads the first time it is needed (a thumbnail is pointed at), not with the list, and before the block editor of the description modal, which shares it.
+- Typed prices are checked like quick edit's (a sale price below the regular price), a price with more decimals than the currency is refused, and one ten times the stored price or more (or a tenth or less) is asked about once. Saves made in the table within half a minute share one snackbar whose **Undo all** takes them back together.
+- Uploads and the media library need the `upload_files` capability (`caps.upload`); without it images can be reordered and removed.
+- A variation's own image no longer reads as a clash when the list row showed the parent's image it falls back to.
 - List reads can ask for a product's whole gallery (`wcpl_gallery=1`); a variation's image is read in the edit context, so its own image is told apart from the parent's it falls back to (also in the change log, whose `image` value was the parent's for a variation without one).
 
 ## 0.4.0 - 2026-10-15

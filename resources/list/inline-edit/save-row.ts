@@ -85,7 +85,11 @@ export function fieldList( labels: string[] ): string {
 	return sprintf( __( '%1$s and %2$s', 'wp-woocommerce-products-list' ), labels.slice( 0, -1 ).join( ', ' ), labels[ labels.length - 1 ] ?? '' );
 }
 
-export async function saveRow( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[] ): Promise< RowSaveOutcome > {
+/**
+ * @param group Whether the save joins the table's recent saves under one "Undo all" (the cells' saves); the images
+ *              popover's save stands alone.
+ */
+export async function saveRow( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], group = true ): Promise< RowSaveOutcome > {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 	const labels = Object.keys( edits ).map( ( id ) => {
 		const field = byId.get( id );
@@ -133,19 +137,21 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 
 	const now = Date.now();
 
-	recent =
-		recent && now - recent.start < GROUP_MS && recent.batches.length < GROUP_MAX
+	recent = ! group
+		? null
+		: recent && now - recent.start < GROUP_MS && recent.batches.length < GROUP_MAX
 			? { batches: [ ...recent.batches, result.batchId ], rows: new Set( [ ...recent.rows, item.id ] ), start: recent.start }
 			: { batches: [ result.batchId ], rows: new Set( [ item.id ] ), start: now };
 
-	const batches = recent.batches;
+	const batches = recent?.batches ?? [ result.batchId ];
+	const rowCount = recent?.rows.size ?? 1;
 	const message =
 		batches.length > 1
 			? sprintf(
-					/* translators: 1: number of saves, 2: number of products and variations */
-					_n( '%1$d change saved in the table (%2$d item).', '%1$d changes saved in the table (%2$d items).', recent.rows.size, 'wp-woocommerce-products-list' ),
-					batches.length,
-					recent.rows.size
+					/* translators: 1: "3 changes saved in the table", 2: "2 items" */
+					__( '%1$s (%2$s).', 'wp-woocommerce-products-list' ),
+					sprintf( /* translators: %d: number of saves */ _n( '%d change saved in the table', '%d changes saved in the table', batches.length, 'wp-woocommerce-products-list' ), batches.length ),
+					sprintf( /* translators: %d: number of products and variations */ _n( '%d item', '%d items', rowCount, 'wp-woocommerce-products-list' ), rowCount )
 			  )
 			: sprintf( /* translators: 1: field names ("Price and Sale price"), 2: product name */ __( '%1$s of %2$s saved.', 'wp-woocommerce-products-list' ), fieldList( labels ), name );
 

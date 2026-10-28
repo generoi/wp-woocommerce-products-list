@@ -152,7 +152,9 @@ export function parseText( field: ProductField, kind: InlineKind, text: string, 
 		if ( at >= 0 && compact.length - at - 1 > Math.max( 0, decimals ?? 0 ) ) {
 			return {
 				value: text,
-				error: sprintf( /* translators: %d: number of decimals the currency has */ _n( 'Enter a price with at most %d decimal.', 'Enter a price with at most %d decimals.', decimals ?? 0, 'wp-woocommerce-products-list' ), decimals ?? 0 ),
+				error: ( decimals ?? 0 ) > 0
+					? sprintf( /* translators: %d: number of decimals the currency has */ _n( 'Enter a price with at most %d decimal.', 'Enter a price with at most %d decimals.', decimals ?? 0, 'wp-woocommerce-products-list' ), decimals ?? 0 )
+					: __( 'Enter a whole amount.', 'wp-woocommerce-products-list' ),
 			};
 		}
 
