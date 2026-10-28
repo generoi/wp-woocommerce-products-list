@@ -16,7 +16,7 @@ import type { ComponentType, FocusEvent, KeyboardEvent, ReactNode, SyntheticEven
 import { notify } from '../../actions/notices';
 import type { FieldCurrency } from '../../extensions/declarative';
 import { numericKindOf, validateBulkNumericEdits } from '../../edit/bulk-numeric';
-import { isVariation, readFieldValue } from '../../edit/field-value';
+import { isVariation, parentIdOf, readFieldValue } from '../../edit/field-value';
 import { VARIATION_STATUS_ELEMENTS, isPlainTextField } from '../../edit/form-fields';
 import { itemLabel } from '../../edit/item-label';
 import { hasOptionList } from '../../edit/merge';
@@ -29,7 +29,7 @@ import { NameCell as HierarchyNameCell } from '../../hierarchy/chevron';
 import { memoRender } from '../../fields/helpers';
 import { findCachedRow, invalidateProducts } from '../../store/products';
 import type { Option, ProductField, ProductListItem, Settings } from '../../types';
-import { clearDrafts, flagDrafts, getDraft, isRowSaving, rowDrafts, setDraft, setRowSaving, useRowDrafts } from './drafts';
+import { clearDrafts, flagDrafts, getDraft, isRowSaving, rowDrafts, setDraft, setRowSaving, useRowDrafts, whenRowSaved } from './drafts';
 import type { CellDraft } from './drafts';
 import { InlineEditContext } from './mode';
 import type { InlineEditValue } from './mode';
@@ -239,6 +239,16 @@ export async function commitRow( item: ProductListItem, context: InlineEditValue
 		return;
 	}
 
+	// A variation waits for a save of its parent's row (a new name WooCommerce copies into the variations' titles):
+	// its own save then starts from what the parent saved.
+	const parentId = isVariation( item ) ? parentIdOf( item ) : 0;
+
+	if ( parentId && isRowSaving( parentId ) ) {
+		await whenRowSaved( parentId );
+
+		return commitRow( findCachedRow( item.id ) ?? item, context );
+	}
+
 	flagDrafts( item.id, undefined );
 
 	const drafts = rowDrafts( item.id );
@@ -392,6 +402,7 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 
 	const onBlur = ( event: FocusEvent< HTMLInputElement > ) => {
 		setFocused( false );
+		selectOnMouseUpRef.current = false;
 		// A long text scrolled to its end while typed reads from its start again.
 		event.currentTarget.scrollLeft = 0;
 
@@ -433,6 +444,8 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 				onMouseDown={ ( event ) => {
 					stop( event );
 					pointerRef.current = document.activeElement !== event.currentTarget;
+					// A mouseup that never came (the pointer dragged out) is not waited for again.
+					selectOnMouseUpRef.current = false;
 				} }
 				onMouseUp={ ( event ) => {
 					if ( selectOnMouseUpRef.current ) {
@@ -571,9 +584,22 @@ export function InlineControl( props: Omit< ControlProps, 'label' > & { label?: 
 
 type Render = ( props: { item: ProductListItem; field: unknown } ) => ReactNode;
 
-/** The column's own cell, a component (`memoRender` makes it a `memo` one): rendered as an element, never called. */
-function original( field: ProductField ): ComponentType< { item: ProductListItem; field: unknown } > | undefined {
-	return field.render as ComponentType< { item: ProductListItem; field: unknown } > | undefined;
+type Cell = ComponentType< { item: ProductListItem; field: unknown } >;
+
+/**
+ * The column's own cell, a component (`memoRender` makes it a `memo` one): rendered as an element, never called.
+ * A field without a `render` gets what DataViews shows for one: its value as text.
+ */
+function original( field: ProductField ): Cell {
+	if ( field.render ) {
+		return field.render as Cell;
+	}
+
+	return function ValueCell( { item }: { item: ProductListItem } ) {
+		const value = field.getValue ? field.getValue( { item } ) : ( item as Record< string, unknown > )[ field.id ];
+
+		return value === null || value === undefined ? null : <>{ typeof value === 'object' ? '' : String( value ) }</>;
+	};
 }
 
 /** A column's cell: its input when the row takes the field, else the column's own render. */
@@ -584,7 +610,7 @@ function fieldCell( field: ProductField, kind: InlineKind ): Render {
 		const context = useContext( InlineEditContext );
 
 		if ( ! context?.enabled || ! rowEditableIds( props.item, context ).has( field.id ) ) {
-			return render ? createElement( render, props ) : null;
+			return createElement( render, props );
 		}
 
 		return <InlineControl item={ props.item } field={ field } kind={ kind } context={ context } />;
@@ -599,7 +625,7 @@ function nameCell( field: ProductField ): Render {
 		const context = useContext( InlineEditContext );
 
 		if ( ! context?.enabled || ! rowEditableIds( props.item, context ).has( field.id ) ) {
-			return render ? createElement( render, props ) : null;
+			return createElement( render, props );
 		}
 
 		return (
@@ -621,7 +647,7 @@ function priceCell( field: ProductField ): Render {
 		const ids = context ? rowEditableIds( props.item, context ) : null;
 
 		if ( ! context?.enabled || ! regular || ! sale || ! ids?.has( 'regular_price' ) ) {
-			return render ? createElement( render, props ) : null;
+			return createElement( render, props );
 		}
 
 		return (
@@ -650,7 +676,7 @@ function stockCell( field: ProductField ): Render {
 			return <InlineControl item={ props.item } field={ field } kind="select" context={ context } />;
 		}
 
-		return render ? createElement( render, props ) : null;
+		return createElement( render, props );
 	};
 }
 

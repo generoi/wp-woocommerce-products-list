@@ -32,15 +32,15 @@ final class Rows
 
     public const FILTER_VARIATION_TAXONOMIES = 'wc_products_list/variation_term_taxonomies';
 
+    /** The read param that keeps the gallery in list mode (the image editor's load). */
+    public const GALLERY_PARAM = 'wcpl_gallery';
+
     /**
      * Taxonomies a plugin keeps per variation without attaching them to
      * the `product_variation` post type: Polylang's language and
      * translation group (Polylang for WooCommerce reads both while a
      * variation loads). Primed per page when they exist.
      */
-    /** The read param that keeps the gallery in list mode (the image editor's load). */
-    public const GALLERY_PARAM = 'wcpl_gallery';
-
     public const KNOWN_VARIATION_TAXONOMIES = ['language', 'post_translations'];
 
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */

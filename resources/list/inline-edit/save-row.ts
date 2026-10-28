@@ -6,34 +6,61 @@
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { notify } from '../../actions/notices';
-import { captureFocusOrigin } from '../../edit/focus';
+import { captureFocusOrigin, restoreFocus } from '../../edit/focus';
 import { itemLabel } from '../../edit/item-label';
 import { isVariation } from '../../edit/field-value';
 import { canUndo } from '../../edit/log-access';
 import { saveEdits } from '../../edit/save';
 import { undoBatch } from '../../edit/undo';
 import { finishSaveJob, startSaveJob } from '../../store/save-activity';
+import { invalidateLog } from '../../history/use-log';
+import { invalidateProducts } from '../../store/products';
+import { forgetImagesRows } from './gallery-cache';
 import type { ProductField, ProductListItem } from '../../types';
 
 export const INLINE_SAVED_NOTICE_ID = 'wc-pl-inline-saved';
 
-/** Saves this close together share one snackbar, and its Undo takes all of them back (a column repriced row by row). */
+/**
+ * Saves within half a minute of the first of them share one snackbar, and its Undo takes all of them back (a column
+ * repriced row by row); at most this many.
+ */
 const GROUP_MS = 30000;
+const GROUP_MAX = 20;
 
-let recent: { batches: string[]; rows: Set< number >; at: number } | null = null;
+let recent: { batches: string[]; rows: Set< number >; start: number } | null = null;
 
 /** For tests. */
 export function resetRecentSaves(): void {
 	recent = null;
 }
 
-/** Undoes the batches newest first, one after another (each is its own revert in History). */
+/**
+ * Undoes the batches newest first, one after another (each is its own revert in History, so a field saved twice goes
+ * back step by step), then refetches once and says the total; problems are said per batch.
+ */
 async function undoAll( batches: string[] ): Promise< void > {
 	const focus = captureFocusOrigin();
+	let ok = 0;
+	let failed = 0;
+
+	// The images a popover loaded may predate the revert.
+	forgetImagesRows();
 
 	for ( const batchId of batches.slice().reverse() ) {
-		await undoBatch( batchId, { focus } );
+		const outcome = await undoBatch( batchId, { quiet: true } );
+
+		ok += outcome.ok;
+		failed += outcome.failed;
 	}
+
+	invalidateProducts( { counts: true } );
+	invalidateLog();
+
+	if ( ok && ! failed ) {
+		notify.success( sprintf( /* translators: %d: number of items put back */ _n( '%d item put back.', '%d items put back.', ok, 'wp-woocommerce-products-list' ), ok ) );
+	}
+
+	window.setTimeout( () => restoreFocus( focus ), 0 );
 }
 
 export interface RowSaveOutcome {
@@ -75,7 +102,7 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 
 	// Only this row is locked while it saves: a bulk save also locks a variation's parent, and with it every sibling
 	// (hierarchy/chevron.tsx), which would take the next row's input away from the keyboard as Enter moves down to it.
-	// The server still serialises writes per product.
+	// The table never saves a variation while its parent's row saves (cells.tsx, commitRow waits).
 	const job = startSaveJob( [ item.id ] );
 
 	try {
@@ -106,7 +133,10 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 
 	const now = Date.now();
 
-	recent = recent && now - recent.at < GROUP_MS ? { batches: [ ...recent.batches, result.batchId ], rows: new Set( [ ...recent.rows, item.id ] ), at: now } : { batches: [ result.batchId ], rows: new Set( [ item.id ] ), at: now };
+	recent =
+		recent && now - recent.start < GROUP_MS && recent.batches.length < GROUP_MAX
+			? { batches: [ ...recent.batches, result.batchId ], rows: new Set( [ ...recent.rows, item.id ] ), start: recent.start }
+			: { batches: [ result.batchId ], rows: new Set( [ item.id ] ), start: now };
 
 	const batches = recent.batches;
 	const message =
@@ -127,7 +157,13 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 						label: batches.length > 1 ? __( 'Undo all', 'wp-woocommerce-products-list' ) : __( 'Undo', 'wp-woocommerce-products-list' ),
 						onClick: () => {
 							recent = null;
-							void undoAll( batches );
+
+							if ( batches.length > 1 ) {
+								void undoAll( batches );
+							} else {
+								forgetImagesRows();
+								void undoBatch( batches[ 0 ] as string, { focus: captureFocusOrigin() } );
+							}
 						},
 					},
 			  ]

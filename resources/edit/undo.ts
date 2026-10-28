@@ -47,9 +47,14 @@ export function revertingMessage( done: number, total: number ): string {
 export interface UndoOptions {
 	/** Where focus was when Undo was clicked; it goes back there (or to the table) when the revert is done. */
 	focus?: FocusOrigin | null;
+	/**
+	 * One of several reverts the caller reports together (Undo all of the table's saves): no "put back" notice and
+	 * no refetch here; problems are still said. The caller invalidates and says the total.
+	 */
+	quiet?: boolean;
 }
 
-export async function undoBatch( batchId: string, options: UndoOptions = {} ): Promise< void > {
+export async function undoBatch( batchId: string, options: UndoOptions = {} ): Promise< { ok: number; failed: number } > {
 	const noticeId = undoNoticeId( batchId );
 	// Up at once: the Undo snackbar vanished the moment it was clicked.
 	notify.info( revertingMessage( 0, 0 ), { id: noticeId, explicitDismiss: true, isDismissible: false } );
@@ -63,8 +68,11 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 		const failed = [ ...outcome.failed ];
 
 		notify.remove( noticeId );
-		invalidateProducts( { counts: true } );
-		invalidateLog();
+
+		if ( ! options.quiet ) {
+			invalidateProducts( { counts: true } );
+			invalidateLog();
+		}
 
 		if ( outcome.conflicts.length ) {
 			// Which item and which field, with the value it kept: "Pelsi Black 37-38: Stock quantity 10 → 9 kept".
@@ -85,7 +93,7 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 			);
 		}
 
-		if ( ok && ! failed.length ) {
+		if ( ok && ! failed.length && ! options.quiet ) {
 			notify.success(
 				sprintf(
 					/* translators: %d: number of items put back */
@@ -108,9 +116,13 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 				historyNoticeAction( outcome.revertBatchId ) ? { actions: [ historyNoticeAction( outcome.revertBatchId )! ] } : undefined
 			);
 		}
+
+		return { ok, failed: failed.length };
 	} catch ( error ) {
 		notify.remove( noticeId );
 		notify.error( error instanceof Error ? error.message : __( 'The undo failed.', 'wp-woocommerce-products-list' ) );
+
+		return { ok: 0, failed: 1 };
 	} finally {
 		if ( options.focus !== undefined ) {
 			setTimeout( () => restoreFocus( options.focus ?? null ), 0 );

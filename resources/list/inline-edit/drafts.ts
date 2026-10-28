@@ -111,6 +111,11 @@ export function clearAllDrafts(): number {
 	let dropped = 0;
 
 	for ( const rowId of Array.from( drafts.keys() ) ) {
+		// A row saving now (its cell just left, by the click on the switch) is not dropped: its save reports itself.
+		if ( saving.has( rowId ) ) {
+			continue;
+		}
+
 		dropped += drafts.get( rowId )?.size ?? 0;
 		drafts.delete( rowId );
 		emit( rowId );
@@ -143,14 +148,30 @@ export function isRowSaving( rowId: number ): boolean {
 	return saving.has( rowId );
 }
 
+const savedWaiters = new Map< number, Array< () => void > >();
+
 export function setRowSaving( rowId: number, value: boolean ): void {
 	if ( value ) {
 		saving.add( rowId );
 	} else {
 		saving.delete( rowId );
+
+		const waiters = savedWaiters.get( rowId ) ?? [];
+
+		savedWaiters.delete( rowId );
+		waiters.forEach( ( resolve ) => resolve() );
 	}
 
 	emit( rowId );
+}
+
+/** Resolves when the row's save from the table is back (at once when none runs). */
+export function whenRowSaved( rowId: number ): Promise< void > {
+	if ( ! saving.has( rowId ) ) {
+		return Promise.resolve();
+	}
+
+	return new Promise( ( resolve ) => savedWaiters.set( rowId, [ ...( savedWaiters.get( rowId ) ?? [] ), resolve ] ) );
 }
 
 /** Unsaved cells in the whole table (the leave-page guard). */

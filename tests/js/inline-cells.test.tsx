@@ -179,3 +179,25 @@ describe( 'a row that did not save', () => {
 		expect( draftCount() ).toBe( 0 );
 	} );
 } );
+
+describe( 'Edit in table off', () => {
+	it( 'shows a column without a render of its own as its value, as DataViews does', async () => {
+		const { render } = await import( '@testing-library/react' );
+		const { createElement } = await import( '@wordpress/element' );
+		const { InlineEditContext } = await import( '../../resources/list/inline-edit/mode' );
+		const slug = withInlineEditing( fields ).find( ( field ) => field.id === 'slug' )!;
+		const Cell = slug.render as unknown as ( props: { item: unknown; field: unknown } ) => JSX.Element;
+		const view = render( createElement( InlineEditContext.Provider, { value: { ...context, enabled: false } }, createElement( Cell, { item: simple( 1, { slug: 'my-slug' } ), field: slug } ) ) );
+
+		expect( view.container.textContent ).toBe( 'my-slug' );
+	} );
+
+	it( 'keeps a row that is saving when the mode is turned off (its save reports itself)', async () => {
+		const { setRowSaving } = await import( '../../resources/list/inline-edit/drafts' );
+
+		setDraft( 1, 'sku', { text: 'A', value: 'A' } );
+		setRowSaving( 1, true );
+		expect( clearAllDrafts() ).toBe( 0 );
+		setRowSaving( 1, false );
+	} );
+} );
