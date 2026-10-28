@@ -201,3 +201,14 @@ describe( 'Edit in table off', () => {
 		setRowSaving( 1, false );
 	} );
 } );
+
+describe( 'a price typed on after the old one', () => {
+	it( 'is refused when it has more decimals than the currency, never rounded', () => {
+		const row = simple( 1, { regular_price: '14' } );
+
+		expect( parseText( get( 'regular_price' ), 'money', '14,005', settings, row ).error ).toBeTruthy();
+		expect( parseText( get( 'regular_price' ), 'money', '14,0016', settings, row ).error ).toBeTruthy();
+		expect( parseText( get( 'regular_price' ), 'money', '14.5', settings, row ) ).toEqual( { value: '14.5' } );
+		expect( parseText( get( 'regular_price' ), 'money', '1 400,00', settings, row ) ).toEqual( { value: '1400' } );
+	} );
+} );

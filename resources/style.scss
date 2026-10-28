@@ -1146,6 +1146,13 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	color: transparent;
 }
 
+// A number's message hangs from the cell's end edge (prices sit at the table's right, where a left-anchored one is cut).
+.wc-pl-inline--money .wc-pl-inline__message,
+.wc-pl-inline--integer .wc-pl-inline__message {
+	right: 0;
+	left: auto;
+}
+
 // The problem of an invalid cell, under it while it is focused.
 .wc-pl-inline__message {
 	position: absolute;

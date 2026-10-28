@@ -276,6 +276,20 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 
 	const rootRef = useRef< HTMLDivElement | null >( null );
 
+	/** A moved tile is a moved DOM node, which loses the focus: it goes back to the tile's options. */
+	const refocusTile = ( id: number ) =>
+		window.requestAnimationFrame( () => rootRef.current?.querySelector< HTMLElement >( `[data-image-id="${ id }"] .wc-pl-images__tool` )?.focus() );
+
+	const move = ( index: number, to: number, message: string ) => {
+		const id = images[ index ]?.id;
+
+		set( moveImage( images, index, to ), message );
+
+		if ( id ) {
+			refocusTile( id );
+		}
+	};
+
 	const remove = ( index: number ) => {
 		set(
 			images.filter( ( _image, i ) => i !== index ),
@@ -314,6 +328,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 				{ images.map( ( image, index ) => (
 					<li
 						key={ image.id }
+						data-image-id={ image.id }
 						className={ [ 'wc-pl-images__tile', index === 0 && ! single ? 'is-main' : '', dragFrom === index ? 'is-dragging' : '', dropAt === index && dragFrom !== index ? 'is-drop-target' : '' ].filter( Boolean ).join( ' ' ) }
 						draggable={ ! disabled && ! single && images.length > 1 }
 						onDragStart={ ( event ) => onTileDragStart( event, index ) }
@@ -339,7 +354,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 												? [
 														{
 															title: __( 'Set as main image', 'wp-woocommerce-products-list' ),
-															onClick: () => set( moveImage( images, index, 0 ), __( 'Set as the main image.', 'wp-woocommerce-products-list' ) ),
+															onClick: () => move( index, 0, __( 'Set as the main image.', 'wp-woocommerce-products-list' ) ),
 														},
 												  ]
 												: [] ),
@@ -347,7 +362,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 												? [
 														{
 															title: __( 'Move earlier', 'wp-woocommerce-products-list' ),
-															onClick: () => set( moveImage( images, index, index - 1 ), sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index ) ),
+															onClick: () => move( index, index - 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index ) ),
 														},
 												  ]
 												: [] ),
@@ -355,7 +370,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 												? [
 														{
 															title: __( 'Move later', 'wp-woocommerce-products-list' ),
-															onClick: () => set( moveImage( images, index, index + 1 ), sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index + 2 ) ),
+															onClick: () => move( index, index + 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index + 2 ) ),
 														},
 												  ]
 												: [] ),

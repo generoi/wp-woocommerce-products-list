@@ -11,7 +11,7 @@
 import { speak } from '@wordpress/a11y';
 import { createElement, useContext, useEffect, useRef, useState } from '@wordpress/element';
 import { decodeEntities } from '@wordpress/html-entities';
-import { __, sprintf } from '@wordpress/i18n';
+import { __, _n, sprintf } from '@wordpress/i18n';
 import type { ComponentType, FocusEvent, KeyboardEvent, ReactNode, SyntheticEvent } from 'react';
 import { notify } from '../../actions/notices';
 import type { FieldCurrency } from '../../extensions/declarative';
@@ -137,9 +137,26 @@ export function parseText( field: ProductField, kind: InlineKind, text: string, 
 			return { value: '' };
 		}
 
-		const parsed = parsePrice( trimmed, moneySettings( field, settings ) );
+		const money = moneySettings( field, settings );
+		const parsed = parsePrice( trimmed, money );
 
-		return parsed === null ? { value: text, error: __( 'Enter a valid price.', 'wp-woocommerce-products-list' ) } : { value: parsed };
+		if ( parsed === null ) {
+			return { value: text, error: __( 'Enter a valid price.', 'wp-woocommerce-products-list' ) };
+		}
+
+		// More decimals than the currency has is a slip ("14,005": typed on after the old price), never rounded away.
+		const { decimalSeparator, thousandSeparator, decimals } = money.currency;
+		const compact = trimmed.replace( /\s/g, '' );
+		const at = Math.max( compact.lastIndexOf( decimalSeparator ), decimalSeparator !== '.' && thousandSeparator !== '.' ? compact.lastIndexOf( '.' ) : -1 );
+
+		if ( at >= 0 && compact.length - at - 1 > Math.max( 0, decimals ?? 0 ) ) {
+			return {
+				value: text,
+				error: sprintf( /* translators: %d: number of decimals the currency has */ _n( 'Enter a price with at most %d decimal.', 'Enter a price with at most %d decimals.', decimals ?? 0, 'wp-woocommerce-products-list' ), decimals ?? 0 ),
+			};
+		}
+
+		return { value: parsed };
 	}
 
 	if ( kind === 'integer' ) {
@@ -367,6 +384,11 @@ function InlineTextControl( { item, field, kind, context, label, placeholder, cl
 			event.preventDefault();
 			setDraft( item.id, field.id, undefined );
 			speak( __( 'Change undone.', 'wp-woocommerce-products-list' ) );
+
+			// The saved value selected, so what is typed next replaces it (not added to its end).
+			const input = event.currentTarget;
+
+			window.requestAnimationFrame( () => input.select() );
 
 			return;
 		}

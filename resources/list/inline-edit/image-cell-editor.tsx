@@ -174,6 +174,14 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 	const [ saving, setSaving ] = useState( false );
 	// Escape with changes asks first (as quick edit does); Escape again, or Discard, throws them away.
 	const [ askDiscard, setAskDiscard ] = useState( false );
+	const keepRef = useRef< HTMLButtonElement | null >( null );
+
+	// The question takes the focus when it is asked ("Keep editing", the safe answer).
+	useEffect( () => {
+		if ( askDiscard ) {
+			keepRef.current?.focus();
+		}
+	}, [ askDiscard ] );
 	const loaded = base ? ownImages( base ) : null;
 	const dirty = loaded !== null && ! sameImages( loaded, images );
 	// `keep`: a reload after a refused save keeps the images as the user arranged them.
@@ -304,7 +312,15 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 				{ askDiscard && dirty && (
 					<div className="wc-pl-images-popover__confirm" role="alert">
 						<span>{ __( 'Discard the changes to the images?', 'wp-woocommerce-products-list' ) }</span>
-						<Button variant="link" onClick={ () => setAskDiscard( false ) }>
+						<Button
+							ref={ keepRef }
+							variant="link"
+							onClick={ () => {
+								setAskDiscard( false );
+								// Back into the images (this button goes away with the question).
+								window.requestAnimationFrame( () => bodyRef.current?.querySelector< HTMLElement >( '.wc-pl-images__tool, .wc-pl-images__add' )?.focus() );
+							} }
+						>
 							{ __( 'Keep editing', 'wp-woocommerce-products-list' ) }
 						</Button>
 						<Button variant="link" isDestructive onClick={ () => onClose() }>
