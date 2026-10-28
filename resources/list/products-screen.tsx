@@ -60,6 +60,11 @@ import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
 import { SaveActivityBar } from './save-activity-bar';
 import { isRowPending, useLockVersion } from '../store/save-activity';
+import { InlineEditHint, InlineEditToggle } from './inline-edit/toggle';
+import { InlineEditContext, useInlineEditing } from './inline-edit/mode';
+import type { InlineEditValue } from './inline-edit/mode';
+import { withInlineEditing } from './inline-edit/cells';
+import { useDraftsLeaveGuard } from './inline-edit/leave-guard';
 
 export interface ProductsScreenProps {
 	fields: ProductField[];
@@ -350,6 +355,12 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 	const { shownView, reject: rejectViewChange } = useSearchEcho( view );
 	const list = useProductList( view, tab, fields );
 	const { counts } = useCounts();
+	// "Edit in table": the table's cells are inputs (a table view only; the grid and list layouts read).
+	const inlineEditing = useInlineEditing();
+	const inlineContext = useMemo< InlineEditValue >( () => ( { fields, byId: new Map( fields.map( ( field ) => [ field.id, field ] ) ), settings } ), [ fields, settings ] );
+	const tableFields = useMemo( () => withInlineEditing( fields, inlineEditing && view.type === 'table' && settings.caps.edit ), [ fields, inlineEditing, view.type, settings.caps.edit ] );
+
+	useDraftsLeaveGuard();
 	const parents = useMemo( () => list.items.filter( isProductRow ) as ProductRow[], [ list.items ] );
 	// Variations are fetched with the visible columns' fields only, like the products.
 	const visibleFields = useMemo( () => {
@@ -663,6 +674,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 			{ list.isFetching && ! list.isLoading && <Spinner /> }
 			<SelectionBar selection={ selected } total={ list.total } pageProducts={ parents.length } query={ list.query } actions={ actions } onEdit={ openEditor } shortcut={ BULK_EDIT_SHORTCUT } moreActions={ moreActionsMenu } />
 			<ColumnsMenu fields={ fields } view={ view } onChangeView={ setView } settings={ settings } />
+			{ settings.caps.edit && view.type === 'table' && <InlineEditToggle /> }
 			{ hasExpandable && (
 				<>
 					<ExpandAllButton
@@ -702,7 +714,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 
 	return (
 		<HierarchyProvider value={ guardedHierarchy }>
-				<div className={ `wc-products-list${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
+				<div className={ `wc-products-list${ inlineEditing && view.type === 'table' && settings.caps.edit ? ' is-inline-editing' : '' }${ list.isFetching ? ' is-fetching' : '' }${ staleError ? ' is-stale' : '' }${ hasPageSelection ? ' has-footer' : '' }` }>
 					<CatalogTitle />
 					<a className="wc-products-list__skip screen-reader-text" href={ `#${ TABLE_ID }` }>
 						{ __( 'Skip to products', 'wp-woocommerce-products-list' ) }
@@ -722,6 +734,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 					) }
 					<StatusTabs tab={ tab } onChange={ guardedSetTab } counts={ counts } settings={ settings } panelId={ PANEL_ID } />
 					<SaveActivityBar />
+					{ inlineEditing && view.type === 'table' && settings.caps.edit && <InlineEditHint /> }
 					{ staleError && (
 						<Notice
 							status="error"
@@ -740,9 +753,10 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 					<div id={ PANEL_ID } role="tabpanel" aria-labelledby={ `wc-products-list-tab-${ tab }` } className="wc-products-list__panel">
 						<div id={ TABLE_ID } tabIndex={ -1 } className="wc-products-list__table-anchor" />
 						<ErrorBoundary context="table">
+						<InlineEditContext.Provider value={ inlineContext }>
 						<HierarchicalDataViews
 							data={ hierarchy.rows }
-							fields={ fields }
+							fields={ tableFields }
 							view={ tableView }
 							onChangeView={ setTableView }
 							actions={ tableActions }
@@ -769,6 +783,7 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 							onShowAllChildren={ hierarchy.showAllVariations }
 							onShowMatchingChildren={ hierarchy.showMatchingVariations }
 						/>
+						</InlineEditContext.Provider>
 						</ErrorBoundary>
 					</div>
 					<Notices />

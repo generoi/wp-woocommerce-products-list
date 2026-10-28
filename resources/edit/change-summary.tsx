@@ -180,6 +180,11 @@ export function describeValue( field: ProductField, value: unknown, settings: Se
 		return __( '(empty)', 'wp-woocommerce-products-list' );
 	}
 
+	// Images (the main image and the gallery): how many, not their objects.
+	if ( field.type === 'media' && Array.isArray( value ) ) {
+		return sprintf( /* translators: %d: number of images */ _n( '%d image', '%d images', value.length, 'wp-woocommerce-products-list' ), value.length );
+	}
+
 	if ( value === true ) {
 		return __( 'Yes', 'wp-woocommerce-products-list' );
 	}

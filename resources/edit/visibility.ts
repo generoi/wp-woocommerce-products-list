@@ -37,7 +37,6 @@ export const PARENT_OWNED_FIELD_IDS: ReadonlySet< string > = new Set( [
 	'grouped_products',
 	'external_url',
 	'button_text',
-	'images',
 	'reviews_allowed',
 	'attributes',
 	'default_attributes',

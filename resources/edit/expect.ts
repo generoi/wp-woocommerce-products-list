@@ -261,6 +261,20 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 			continue;
 		}
 
+		// A variation's own image, as the server logs it: `{id}`, or null without one (a variation row's `image`; its
+		// `images` may show the parent's image instead).
+		if ( key === 'image' ) {
+			const loaded = key in row ? row[ key ] : undefined;
+
+			if ( loaded === null ) {
+				expect[ key ] = null;
+			} else if ( isPlainObject( loaded ) && Number( loaded.id ) > 0 ) {
+				expect[ key ] = { id: Number( loaded.id ) };
+			}
+
+			continue;
+		}
+
 		if ( key === 'images' ) {
 			const ids = key in row ? ( row[ key ] === null ? [] : termIds( row[ key ] ) ) : undefined;
 

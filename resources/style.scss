@@ -684,3 +684,473 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 	font-weight: 500;
 	white-space: nowrap;
 }
+
+// ---------------------------------------------------------------------------
+// Images: the thumbnail button, the images editor (popover and edit panel).
+// ---------------------------------------------------------------------------
+
+// DataViews draws the media cell's border as an overlay (::after) that would take the thumbnail's clicks.
+.wc-products-list .dataviews-column-primary__media::after {
+	pointer-events: none;
+}
+
+.wc-products-list__image-button {
+	position: relative;
+	display: block;
+	padding: 0;
+	margin: 0;
+	border: 0;
+	border-radius: 2px;
+	background: none;
+	cursor: pointer;
+
+	// Inside the thumbnail: the media cell clips what overflows it.
+	.wc-products-list__image-edit {
+		position: absolute;
+		right: 1px;
+		bottom: 1px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 2px;
+		background: #fff;
+		color: #1e1e1e;
+		box-shadow: 0 0 0 1px $border, 0 1px 2px rgba(0, 0, 0, 0.1);
+		opacity: 0;
+		transition: opacity 100ms ease;
+
+		svg {
+			width: 12px;
+			height: 12px;
+			fill: currentColor;
+		}
+	}
+
+	&:hover .wc-products-list__image,
+	&:focus-visible .wc-products-list__image {
+		filter: brightness(0.92);
+	}
+
+	&:hover .wc-products-list__image-edit,
+	&:focus-visible .wc-products-list__image-edit,
+	&[aria-expanded="true"] .wc-products-list__image-edit {
+		opacity: 1;
+	}
+
+	&:focus-visible {
+		outline: 2px solid var(--wp-admin-theme-color, #3858e9);
+		outline-offset: -2px;
+	}
+
+	&:disabled {
+		cursor: default;
+
+		.wc-products-list__image-edit {
+			display: none;
+		}
+	}
+}
+
+// Touch screens have no hover: the pencil is always there.
+@media (hover: none) {
+	.wc-products-list__image-button .wc-products-list__image-edit {
+		opacity: 1;
+	}
+}
+
+.wc-pl-images-popover {
+	.components-popover__content {
+		width: 360px;
+		max-width: calc(100vw - 32px);
+	}
+
+	// A big gallery scrolls; the header and the buttons stay.
+	.wc-pl-images__list {
+		max-height: min(50vh, 420px);
+		overflow-y: auto;
+		padding: 2px;
+		margin: -2px;
+	}
+}
+
+// Under the media library while it is open over it (popovers otherwise sit above every modal).
+body.wc-pl-media-open .wc-pl-images-popover {
+	z-index: 159000;
+}
+
+.wc-pl-images-popover__body {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 16px;
+}
+
+.wc-pl-images-popover__header {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.wc-pl-images-popover__title {
+	margin: 0;
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.4;
+}
+
+.wc-pl-images-popover__name {
+	color: $muted;
+	font-size: 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.wc-pl-images-popover__loading {
+	display: flex;
+	justify-content: center;
+	padding: 24px 0;
+}
+
+.wc-pl-images-popover__footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.wc-pl-images-control__label {
+	display: block;
+	margin-bottom: 8px;
+	font-size: 11px;
+	font-weight: 500;
+	line-height: 1.4;
+	text-transform: uppercase;
+}
+
+.wc-pl-images {
+	--wc-pl-tile: 72px;
+
+	position: relative;
+	border-radius: 4px;
+
+	&.is-files-over {
+		outline: 2px dashed var(--wp-admin-theme-color, #3858e9);
+		outline-offset: 4px;
+		background: rgba(56, 88, 233, 0.04);
+	}
+}
+
+.wc-pl-images__list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.wc-pl-images__tile {
+	position: relative;
+	width: var(--wc-pl-tile);
+	height: var(--wc-pl-tile);
+	margin: 0;
+	border-radius: 4px;
+	background: #f0f0f1;
+	box-shadow: inset 0 0 0 1px $border;
+
+	> img {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		border-radius: 4px;
+	}
+
+	&[draggable="true"] {
+		cursor: grab;
+	}
+
+	&.is-main {
+		--wc-pl-tile-main: calc(var(--wc-pl-tile) * 2 + 8px);
+
+		width: var(--wc-pl-tile-main);
+		height: var(--wc-pl-tile-main);
+	}
+
+	&.is-dragging {
+		opacity: 0.4;
+	}
+
+	&.is-drop-target {
+		box-shadow: 0 0 0 2px var(--wp-admin-theme-color, #3858e9);
+	}
+
+	&.is-uploading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+
+		.components-spinner {
+			margin: 0;
+		}
+	}
+
+	&.is-add {
+		background: none;
+		box-shadow: none;
+	}
+}
+
+.wc-pl-images__badge {
+	position: absolute;
+	left: 6px;
+	bottom: 6px;
+	padding: 1px 6px;
+	border-radius: 2px;
+	background: rgba(0, 0, 0, 0.7);
+	color: #fff;
+	font-size: 11px;
+	line-height: 18px;
+	pointer-events: none;
+}
+
+.wc-pl-images__tools {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: flex;
+	gap: 2px;
+	opacity: 0;
+	transition: opacity 100ms ease;
+
+	.wc-pl-images__tool.components-button {
+		min-width: 24px;
+		height: 24px;
+		padding: 0 4px;
+		background: rgba(255, 255, 255, 0.95);
+		box-shadow: 0 0 0 1px $border;
+		color: #1e1e1e;
+
+		&:hover {
+			background: #fff;
+		}
+	}
+}
+
+.wc-pl-images__tile:hover .wc-pl-images__tools,
+.wc-pl-images__tile:focus-within .wc-pl-images__tools {
+	opacity: 1;
+}
+
+@media (hover: none) {
+	.wc-pl-images__tools {
+		opacity: 1;
+	}
+}
+
+.wc-pl-images__add.components-button {
+	flex-direction: column;
+	justify-content: center;
+	gap: 4px;
+	width: 100%;
+	height: 100%;
+	padding: 4px;
+	border: 1px dashed #949494;
+	border-radius: 4px;
+	font-size: 12px;
+	line-height: 1.2;
+	text-align: center;
+	white-space: normal;
+
+	&:hover {
+		border-color: var(--wp-admin-theme-color, #3858e9);
+	}
+}
+
+.wc-pl-images__hint {
+	margin: 8px 0 0;
+	color: $muted;
+	font-size: 12px;
+}
+
+.wc-pl-images__error {
+	margin: 8px 0 0;
+	color: #cc1818;
+	font-size: 12px;
+}
+
+// ---------------------------------------------------------------------------
+// Edit in table: the cells as inputs.
+// ---------------------------------------------------------------------------
+
+.wc-products-list__inline-hint {
+	margin: 0;
+	padding: 6px 16px;
+	border-bottom: 1px solid $border;
+	background: #f0f6fc;
+	font-size: 12px;
+
+	.components-button.is-link {
+		font-size: 12px;
+	}
+}
+
+.wc-pl-inline {
+	position: relative;
+	display: flex;
+	align-items: center;
+	min-width: 0;
+	width: 100%;
+}
+
+// Specific enough to win over wp-admin's own `input[type="text"]` and `select` styles (forms.css).
+.wc-products-list .wc-pl-inline input.wc-pl-inline__input,
+.wc-products-list .wc-pl-inline select.wc-pl-inline__select {
+	width: 100%;
+	min-width: 0;
+	min-height: 30px;
+	height: 30px;
+	margin: 0;
+	padding: 0 6px;
+	border: 1px solid transparent;
+	border-radius: 2px;
+	background-color: transparent;
+	box-shadow: none;
+	color: inherit;
+	font-size: 13px;
+	line-height: 28px;
+
+	&:hover {
+		border-color: #949494;
+		background-color: #fff;
+	}
+
+	&:focus {
+		border-color: var(--wp-admin-theme-color, #3858e9);
+		background-color: #fff;
+		box-shadow: 0 0 0 1px var(--wp-admin-theme-color, #3858e9);
+		outline: 2px solid transparent;
+	}
+
+	&:read-only:not(select) {
+		opacity: 0.6;
+	}
+
+	&::placeholder {
+		color: #949494;
+	}
+}
+
+// The row under the pointer shows which of its values can be typed into.
+.wc-products-list .dataviews-view-table__row:hover .wc-pl-inline {
+	input.wc-pl-inline__input,
+	select.wc-pl-inline__select {
+		border-color: $border;
+		background-color: #fff;
+	}
+}
+
+.wc-products-list .wc-pl-inline select.wc-pl-inline__select {
+	max-width: 100%;
+	padding-right: 24px;
+	background-position: right 4px center;
+	background-size: 16px 16px;
+	cursor: pointer;
+
+	// Like the text it replaces until the row is pointed at or focused: no arrow.
+	&:not(:hover):not(:focus) {
+		background-image: none;
+	}
+}
+
+.wc-products-list .dataviews-view-table__row:hover .wc-pl-inline select.wc-pl-inline__select:not(:focus) {
+	background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20width%3D%2220%22%20height%3D%2220%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M5%206l5%205%205-5%202%201-7%207-7-7%202-1z%22%20fill%3D%22%23555%22%2F%3E%3C%2Fsvg%3E");
+}
+
+.wc-products-list .wc-pl-inline--money input.wc-pl-inline__input,
+.wc-products-list .wc-pl-inline--integer input.wc-pl-inline__input {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.wc-products-list .wc-pl-inline--money input.wc-pl-inline__input {
+	padding-right: 20px;
+}
+
+.wc-pl-inline__suffix {
+	position: absolute;
+	right: 7px;
+	color: $muted;
+	font-size: 12px;
+	pointer-events: none;
+}
+
+// Typed, not saved yet.
+.wc-products-list .wc-pl-inline.is-dirty {
+	input.wc-pl-inline__input,
+	select.wc-pl-inline__select {
+		border-color: #dba617;
+		background-color: #fcf9e8;
+	}
+}
+
+.wc-products-list .wc-pl-inline.is-invalid {
+	input.wc-pl-inline__input,
+	select.wc-pl-inline__select {
+		border-color: #cc1818;
+		background-color: #fcf0f1;
+		box-shadow: 0 0 0 1px #cc1818;
+	}
+}
+
+.wc-products-list .wc-pl-inline--name {
+	min-width: 260px;
+
+	input.wc-pl-inline__input {
+		font-weight: 500;
+	}
+}
+
+// A long name or text ends in "…" until it is focused (Chromium, Firefox).
+.wc-products-list .wc-pl-inline input.wc-pl-inline__input:not(:focus) {
+	text-overflow: ellipsis;
+}
+
+.wc-pl-inline--text {
+	min-width: 120px;
+}
+
+.wc-pl-inline--select {
+	min-width: 110px;
+}
+
+.wc-pl-inline--money,
+.wc-pl-inline--integer {
+	min-width: 90px;
+}
+
+.wc-pl-inline-price {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	width: 100%;
+	min-width: 110px;
+
+	.wc-pl-inline--sale input.wc-pl-inline__input:not(:placeholder-shown) {
+		color: #b32d2e;
+	}
+}
+
+.wc-pl-inline--boolean {
+	justify-content: center;
+	min-width: 0;
+}
+
+.wc-products-list.is-inline-editing {
+	// Wide enough for a price typed with its decimals and currency.
+	.dataviews-view-table td .wc-pl-inline-price {
+		min-width: 110px;
+	}
+}

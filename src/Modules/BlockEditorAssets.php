@@ -5,17 +5,23 @@ namespace GeneroWP\ProductsList\Modules;
 use GeneroWP\ProductsList\Module;
 
 /**
- * The block editor for the description modal, loaded only when the modal
- * opens. The scripts and styles it needs (block editor, core blocks,
+ * The media library (for the image editor) and the block editor (for the
+ * description modal), each loaded only when first used. The scripts and styles it needs (block editor, core blocks,
  * formats, TinyMCE for the Classic block, the media library) are printed
  * into an inert <template> at the end of the page; the app copies them
  * into the document the first time the modal opens
- * (resources/edit/description-modal/load-block-editor.ts). Handles the
- * page already printed are skipped, so nothing loads twice.
+ * (resources/edit/description-modal/load-block-editor.ts). The media
+ * library has a template of its own, printed first, so the image editor
+ * loads it without the block editor; the block editor's template leaves
+ * out what the media template has, and loading it loads the media one
+ * first. Handles the page already printed are skipped, so nothing loads
+ * twice.
  */
 class BlockEditorAssets implements Module
 {
     public const TEMPLATE_ID = 'wc-products-list-block-editor-assets';
+
+    public const MEDIA_TEMPLATE_ID = 'wc-products-list-media-assets';
 
     public const SETTINGS_ID = 'wc-products-list-block-editor-settings';
 
@@ -28,6 +34,11 @@ class BlockEditorAssets implements Module
     private const MEDIA_SCRIPTS = ['media-editor', 'media-audiovideo', 'mce-view', 'image-edit', 'media-upload', 'thickbox'];
 
     private const MEDIA_STYLES = ['media-views', 'imgareaselect', 'thickbox'];
+
+    /** What the media library's frames need: the views (and with them the models and the uploader), the image editor, and `wp.media.mixin` (media-audiovideo), which closing a frame calls. */
+    private const MEDIA_TEMPLATE_SCRIPTS = ['media-views', 'media-editor', 'media-audiovideo', 'image-edit'];
+
+    private const MEDIA_TEMPLATE_STYLES = ['media-views', 'imgareaselect'];
 
     public function register(): void
     {
@@ -61,6 +72,13 @@ class BlockEditorAssets implements Module
         if (! class_exists('_WP_Editors', false)) {
             require_once ABSPATH.'wp-includes/class-wp-editor.php';
         }
+
+        ob_start();
+        wp_styles()->do_items(self::MEDIA_TEMPLATE_STYLES);
+        wp_scripts()->do_items(self::MEDIA_TEMPLATE_SCRIPTS);
+        $media = (string) ob_get_clean();
+
+        echo '<template id="'.esc_attr(self::MEDIA_TEMPLATE_ID).'">'.$media.'</template>'."\n";
 
         ob_start();
         wp_styles()->do_items(self::STYLES);

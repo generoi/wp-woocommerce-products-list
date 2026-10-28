@@ -44,7 +44,7 @@ import { ActionRowsError, changedFields as actionChangedFields, runDeclarativeAc
 import { notify } from '../actions/notices';
 import { fetchAllVariations, VARIATION_FETCH_CONCURRENCY, variationFetchFields } from './apply-to-variations';
 import { withArrayOps } from './bulk-array';
-import { carriesViewText, EDIT_CONTEXT_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, marketPriceFetchFields, rootKeysOf, settleDeletions, tabFetchFields } from './hydrate';
+import { carriesViewText, EDIT_CONTEXT_KEYS, LIST_PARTIAL_KEYS, editFetchFields, hydrateSelection, mergeHydrated, recheckBases, recheckStatuses, marketPriceFetchFields, rootKeysOf, settleDeletions, tabFetchFields } from './hydrate';
 import { changedSinceShown, pathsOfEdit, rowCarries, ShownValues } from './shown-values';
 import type { ChangedField } from './shown-values';
 import { getVariationsOfParents } from './variations-read';
@@ -87,6 +87,8 @@ import { isSellableField, visibleEditFields } from './visibility';
 import { useFormColumns } from './use-form-columns';
 import { DescriptionModalContext } from './description-modal/context';
 import { canLoadBlockEditor } from './description-modal/load-block-editor';
+import { ImagesControlContext } from '../fields/components/images-control';
+import type { ImagesControlTarget } from '../fields/components/images-control';
 import type { DescriptionLanguage } from './description-modal/description-modal';
 
 const DescriptionModal = lazy( () => import( /* webpackChunkName: "description-modal" */ './description-modal/description-modal' ).then( ( module ) => ( { default: module.DescriptionModal } ) ) );
@@ -954,6 +956,18 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 				return { lang, label: languages?.labels[ lang ] ?? ( lang.toUpperCase() || __( 'Default', 'wp-woocommerce-products-list' ) ), fieldId: field.id, tabId: tabOf( field ), isDefault };
 			} );
 	}, [ bulk, visibleFields, settings.languages ] );
+	// The Images field's row: uploads attach to the product (a variation's to its parent), a variation has one image.
+	const imagesTarget = useMemo< ImagesControlTarget | null >( () => {
+		const only = selectedRows.length === 1 ? selectedRows[ 0 ] : undefined;
+
+		if ( bulk || ! only ) {
+			return null;
+		}
+
+		const variation = isVariation( only );
+
+		return { postId: variation ? parentIdOf( only ) || only.id : only.id, single: variation, itemName: nameOf( only ) };
+	}, [ bulk, selectedRows ] );
 	const descriptionOpener = useRef< HTMLElement | null >( null );
 	const openDescription = useMemo(
 		() =>
@@ -1007,7 +1021,7 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 
 			const paths = pathsOfEdit( field.id, editFieldsById );
 
-			return ! paths.some( ( path ) => EDIT_CONTEXT_KEYS.has( path.split( '.' )[ 0 ] ?? path ) ) && items.every( ( row ) => row._placeholder || rowCarries( row, paths ) );
+			return ! paths.some( ( path ) => EDIT_CONTEXT_KEYS.has( path.split( '.' )[ 0 ] ?? path ) || LIST_PARTIAL_KEYS.has( path.split( '.' )[ 0 ] ?? path ) ) && items.every( ( row ) => row._placeholder || rowCarries( row, paths ) );
 		},
 		[ allHydrated, loading, loadedTabs, editFieldsById, items ]
 	);
@@ -3488,7 +3502,9 @@ export function InlineEditor( { host }: InlineEditorProps ) {
 						<ApplyControlContext.Provider value={ applyControl }>
 							<SectionNotesContext.Provider value={ sectionNotes }>
 								<DescriptionModalContext.Provider value={ openDescription }>
-									<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+									<ImagesControlContext.Provider value={ imagesTarget }>
+										<DataForm< FormData > data={ state.data } fields={ dataFormFields } form={ form } onChange={ onChange } validity={ validity } />
+									</ImagesControlContext.Provider>
 								</DescriptionModalContext.Provider>
 							</SectionNotesContext.Provider>
 						</ApplyControlContext.Provider>

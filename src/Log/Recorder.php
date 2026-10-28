@@ -743,7 +743,8 @@ final class Recorder
             'brands' => self::ids(wc_get_product_term_ids($product->get_id(), 'product_brand')),
             // The list drops the gallery (Rows::dropGallery); the log must hold the stored one.
             'images' => Rows::withGallery(static fn (): array => self::ids(array_filter(array_merge([$product->get_image_id()], $product->get_gallery_image_ids())))),
-            'image' => $product->get_image_id() ? ['id' => (int) $product->get_image_id()] : null,
+            // A variation's own image (the view context falls back to the parent's).
+            'image' => $product->get_image_id('edit') ? ['id' => (int) $product->get_image_id('edit')] : null,
             'dimensions' => [
                 'length' => (string) $product->get_length(),
                 'width' => (string) $product->get_width(),

@@ -43,6 +43,9 @@ final class Rows
     /** @var WeakMap<WP_REST_Request, array<int, string>|null>|null parsed `_fields` per request object */
     private static ?WeakMap $fields = null;
 
+    /** The read param that keeps the gallery in list mode (the image editor's load). */
+    public const GALLERY_PARAM = 'wcpl_gallery';
+
     /** @var WeakMap<WP_REST_Request, bool>|null whether a write request carries `images`, per request object */
     private static ?WeakMap $writesImages = null;
 
@@ -222,7 +225,8 @@ final class Rows
      * when the request (or any item of its batch body) sets `images`, so
      * a gallery write is stored, logged and answered in full, and inside
      * `withGallery()`, which the recorder uses to read the stored
-     * gallery. Saving never goes through this filter: the data store
+     * gallery, and on a read that asks for it (`GALLERY_PARAM`, the image
+     * editor's). Saving never goes through this filter: the data store
      * reads props in the `edit` context.
      *
      * @param  mixed  $ids
@@ -232,6 +236,10 @@ final class Rows
     public function dropGallery($ids, $product = null)
     {
         if (self::$keepGallery > 0 || ! ListMode::active() || ! is_array($ids)) {
+            return $ids;
+        }
+
+        if (ListMode::method() === 'GET' && self::requestAsksGallery()) {
             return $ids;
         }
 
@@ -311,6 +319,17 @@ final class Rows
      * gallery is kept. Memoised per request object: it is asked for on
      * every row of a batch.
      */
+    /**
+     * A read that asks for the whole gallery (`GALLERY_PARAM`): the image
+     * editor loads a product's images with it, as WooCommerce stores them.
+     */
+    private static function requestAsksGallery(): bool
+    {
+        $value = ListMode::request()?->get_param(self::GALLERY_PARAM);
+
+        return $value !== null && $value !== '' && $value !== '0' && $value !== false;
+    }
+
     private static function requestWritesImages(): bool
     {
         $request = ListMode::request();

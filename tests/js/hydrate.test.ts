@@ -26,7 +26,9 @@ describe( 'editFetchFields', () => {
 		expect( bulk ).toContain( 'sku' );
 		expect( bulk ).not.toContain( 'description' );
 		expect( bulk ).toContain( 'stock_quantity' );
-		expect( quick ).not.toContain( 'images' );
+		// Quick edit changes the images (main image and gallery); bulk edit does not.
+		expect( quick ).toContain( 'images' );
+		expect( bulk ).not.toContain( 'images' );
 	} );
 } );
 

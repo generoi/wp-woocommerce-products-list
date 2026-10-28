@@ -32,6 +32,15 @@ import { isVariation, parentIdOf } from './field-value';
 import { visibleEditFields } from './visibility';
 import { getVariationsByIds } from './variations-read';
 
+/** The read param that keeps a product's whole gallery in list mode (`Rows::GALLERY_PARAM`). */
+export const GALLERY_PARAM = 'wcpl_gallery';
+
+/**
+ * Keys a list row carries only in part: `images` holds the main image without the gallery (src/Rest/Rows.php), and a
+ * variation's image is its parent's when it has none. The editor waits for its own read of them.
+ */
+export const LIST_PARTIAL_KEYS: ReadonlySet< string > = new Set( [ 'images', 'image' ] );
+
 /** Texts wc/v3 answers rendered in view context and raw in edit context: a load that asks for one is made in edit context. */
 export const EDIT_CONTEXT_KEYS: ReadonlySet< string > = new Set( [ 'description', 'short_description' ] );
 
@@ -280,7 +289,8 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 	const parentStamps = new Map< number, string >();
 	const wantsStamps = wanted.includes( 'date_modified_gmt' );
 	const context = readContextOf( wanted );
-	const contextParam = context ? { context } : {};
+	// The editor's Images field works on the whole gallery, which list reads otherwise drop (src/Rest/Rows.php).
+	const contextParam = { ...( context ? { context } : {} ), ...( wanted.includes( 'images' ) ? { [ GALLERY_PARAM ]: 1 } : {} ) };
 
 	for ( let i = 0; i < products.length; i += chunk ) {
 		const ids = products.slice( i, i + chunk );
@@ -316,6 +326,12 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 		);
 	}
 
+	// A variation's image is its `image`, and only the edit context tells its own apart from the parent's it falls back to
+	// (view context shows the parent's when it has none): the Images field reads it so.
+	const variationWanted = Array.from( new Set( wanted.map( ( field ) => ( field === 'images' ? 'image' : field ) ) ) );
+	const variationContext = context ?? ( variationWanted.includes( 'image' ) ? 'edit' : undefined );
+	const variationContextParam = variationContext ? { context: variationContext } : {};
+
 	const perParent = ( entries: Iterable< [ number, number[] ] > ) => {
 		for ( const [ parentId, ids ] of entries ) {
 			for ( let i = 0; i < ids.length; i += chunk ) {
@@ -323,7 +339,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 
 				jobs.push(
 					limit( async () => {
-						const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: wanted, params: { include: slice.join( ',' ), ...contextParam } } );
+						const result = await deps.getVariations( parentId, 1, { perPage: slice.length, fields: variationWanted, params: { include: slice.join( ',' ), ...variationContextParam } } );
 
 						result.items.forEach( ( row ) => byId.set( row.id, row ) );
 					} )
@@ -345,7 +361,7 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 		jobs.push(
 			( async () => {
 				// A failed cross-parent read falls back to the per-parent one (an older server, a proxy that blocks the route).
-				const rows = await across( Array.from( parentOf.keys() ), parentOf, { fields: wanted, context } ).catch( () => null );
+				const rows = await across( Array.from( parentOf.keys() ), parentOf, { fields: variationWanted, context: variationContext } ).catch( () => null );
 
 				if ( rows === null ) {
 					// No cross-parent route on this server: one read per parent, as before.
@@ -391,8 +407,19 @@ export async function hydrateSelection( items: ProductListItem[], fields: string
 			trashed.push( item.id );
 		}
 
+		if ( ! full ) {
+			return item;
+		}
+
 		// The identity keys the request did not ask for are the client's defaults, not data: the row keeps its own.
-		return full ? ( mergeHydrated( item as Record< string, unknown >, withoutUnaskedIdentity( full as Record< string, unknown >, wanted, item as Record< string, unknown > ) ) as ProductListItem ) : item;
+		const row = mergeHydrated( item as Record< string, unknown >, withoutUnaskedIdentity( full as Record< string, unknown >, wanted, item as Record< string, unknown > ) ) as ProductListItem;
+
+		// A variation read for its own image: none is `null` (mergeHydrated keeps an object over a null, the parent's image here).
+		if ( isVariation( item ) && variationWanted.includes( 'image' ) && ! ( full as { image?: unknown } ).image ) {
+			return { ...row, image: null } as ProductListItem;
+		}
+
+		return row;
 	} );
 
 	return { items: merged, missing, trashed, parentStamps };
