@@ -18,6 +18,8 @@ interface Job {
 	startedAt: number;
 	/** Rows not written yet: products, variations and the parents of variations being written. */
 	pending: Set< number >;
+	/** A save from a table cell (or its Undo): its row says "Updating…", the list's bar stays away. */
+	quiet: boolean;
 }
 
 export interface SaveActivity {
@@ -80,13 +82,21 @@ function emit( locksChanged = false ): void {
 	let startedAt = Number.POSITIVE_INFINITY;
 	let reverting = true;
 
+	let shown = 0;
+
 	jobs.forEach( ( job ) => {
+		if ( job.quiet ) {
+			return;
+		}
+
+		shown += 1;
 		done += job.done;
 		total += job.total;
 		startedAt = Math.min( startedAt, job.startedAt );
 		reverting &&= job.kind === 'revert';
 	} );
-	snapshot = jobs.size ? { done, total, startedAt, jobs: jobs.size, reverting } : null;
+	// The bar would push the list down and back up for a save that takes a moment.
+	snapshot = shown ? { done, total, startedAt, jobs: shown, reverting } : null;
 	guardLeaving( jobs.size > 0 );
 	listeners.forEach( ( listener ) => listener() );
 }
@@ -97,11 +107,19 @@ function subscribe( listener: () => void ): () => void {
 	return () => listeners.delete( listener );
 }
 
+export interface SaveJobOptions {
+	/**
+	 * A save of the table's own cells (or the Undo of one): the rows are locked and marked as any save's, but the
+	 * list's progress bar does not come up for it (it would push the list down and back for a save of a moment).
+	 */
+	quiet?: boolean;
+}
+
 /** Register a save; returns its id for the updates. */
-export function startSaveJob( pendingIds: Iterable< number >, kind: SaveJobKind = 'save' ): number {
+export function startSaveJob( pendingIds: Iterable< number >, kind: SaveJobKind = 'save', { quiet = false }: SaveJobOptions = {} ): number {
 	const id = nextId++;
 
-	jobs.set( id, { kind, done: 0, total: 0, startedAt: Date.now(), pending: new Set( pendingIds ) } );
+	jobs.set( id, { kind, done: 0, total: 0, startedAt: Date.now(), pending: new Set( pendingIds ), quiet } );
 	emit( true );
 
 	return id;
@@ -131,8 +149,8 @@ export function pendingRowIds( items: ReadonlyArray< Pick< ProductListItem, 'id'
  * so the rows are locked and leaving is guarded from the moment Update is
  * pressed). The caller finishes it with `finishSaveJob` on every path.
  */
-export function beginSaveJob( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > >, kind: SaveJobKind = 'save' ): number {
-	return startSaveJob( pendingRowIds( items ), kind );
+export function beginSaveJob( items: ReadonlyArray< Pick< ProductListItem, 'id' | 'parent_id' > >, kind: SaveJobKind = 'save', options: SaveJobOptions = {} ): number {
+	return startSaveJob( pendingRowIds( items ), kind, options );
 }
 
 export function updateSaveJob( id: number, done: number, total: number ): void {

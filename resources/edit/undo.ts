@@ -52,6 +52,8 @@ export interface UndoOptions {
 	 * no refetch here; problems are still said. The caller invalidates and says the total.
 	 */
 	quiet?: boolean;
+	/** The Undo of a save from the table's cells: its rows show the revert, the list's progress bar stays away. */
+	fromTable?: boolean;
 }
 
 export async function undoBatch( batchId: string, options: UndoOptions = {} ): Promise< { ok: number; failed: number } > {
@@ -62,6 +64,7 @@ export async function undoBatch( batchId: string, options: UndoOptions = {} ): P
 	try {
 		const plan = await getRevertPlan( batchId );
 		const outcome = await runRevert( batchId, plan, {
+			quiet: options.fromTable,
 			onProgress: ( done, total ) => notify.info( revertingMessage( done, total ), { id: noticeId, explicitDismiss: true, isDismissible: false } ),
 		} );
 		const ok = outcome.ok;

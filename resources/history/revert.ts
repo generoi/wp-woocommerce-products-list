@@ -46,6 +46,8 @@ export interface RunRevertOptions {
 	/** The id to keep logging under (a forced retry joins the first pass). */
 	revertBatchId?: string;
 	onProgress?( done: number, total: number ): void;
+	/** The Undo of a save from the table's cells: its rows show it, not the list's progress bar (save-activity.ts). */
+	quiet?: boolean;
 	/** Close the revert batch when the run ends (tests pass their own); `closeBatch` of the REST client by default. */
 	close?( revertBatchId: string ): Promise< void >;
 	/** Record the objects of chunks that got no answer (tests pass their own); `logSkipped` of the REST client by default. */
@@ -241,7 +243,7 @@ export async function runRevert( batchId: string, plan: Pick< RevertPlan, 'chunk
 	// Several requests: the server keeps the revert batch `running` until it is closed, `interrupted` when it never is.
 	const planned = chunks.length > 1 ? total : 0;
 	const close = options.close ?? closeBatch;
-	const job = total ? beginSaveJob( objectIds.map( ( id ) => ( { id, parent_id: 0 } ) ), 'revert' ) : undefined;
+	const job = total ? beginSaveJob( objectIds.map( ( id ) => ( { id, parent_id: 0 } ) ), 'revert', { quiet: options.quiet } ) : undefined;
 	let done = 0;
 	let next = 0;
 	let answered = false;

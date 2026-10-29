@@ -329,7 +329,7 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 					<li
 						key={ image.id }
 						data-image-id={ image.id }
-						className={ [ 'wc-pl-images__tile', index === 0 && ! single ? 'is-main' : '', dragFrom === index ? 'is-dragging' : '', dropAt === index && dragFrom !== index ? 'is-drop-target' : '' ].filter( Boolean ).join( ' ' ) }
+						className={ [ 'wc-pl-images__tile', index === 0 ? 'is-main' : '', dragFrom === index ? 'is-dragging' : '', dropAt === index && dragFrom !== index ? 'is-drop-target' : '' ].filter( Boolean ).join( ' ' ) }
 						draggable={ ! disabled && ! single && images.length > 1 }
 						onDragStart={ ( event ) => onTileDragStart( event, index ) }
 						onDragOver={ ( event ) => onTileDragOver( event, index ) }
@@ -341,53 +341,65 @@ export function ImagesEditor( { value, onChange, single = false, postId, itemNam
 					>
 						<img src={ image.src } alt={ imageLabel( image, single ? 0 : index ) } draggable={ false } />
 						{ index === 0 && ! single && images.length > 1 && <span className="wc-pl-images__badge">{ __( 'Main', 'wp-woocommerce-products-list' ) }</span> }
-						{ ! disabled && (
-							<div className="wc-pl-images__tools">
-								{ ! single && (
-									<DropdownMenu
-										icon={ moreVertical }
-										label={ sprintf( /* translators: %s: e.g. "Gallery image 2" */ __( 'Options for %s', 'wp-woocommerce-products-list' ), imageLabel( image, index ) ) }
-										toggleProps={ { size: 'small', className: 'wc-pl-images__tool' } }
-										popoverProps={ { placement: 'bottom-end' } }
-										controls={ [
-											...( index > 0
-												? [
-														{
-															title: __( 'Set as main image', 'wp-woocommerce-products-list' ),
-															onClick: () => move( index, 0, __( 'Set as the main image.', 'wp-woocommerce-products-list' ) ),
-														},
-												  ]
-												: [] ),
-											...( index > 1
-												? [
-														{
-															title: __( 'Move earlier', 'wp-woocommerce-products-list' ),
-															onClick: () => move( index, index - 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index ) ),
-														},
-												  ]
-												: [] ),
-											...( index > 0 && index < images.length - 1
-												? [
-														{
-															title: __( 'Move later', 'wp-woocommerce-products-list' ),
-															onClick: () => move( index, index + 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index + 2 ) ),
-														},
-												  ]
-												: [] ),
-											...( canUpload ? [ { title: __( 'Replace…', 'wp-woocommerce-products-list' ), onClick: () => void pick( index ) } ] : [] ),
-										] }
-									/>
-								) }
-								{ single && canUpload && (
-									<Button size="small" className="wc-pl-images__tool" onClick={ () => void pick( 0 ) }>
+						{ ! disabled && ( single || index === 0 ) && (
+							// The main image (a variation's one): Replace and Remove over it, as the product screen's featured image has.
+							<div className="wc-pl-images__actions">
+								{ canUpload && (
+									<Button
+										size="compact"
+										className="wc-pl-images__tool"
+										label={ sprintf( /* translators: %s: e.g. "Main image: Boot" */ __( 'Replace %s', 'wp-woocommerce-products-list' ), imageLabel( image, 0 ) ) }
+										onClick={ () => void pick( 0 ) }
+									>
 										{ __( 'Replace', 'wp-woocommerce-products-list' ) }
 									</Button>
 								) }
 								<Button
+									size="compact"
+									className="wc-pl-images__tool"
+									label={ sprintf( /* translators: %s: e.g. "Gallery image 2" */ __( 'Remove %s', 'wp-woocommerce-products-list' ), imageLabel( image, 0 ) ) }
+									onClick={ () => remove( 0 ) }
+								>
+									{ __( 'Remove', 'wp-woocommerce-products-list' ) }
+								</Button>
+							</div>
+						) }
+						{ ! disabled && ! single && index > 0 && (
+							<div className="wc-pl-images__tools">
+								<DropdownMenu
+									icon={ moreVertical }
+									label={ sprintf( /* translators: %s: e.g. "Gallery image 2" */ __( 'Options for %s', 'wp-woocommerce-products-list' ), imageLabel( image, index ) ) }
+									toggleProps={ { size: 'small', className: 'wc-pl-images__tool' } }
+									popoverProps={ { placement: 'bottom-end' } }
+									controls={ [
+										{
+											title: __( 'Set as main image', 'wp-woocommerce-products-list' ),
+											onClick: () => move( index, 0, __( 'Set as the main image.', 'wp-woocommerce-products-list' ) ),
+										},
+										...( index > 1
+											? [
+													{
+														title: __( 'Move earlier', 'wp-woocommerce-products-list' ),
+														onClick: () => move( index, index - 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index ) ),
+													},
+											  ]
+											: [] ),
+										...( index < images.length - 1
+											? [
+													{
+														title: __( 'Move later', 'wp-woocommerce-products-list' ),
+														onClick: () => move( index, index + 1, sprintf( /* translators: %d: new position */ __( 'Moved to position %d.', 'wp-woocommerce-products-list' ), index + 2 ) ),
+													},
+											  ]
+											: [] ),
+										...( canUpload ? [ { title: __( 'Replace…', 'wp-woocommerce-products-list' ), onClick: () => void pick( index ) } ] : [] ),
+									] }
+								/>
+								<Button
 									size="small"
 									icon={ closeSmall }
 									className="wc-pl-images__tool"
-									label={ sprintf( /* translators: %s: e.g. "Gallery image 2" */ __( 'Remove %s', 'wp-woocommerce-products-list' ), imageLabel( image, single ? 0 : index ) ) }
+									label={ sprintf( /* translators: %s: e.g. "Gallery image 2" */ __( 'Remove %s', 'wp-woocommerce-products-list' ), imageLabel( image, index ) ) }
 									onClick={ () => remove( index ) }
 								/>
 							</div>

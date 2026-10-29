@@ -626,6 +626,21 @@ function original( field: ProductField ): Cell {
 	};
 }
 
+/**
+ * An input over the column's own cell, which stays under it unseen: the column is as wide, and the row as tall, with
+ * Edit in table on as off, so switching the mode (or a save drawing the row anew) moves nothing.
+ */
+function OverCell( { cell, children }: { cell: ReactNode; children: ReactNode } ) {
+	return (
+		<span className="wc-pl-over">
+			<span className="wc-pl-over__cell" aria-hidden="true">
+				{ cell }
+			</span>
+			{ children }
+		</span>
+	);
+}
+
 /** A column's cell: its input when the row takes the field, else the column's own render. */
 function fieldCell( field: ProductField, kind: InlineKind ): Render {
 	const render = original( field );
@@ -637,7 +652,11 @@ function fieldCell( field: ProductField, kind: InlineKind ): Render {
 			return createElement( render, props );
 		}
 
-		return <InlineControl item={ props.item } field={ field } kind={ kind } context={ context } />;
+		return (
+			<OverCell cell={ createElement( render, props ) }>
+				<InlineControl item={ props.item } field={ field } kind={ kind } context={ context } />
+			</OverCell>
+		);
 	};
 }
 
@@ -654,7 +673,10 @@ function nameCell( field: ProductField ): Render {
 
 		return (
 			<HierarchyNameCell item={ props.item }>
-				<InlineControl item={ props.item } field={ field } kind="text" context={ context } className="wc-pl-inline--name" />
+				{ /* The name as the link shows it (the whole cell would repeat the chevron and the row's marks). */ }
+				<OverCell cell={ <span className="wc-products-list__name-link">{ decodeEntities( props.item.name ?? '' ) || `#${ props.item.id }` }</span> }>
+					<InlineControl item={ props.item } field={ field } kind="text" context={ context } className="wc-pl-inline--name" />
+				</OverCell>
 			</HierarchyNameCell>
 		);
 	};
@@ -675,10 +697,12 @@ function priceCell( field: ProductField ): Render {
 		}
 
 		return (
-			<span className="wc-pl-inline-price">
-				<InlineControl item={ props.item } field={ regular } kind="money" context={ context } />
-				{ ids.has( 'sale_price' ) && <InlineControl item={ props.item } field={ sale } kind="money" context={ context } placeholder={ __( 'Sale', 'wp-woocommerce-products-list' ) } className="wc-pl-inline--sale" /> }
-			</span>
+			<OverCell cell={ createElement( render, props ) }>
+				<span className="wc-pl-inline-price">
+					<InlineControl item={ props.item } field={ regular } kind="money" context={ context } />
+					{ ids.has( 'sale_price' ) && <InlineControl item={ props.item } field={ sale } kind="money" context={ context } placeholder={ __( 'Sale', 'wp-woocommerce-products-list' ) } className="wc-pl-inline--sale" /> }
+				</span>
+			</OverCell>
 		);
 	};
 }
@@ -693,11 +717,19 @@ function stockCell( field: ProductField ): Render {
 		const quantity = context?.byId.get( 'stock_quantity' );
 
 		if ( context && quantity && ids?.has( 'stock_quantity' ) ) {
-			return <InlineControl item={ props.item } field={ quantity } kind="integer" context={ context } className="wc-pl-inline--stock" />;
+			return (
+				<OverCell cell={ createElement( render, props ) }>
+					<InlineControl item={ props.item } field={ quantity } kind="integer" context={ context } className="wc-pl-inline--stock" />
+				</OverCell>
+			);
 		}
 
 		if ( context && ids?.has( field.id ) ) {
-			return <InlineControl item={ props.item } field={ field } kind="select" context={ context } />;
+			return (
+				<OverCell cell={ createElement( render, props ) }>
+					<InlineControl item={ props.item } field={ field } kind="select" context={ context } />
+				</OverCell>
+			);
 		}
 
 		return createElement( render, props );

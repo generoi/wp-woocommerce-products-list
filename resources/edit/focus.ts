@@ -60,7 +60,8 @@ function focusTable( doc: Document ): boolean {
 		table.setAttribute( 'tabindex', '-1' );
 	}
 
-	table.focus();
+	// Where the keyboard continues from, not something to show: scrolled to, the table's top would jump into view.
+	table.focus( { preventScroll: true } );
 
 	return doc.activeElement === table;
 }

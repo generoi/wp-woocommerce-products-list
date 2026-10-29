@@ -123,7 +123,8 @@ export interface NameCellProps {
 /**
  * "Updating…" while a save in flight has not finished this row (or its parent); the row is locked meanwhile: for the
  * mouse by style.scss, for the keyboard by `lockRowControls`. Plain text, not a live region: the list's progress bar
- * is the one place that announces the save (a status region per row would be dozens of them).
+ * announces a save (a status region per row would be dozens of them); a save from a table cell, which has no bar,
+ * says itself in its snackbar.
  */
 function PendingMark( { item }: { item: ProductListItem } ) {
 	const pending = useRowPending( item.id, item.parent_id );

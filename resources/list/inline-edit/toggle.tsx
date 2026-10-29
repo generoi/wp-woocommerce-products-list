@@ -1,14 +1,16 @@
 /**
- * The toolbar's "Edit in table" switch, and while it is on, a line above
- * the table on how the table saves (a typed change saves on Enter or when
- * leaving the row).
+ * The "Edit in table" switch beside the status tabs, and while it is on,
+ * how the table saves (a typed change saves on Enter or when leaving the
+ * row) before it, in the same row: nothing above the table moves when the
+ * mode is switched.
  */
 import { ToggleControl } from '@wordpress/components';
 import { __ } from '@wordpress/i18n';
-import { Button } from '../../ui';
 import { setInlineEditing, useInlineEditing } from './mode';
 
 export const INLINE_HINT_ID = 'wc-products-list-inline-hint';
+
+const HINT = () => __( 'Saves on Enter or when you leave the row. Esc takes a change back.', 'wp-woocommerce-products-list' );
 
 /** A mode, so a switch (beside the status tabs, where the crowded toolbar never pushes it out of view). */
 export function InlineEditToggle() {
@@ -16,6 +18,11 @@ export function InlineEditToggle() {
 
 	return (
 		<div className="wc-products-list__inline-toggle">
+			{ enabled && (
+				<p className="wc-products-list__inline-hint" id={ INLINE_HINT_ID } title={ HINT() }>
+					{ HINT() }
+				</p>
+			) }
 			<ToggleControl
 				__nextHasNoMarginBottom
 				label={ __( 'Edit in table', 'wp-woocommerce-products-list' ) }
@@ -24,17 +31,5 @@ export function InlineEditToggle() {
 				onChange={ ( next: boolean ) => setInlineEditing( next ) }
 			/>
 		</div>
-	);
-}
-
-export function InlineEditHint() {
-	return (
-		<p className="wc-products-list__inline-hint" id={ INLINE_HINT_ID }>
-			<strong>{ __( 'Editing in the table.', 'wp-woocommerce-products-list' ) }</strong>{ ' ' }
-			{ __( 'A change saves when you press Enter or leave the row; a choice in a menu saves at once. Esc takes a change back.', 'wp-woocommerce-products-list' ) }{ ' ' }
-			<Button variant="link" onClick={ () => setInlineEditing( false ) }>
-				{ __( 'Done', 'wp-woocommerce-products-list' ) }
-			</Button>
-		</p>
 	);
 }

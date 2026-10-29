@@ -75,15 +75,42 @@ $link: #2271b1;
 	border-bottom: 1px solid $border;
 
 	.wc-products-list__tabs {
-		flex: 1 1 auto;
+		flex: 0 1 auto;
 		border-bottom: 0;
 	}
 }
 
 .wc-products-list__inline-toggle {
+	display: flex;
+	flex: 1 1 auto;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 16px;
+	min-width: 0;
 	margin-left: auto;
 	padding: 8px 16px 10px;
 	white-space: nowrap;
+}
+
+// One line in the tabs' row, cut short rather than wrapped (the row keeps its height); the whole text is the switch's
+// description for screen readers.
+.wc-products-list__inline-hint {
+	// No width of its own (the switch never wraps to a line of its own for it): what the row has left.
+	flex: 1 1 0;
+	width: 0;
+	min-width: 0;
+	margin: 0;
+	text-align: end;
+	overflow: hidden;
+	color: $muted;
+	font-size: 12px;
+	text-overflow: ellipsis;
+}
+
+@media (max-width: 1180px) {
+	.wc-products-list__inline-hint {
+		display: none;
+	}
 }
 
 .wc-products-list__tab {
@@ -690,12 +717,22 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 	}
 }
 
+// Over the end of the name, not beside it: a mark that took room would widen the column while the row saves.
+.wc-pl-name {
+	position: relative;
+}
+
 .wc-pl-pending {
+	position: absolute;
+	inset-inline-end: 0;
+	top: 50%;
+	z-index: 1;
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
-	margin-inline-start: 8px;
 	padding: 0 6px;
+	transform: translateY(-50%);
+	box-shadow: 0 0 0 4px #fff;
 	border-radius: 2px;
 	background: #f0f6fc;
 	color: #2271b1;
@@ -781,16 +818,28 @@ html.wc-pl-panel-open .wc-products-list .dataviews-view-table > * > tr > :nth-ch
 
 .wc-pl-images-popover {
 	.components-popover__content {
-		width: 360px;
+		width: 560px;
 		max-width: calc(100vw - 32px);
+		// The screen's height under the admin bar.
+		max-height: calc(100vh - var(--wp-admin--admin-bar--height, 32px) - 24px);
+		// Clear of the window's foot when moved up to fit (Popover keeps its box on screen; the margin is in it).
+		margin-block-end: 8px;
 	}
 
-	// A big gallery scrolls; the header and the buttons stay.
-	.wc-pl-images__list {
-		max-height: min(50vh, 420px);
-		overflow-y: auto;
-		padding: 2px;
-		margin: -2px;
+	.wc-pl-images {
+		--wc-pl-tile: 96px;
+	}
+
+	// A variation's one image needs no gallery's width.
+	&.is-single .components-popover__content {
+		width: 360px;
+	}
+}
+
+// A phone: the screen's width less a gutter on each side (Popover keeps its box on screen; the margins are in it).
+@media (max-width: 781px) {
+	.wc-pl-images-popover .components-popover__content {
+		margin-inline: 15px;
 	}
 }
 
@@ -803,7 +852,24 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
+	box-sizing: border-box;
+	// As tall as the popover may be: the popover itself never scrolls, only the images do.
+	max-height: inherit;
 	padding: 16px;
+
+	> * {
+		flex: none;
+	}
+}
+
+.wc-pl-images-popover .wc-pl-images-popover__scroll {
+	flex: 0 1 auto;
+	min-height: 0;
+	// Room for the tiles' focus rings and the drop outline at the scrolled edges.
+	margin: -6px;
+	padding: 6px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
 }
 
 .wc-pl-images-popover__header {
@@ -953,8 +1019,8 @@ body.wc-pl-media-open .wc-pl-images-popover {
 
 .wc-pl-images__badge {
 	position: absolute;
+	top: 6px;
 	left: 6px;
-	bottom: 6px;
 	padding: 1px 6px;
 	border-radius: 2px;
 	background: rgba(0, 0, 0, 0.7);
@@ -987,13 +1053,50 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	}
 }
 
-.wc-pl-images__tile:hover .wc-pl-images__tools,
-.wc-pl-images__tile:focus-within .wc-pl-images__tools {
-	opacity: 1;
+// The main image's Replace and Remove, side by side along its foot.
+.wc-pl-images__actions {
+	position: absolute;
+	right: 8px;
+	bottom: 8px;
+	left: 8px;
+	display: flex;
+	gap: 8px;
+	opacity: 0;
+	transition: opacity 100ms ease;
+
+	.wc-pl-images__tool.components-button {
+		flex: 1 1 0;
+		justify-content: center;
+		min-width: 0;
+		padding: 0 8px;
+		background: rgba(255, 255, 255, 0.9);
+		box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.12);
+		color: #1e1e1e;
+		font-weight: 500;
+		backdrop-filter: blur(8px);
+
+		&:hover {
+			background: #fff;
+			color: var(--wp-admin-theme-color, #3858e9);
+		}
+
+		&:focus-visible {
+			box-shadow: 0 0 0 2px var(--wp-admin-theme-color, #3858e9);
+		}
+	}
+}
+
+.wc-pl-images__tile:hover,
+.wc-pl-images__tile:focus-within {
+	.wc-pl-images__tools,
+	.wc-pl-images__actions {
+		opacity: 1;
+	}
 }
 
 @media (hover: none) {
-	.wc-pl-images__tools {
+	.wc-pl-images__tools,
+	.wc-pl-images__actions {
 		opacity: 1;
 	}
 }
@@ -1033,17 +1136,6 @@ body.wc-pl-media-open .wc-pl-images-popover {
 // Edit in table: the cells as inputs.
 // ---------------------------------------------------------------------------
 
-.wc-products-list__inline-hint {
-	margin: 0;
-	padding: 6px 16px;
-	border-bottom: 1px solid $border;
-	background: #f0f6fc;
-	font-size: 12px;
-
-	.components-button.is-link {
-		font-size: 12px;
-	}
-}
 
 .wc-pl-inline {
 	position: relative;
@@ -1053,6 +1145,30 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	// The input's padding and border sit outside the column, so its text lines up with the header and other rows.
 	width: calc(100% + 14px);
 	margin-inline: -7px;
+}
+
+// The input over the column's own cell (cells.tsx OverCell): the cell, unseen, keeps the column's width and the
+// row's height as they are with Edit in table off.
+.wc-pl-over {
+	display: grid;
+	align-items: center;
+	width: 100%;
+	min-width: 0;
+
+	> * {
+		grid-area: 1 / 1;
+		min-width: 0;
+		// Only the cell underneath sizes the column (a select is as wide as its longest option otherwise).
+		contain: inline-size;
+	}
+}
+
+// Its own min-width (not 0): a grid item without one gives the column nothing of its width.
+.wc-pl-over > .wc-pl-over__cell {
+	min-width: auto;
+	contain: none;
+	visibility: hidden;
+	pointer-events: none;
 }
 
 // Specific enough to win over wp-admin's own `input[type="text"]` and `select` styles (forms.css).
@@ -1197,8 +1313,6 @@ body.wc-pl-media-open .wc-pl-images-popover {
 }
 
 .wc-products-list .wc-pl-inline--name {
-	min-width: 260px;
-
 	input.wc-pl-inline__input {
 		font-weight: 500;
 	}
@@ -1209,34 +1323,26 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	text-overflow: ellipsis;
 }
 
-.wc-pl-inline--text {
-	min-width: 120px;
-}
-
 // A SKU is told apart from a sibling's by its end ("…663" and "…663-1"): shown whole.
 .wc-products-list .wc-pl-inline--sku {
-	min-width: 150px;
-
 	input.wc-pl-inline__input:not(:focus) {
 		text-overflow: clip;
 	}
 }
 
-.wc-pl-inline--select {
-	min-width: 110px;
-}
-
-.wc-pl-inline--money,
-.wc-pl-inline--integer {
-	min-width: 90px;
-}
-
+// The regular and the sale price side by side: stacked, they would make the row taller than the price it replaces.
 .wc-pl-inline-price {
 	display: flex;
-	flex-direction: column;
-	gap: 2px;
-	width: 100%;
-	min-width: 110px;
+	gap: 4px;
+	width: calc(100% + 14px);
+	min-width: 0;
+	margin-inline: -7px;
+
+	> .wc-pl-inline {
+		flex: 1 1 0;
+		width: auto;
+		margin-inline: 0;
+	}
 
 	.wc-pl-inline--sale input.wc-pl-inline__input:not(:placeholder-shown) {
 		color: #b32d2e;
@@ -1248,9 +1354,3 @@ body.wc-pl-media-open .wc-pl-images-popover {
 	min-width: 0;
 }
 
-.wc-products-list.is-inline-editing {
-	// Wide enough for a price typed with its decimals and currency.
-	.dataviews-view-table td .wc-pl-inline-price {
-		min-width: 110px;
-	}
-}

@@ -60,7 +60,7 @@ import { withWholeSelection } from './whole-selection';
 import type { WholeSelection } from './whole-selection';
 import { SaveActivityBar } from './save-activity-bar';
 import { isRowPending, useLockVersion } from '../store/save-activity';
-import { InlineEditHint, InlineEditToggle } from './inline-edit/toggle';
+import { InlineEditToggle } from './inline-edit/toggle';
 import { InlineEditContext, useInlineEditing } from './inline-edit/mode';
 import type { InlineEditValue } from './inline-edit/mode';
 import { withInlineEditing } from './inline-edit/cells';
@@ -747,7 +747,6 @@ export function ProductsScreen( { fields, settings }: ProductsScreenProps ) {
 						{ settings.caps.edit && view.type === 'table' && <InlineEditToggle /> }
 					</div>
 					<SaveActivityBar />
-					{ inlineOn && <InlineEditHint /> }
 					{ staleError && (
 						<Notice
 							status="error"

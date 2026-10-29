@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 - 2026-10-29
+
+Nothing moves when the table is edited; a larger images popover.
+
+- Edit in table no longer moves the table: switching it on keeps every column's width and row's height (each input sits over the cell it replaces), the regular and sale price sit side by side, and the line on how the table saves is in the tabs' row, beside the switch.
+- Saving a row from the table moves nothing either: "Updating…" sits over the end of the name, and the list's progress bar is kept for other saves (quick edit, bulk edit, History).
+- Undo no longer scrolls the page to the table's top.
+- The images popover is larger (bigger tiles) and scrolls in one place, its images; it moves up to fit a big gallery (under the admin bar), and on a phone fills the screen's width. Tab stays in it.
+- The main image (and a variation's image) has Replace and Remove over it on hover or focus, as the product screen's featured image has; the gallery's images keep their menu.
+
 ## 0.5.0 - 2026-10-28
 
 Images from the list, and editing in the table.

@@ -9,7 +9,7 @@ import { useViewportMatch } from '@wordpress/compose';
 import { useContext, useEffect, useRef, useState } from '@wordpress/element';
 import { decodeEntities } from '@wordpress/html-entities';
 import { speak } from '@wordpress/a11y';
-import { __, sprintf } from '@wordpress/i18n';
+import { __, isRTL, sprintf } from '@wordpress/i18n';
 import { Icon, pencil } from '@wordpress/icons';
 import type { MouseEvent as ReactMouseEvent, SyntheticEvent } from 'react';
 import { loadMedia } from '../../edit/description-modal/load-block-editor';
@@ -36,6 +36,15 @@ export function canEditImages( item: ProductListItem, canEdit: boolean ): boolea
 }
 
 const stop = ( event: SyntheticEvent ) => event.stopPropagation();
+
+/**
+ * Where the keyboard starts in the images: a gallery image's options, else "Add images", else the main image's
+ * Replace. Never Remove straight away (Enter after opening would take the main image off), and not the main image's
+ * buttons, which would cover it, while there is anything else.
+ */
+function firstTool( root: HTMLElement | null ): HTMLElement | null {
+	return root?.querySelector< HTMLElement >( '.wc-pl-images__tools .wc-pl-images__tool' ) ?? root?.querySelector< HTMLElement >( '.wc-pl-images__add' ) ?? root?.querySelector< HTMLElement >( '.wc-pl-images__actions .wc-pl-images__tool' ) ?? null;
+}
 
 /** How long the pointer rests on a thumbnail before the media library and the row's images start loading. */
 const HOVER_INTENT_MS = 150;
@@ -243,30 +252,38 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 	}, [] );
 
 	const title = variation ? __( 'Variation image', 'wp-woocommerce-products-list' ) : __( 'Product images', 'wp-woocommerce-products-list' );
-	// Beside the thumbnail where there is room; under it on a phone, kept on screen and scrolled if need be.
+	// Beside the thumbnail (under it on a phone), moved up as far as a big gallery needs: style.scss caps its height
+	// below the admin bar. Shrunk to the room below the thumbnail, as `resize` would, it could not move. The images
+	// scroll if need be.
 	const narrow = useViewportMatch( 'medium', '<' );
 	const bodyRef = useRef< HTMLDivElement | null >( null );
 
 	// The dialog takes the focus at once (Cancel would be the only button while the images load), then its first
-	// image (or "Add images") once they are there.
+	// image (or "Add images") once they are there. Without scrolling: the popover may not be in its place yet, and the
+	// page scrolled under it would move the thumbnail it is beside.
 	useEffect( () => {
-		bodyRef.current?.focus();
+		bodyRef.current?.focus( { preventScroll: true } );
 	}, [] );
 
 	useEffect( () => {
 		if ( base && bodyRef.current?.contains( document.activeElement ) && document.activeElement === bodyRef.current ) {
-			bodyRef.current.querySelector< HTMLElement >( '.wc-pl-images__tool, .wc-pl-images__add' )?.focus();
+			firstTool( bodyRef.current )?.focus( { preventScroll: true } );
 		}
 	}, [ base ] );
 
 	return (
 		<Popover
 			anchor={ anchor }
-			placement={ narrow ? 'bottom' : 'right-start' }
+			placement={ narrow ? 'bottom' : isRTL() ? 'left-start' : 'right-start' }
 			offset={ 8 }
+			// The thumbnail is at the table's start: there is always room after it (flipped to end at the thumbnail's
+			// foot, a tall popover would be pushed under the admin bar).
+			flip={ false }
 			shift
-			resize
-			className="wc-pl-images-popover"
+			resize={ false }
+			// Tab goes round the popover's own controls (it is a dialog), never on to the page under it.
+			constrainTabbing
+			className={ `wc-pl-images-popover${ variation ? ' is-single' : '' }` }
 			focusOnMount={ false }
 			// Escape closes and discards; a click elsewhere closes only when nothing changed, and never while the media library is open over it.
 			onClose={ () => {
@@ -307,7 +324,10 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 					</div>
 				) : null }
 				{ base && (
-					<ImagesEditor value={ images } onChange={ setImages } disabled={ saving } single={ variation } postId={ variation ? parentIdOf( item ) || item.id : item.id } itemName={ name } onBusyChange={ setBusy } />
+					// The one part that scrolls: the title and the buttons stay in view.
+					<div className="wc-pl-images-popover__scroll">
+						<ImagesEditor value={ images } onChange={ setImages } disabled={ saving } single={ variation } postId={ variation ? parentIdOf( item ) || item.id : item.id } itemName={ name } onBusyChange={ setBusy } />
+					</div>
 				) }
 				{ askDiscard && dirty && (
 					<div className="wc-pl-images-popover__confirm" role="alert">
@@ -318,7 +338,7 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 							onClick={ () => {
 								setAskDiscard( false );
 								// Back into the images (this button goes away with the question).
-								window.requestAnimationFrame( () => bodyRef.current?.querySelector< HTMLElement >( '.wc-pl-images__tool, .wc-pl-images__add' )?.focus() );
+								window.requestAnimationFrame( () => firstTool( bodyRef.current )?.focus() );
 							} }
 						>
 							{ __( 'Keep editing', 'wp-woocommerce-products-list' ) }

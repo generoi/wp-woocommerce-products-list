@@ -146,6 +146,29 @@ describe( 'progress announcements', () => {
 		activity.finishSaveJob( save );
 		activity.finishSaveJob( revert );
 	} );
+
+	it( 'leaves a save from a table cell to its row: locked, marked and guarded, no bar pushing the list down', async () => {
+		const activity = await import( '../../resources/store/save-activity' );
+		const { renderHook } = await import( '@testing-library/react' );
+		const added = vi.spyOn( window, 'addEventListener' );
+		const { result, rerender } = renderHook( () => activity.useSaveActivity() );
+		const job = activity.startSaveJob( [ 601 ], 'save', { quiet: true } );
+
+		rerender();
+		expect( result.current ).toBeNull();
+		expect( activity.isRowPending( 601 ) ).toBe( true );
+		expect( added ).toHaveBeenCalledWith( 'beforeunload', expect.any( Function ) );
+
+		// Any other one-row save (quick edit, a History revert) still shows the bar.
+		const other = activity.startSaveJob( [ 602 ] );
+
+		rerender();
+		expect( result.current?.jobs ).toBe( 1 );
+		activity.finishSaveJob( other );
+		activity.finishSaveJob( job );
+		expect( activity.isRowPending( 601 ) ).toBe( false );
+		added.mockRestore();
+	} );
 } );
 
 describe( 'logSkipped with failed rows', () => {

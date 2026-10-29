@@ -47,7 +47,7 @@ async function undoAll( batches: string[] ): Promise< void > {
 	forgetImagesRows();
 
 	for ( const batchId of batches.slice().reverse() ) {
-		const outcome = await undoBatch( batchId, { quiet: true } );
+		const outcome = await undoBatch( batchId, { quiet: true, fromTable: true } );
 
 		ok += outcome.ok;
 		failed += outcome.failed;
@@ -107,7 +107,7 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 	// Only this row is locked while it saves: a bulk save also locks a variation's parent, and with it every sibling
 	// (hierarchy/chevron.tsx), which would take the next row's input away from the keyboard as Enter moves down to it.
 	// The table never saves a variation while its parent's row saves (cells.tsx, commitRow waits).
-	const job = startSaveJob( [ item.id ] );
+	const job = startSaveJob( [ item.id ], 'save', { quiet: true } );
 
 	try {
 		result = await saveEdits( [ item ], edits, fields, { applyToVariations: false, source: 'quick', saveJob: job } );
@@ -168,7 +168,7 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 								void undoAll( batches );
 							} else {
 								forgetImagesRows();
-								void undoBatch( batches[ 0 ] as string, { focus: captureFocusOrigin() } );
+								void undoBatch( batches[ 0 ] as string, { focus: captureFocusOrigin(), fromTable: true } );
 							}
 						},
 					},
