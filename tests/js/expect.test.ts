@@ -65,6 +65,13 @@ describe( 'expectedValues: names', () => {
 		expect( expectedValues( item, { name: 'Juli, 31 X' } ) ).toEqual( { name: 'Juli, 31' } );
 		expect( writeItem( item, { name: 'Juli, 31 X', regular_price: '60' } ) ).toEqual( { id: 2512, name: 'Juli, 31 X', regular_price: '60', _wcpl_expect: { name: 'Juli, 31', regular_price: '50' } } );
 	} );
+
+	it( 'asks to take the product editor\'s lock over only when the user chose "Take over"', () => {
+		const item = variation( 2512, 2500 ) as ProductListItem;
+
+		expect( writeItem( item, { regular_price: '60' } ) ).not.toHaveProperty( '_wcpl_take_over' );
+		expect( writeItem( item, { regular_price: '60' }, true ) ).toMatchObject( { id: 2512, regular_price: '60', _wcpl_take_over: true } );
+	} );
 } );
 
 describe( 'expectedValues: dimensions', () => {

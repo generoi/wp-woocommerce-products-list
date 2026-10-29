@@ -238,6 +238,8 @@ export interface SaveOptions extends RowEditOptions {
 	 * user started editing it (shown-values.ts), never values loaded afterwards; the row itself when missing.
 	 */
 	expectBase?( item: ProductListItem ): ProductListItem;
+	/** Save past the product editor's post lock, taking it over (the user chose "Take over" after a refusal). */
+	takeOver?: boolean;
 }
 
 export interface Prepared {
@@ -719,7 +721,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 				for ( const group of lane ) {
 					try {
 						const response = await across(
-							group.map( ( entry ) => ( { ...writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ), parent_id: parentIdOf( entry.target.item ) } ) ),
+							group.map( ( entry ) => ( { ...writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload, options.takeOver ), parent_id: parentIdOf( entry.target.item ) } ) ),
 							requestOptions
 						);
 
@@ -740,7 +742,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 				patchSoon( group.map( ( entry ) => optimisticPatch( entry.target, entry.payload ) ) );
 
 				try {
-					const response = await deps.batchVariations( parentId, group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ) ), requestOptions );
+					const response = await deps.batchVariations( parentId, group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload, options.takeOver ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {
@@ -765,7 +767,7 @@ async function writePlan( deps: SaveDeps, prepared: Prepared[], result: SaveResu
 		await runConcurrently(
 			chunk( parents, size ).map( ( group ) => async () => {
 				try {
-					const response = await deps.batchProducts( group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload ) ), requestOptions );
+					const response = await deps.batchProducts( group.map( ( entry ) => writeItem( options.expectBase?.( entry.target.item ) ?? entry.target.item, entry.payload, options.takeOver ) ), requestOptions );
 
 					applyResponse( group, response );
 				} catch ( error ) {

@@ -40,7 +40,10 @@ use WP_REST_Request;
  * An item open in WordPress's product editor by another user (core's post
  * lock, `_edit_lock`, on the product or on a variation's parent) is
  * refused with `wc_products_list_editing` (409): their Update would put
- * the form's values back over the save without a word.
+ * the form's values back over the save without a word. An item that
+ * carries `_wcpl_take_over: true` (the user chose "Take over", as core's
+ * own lock dialog offers) takes the lock instead and is saved: the other
+ * editor's heartbeat then says the post was taken over and locks its form.
  *
  * Writes to a product in the Trash (or a variation of one) are refused
  * with `wc_products_list_trashed` (409) unless the request sets `status`.
@@ -51,6 +54,12 @@ final class Concurrency
 {
     /** The per-item request key with the expected values. */
     public const EXPECT_KEY = '_wcpl_expect';
+
+    /** The per-item request key that takes over the product editor's post lock (`takeOver()`). */
+    public const TAKE_OVER_KEY = '_wcpl_take_over';
+
+    /** Post meta: the `_edit_lock` value `takeOver()` wrote (the lock is the user's, but no editor holds it). */
+    public const TAKEN_LOCK_KEY = '_wcpl_taken_lock';
 
     public const CONFLICT_ERROR = 'wc_products_list_conflict';
 
@@ -834,6 +843,9 @@ final class Concurrency
      * caches. The current user's own lock counts too: their product editor
      * in another tab would put its form's values back over the save just
      * the same (an Update re-posts every field of the product data box).
+     * A lock `takeOver()` wrote for the current user is not one, until an
+     * editor's heartbeat refreshes it (an editor of theirs really is open):
+     * the next save and the Undo of the one taken over go through.
      */
     public static function editingUser(int $id, int $parentId = 0): int
     {
@@ -847,15 +859,29 @@ final class Concurrency
 
         $placeholders = implode(',', array_fill(0, count($ids), '%d'));
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $locks = $wpdb->get_col($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_edit_lock' AND post_id IN ({$placeholders})", ...$ids));
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key IN ('_edit_lock', %s) AND post_id IN ({$placeholders})", self::TAKEN_LOCK_KEY, ...$ids), ARRAY_A);
+        $locks = [];
+        $taken = [];
+
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if ($row['meta_key'] === '_edit_lock') {
+                $locks[(int) $row['post_id']] = (string) $row['meta_value'];
+            } else {
+                $taken[(int) $row['post_id']] = (string) $row['meta_value'];
+            }
+        }
 
         /** This filter is documented in wp-admin/includes/ajax-actions.php */
         $window = (int) apply_filters('wp_check_post_lock_window', 150);
 
-        foreach (is_array($locks) ? $locks : [] as $lock) {
-            $parts = explode(':', (string) $lock);
+        foreach ($locks as $postId => $lock) {
+            $parts = explode(':', $lock);
             $time = (int) $parts[0];
             $user = (int) ($parts[1] ?? 0);
+
+            if ($user === get_current_user_id() && ($taken[$postId] ?? null) === $lock) {
+                continue;
+            }
 
             if ($time > 0 && $user > 0 && $time > time() - $window) {
                 return $user;
@@ -863,6 +889,32 @@ final class Concurrency
         }
 
         return 0;
+    }
+
+    /**
+     * Takes WordPress's post lock of the object and of a variation's parent
+     * for the current user where another lock is live, as core's "Take
+     * over" does (`wp_set_post_lock()`, written here since REST requests do
+     * not load wp-admin/includes/post.php). The other editor's heartbeat
+     * (`wp_refresh_post_lock`) then finds the lock gone and shows its
+     * "taken over" dialog instead of letting its Update write the form back.
+     */
+    public static function takeOver(int $id, int $parentId = 0): void
+    {
+        $user = get_current_user_id();
+
+        if ($user <= 0) {
+            return;
+        }
+
+        foreach (array_filter([$id, $parentId], static fn (int $postId): bool => $postId > 0) as $postId) {
+            if (self::editingUser($postId) > 0) {
+                $lock = time().':'.$user;
+
+                update_post_meta($postId, '_edit_lock', $lock);
+                update_post_meta($postId, self::TAKEN_LOCK_KEY, $lock);
+            }
+        }
     }
 
     public static function editingError(int $id, int $user): WP_Error

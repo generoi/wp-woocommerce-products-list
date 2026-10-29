@@ -1005,6 +1005,38 @@ class ConcurrencyTest extends RestTestCase
         $this->assertStatus(200, $this->request('PUT', '/wc/v3/products/'.$id, ['regular_price' => '19']));
     }
 
+    public function test_take_over_saves_past_the_editor_lock_and_takes_it(): void
+    {
+        $me = get_current_user_id();
+        $other = self::factory()->user->create(['role' => 'shop_manager']);
+        $parent = $this->variableProduct(['38']);
+        [$v] = $parent->get_children();
+        update_post_meta($parent->get_id(), '_edit_lock', time().':'.$other);
+
+        $items = $this->data($this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [
+            ['id' => $v, 'sale_price' => '5', Concurrency::TAKE_OVER_KEY => true],
+        ]]))['update'];
+
+        $this->assertArrayNotHasKey('error', $items[0]);
+        $this->assertSame('5', get_post_meta($v, '_sale_price', true));
+        // The lock is the current user's now: the other editor's heartbeat says it was taken over.
+        $this->assertSame($me, (int) explode(':', (string) get_post_meta($parent->get_id(), '_edit_lock', true))[1]);
+        // A variation has no lock of its own to take.
+        $this->assertSame('', get_post_meta($v, '_edit_lock', true));
+        // Not a field of the change log.
+        $this->assertNotContains(Concurrency::TAKE_OVER_KEY, array_column($this->rows(), 'field'));
+
+        // The lock taken over is no clash for the next save (or the Undo) without taking over again...
+        $this->assertStatus(200, $this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [['id' => $v, 'sale_price' => '6']]]));
+        $this->assertSame('6', get_post_meta($v, '_sale_price', true));
+
+        // ...until an editor of the user's own refreshes it (their heartbeat): then it is one again.
+        update_post_meta($parent->get_id(), '_edit_lock', (time() + 1).':'.$me);
+        $items = $this->data($this->request('POST', '/wc-products-list/v1/variations/batch', ['update' => [['id' => $v, 'sale_price' => '7']]]))['update'];
+        $this->assertSame(Concurrency::EDITING_ERROR, $items[0]['error']['code']);
+        $this->assertSame('6', get_post_meta($v, '_sale_price', true));
+    }
+
     public function test_row_actions_are_refused_while_the_product_is_open_in_the_editor(): void
     {
         $other = self::factory()->user->create(['role' => 'shop_manager']);

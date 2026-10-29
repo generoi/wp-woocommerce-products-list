@@ -85,11 +85,24 @@ export function fieldList( labels: string[] ): string {
 	return sprintf( __( '%1$s and %2$s', 'wp-woocommerce-products-list' ), labels.slice( 0, -1 ).join( ', ' ), labels[ labels.length - 1 ] ?? '' );
 }
 
+/** The refusal of an item open in the product editor (docs/contracts.md §3.6 item 5); "Take over" saves past it. */
+export const EDITING_ERROR = 'wc_products_list_editing';
+
+export interface SaveRowOptions {
+	/** Save past the product editor's post lock, taking it over (the user chose "Take over"). */
+	takeOver?: boolean;
+	/**
+	 * Saves again with `takeOver`: offered as "Take over" on the snackbar of a save refused because the product is open
+	 * in the product editor (as core's lock dialog offers it).
+	 */
+	onTakeOver?: () => void;
+}
+
 /**
  * @param group Whether the save joins the table's recent saves under one "Undo all" (the cells' saves); the images
  *              popover's save stands alone.
  */
-export async function saveRow( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], group = true ): Promise< RowSaveOutcome > {
+export async function saveRow( item: ProductListItem, edits: Record< string, unknown >, fields: ProductField[], group = true, { takeOver = false, onTakeOver }: SaveRowOptions = {} ): Promise< RowSaveOutcome > {
 	const byId = new Map( fields.map( ( field ) => [ field.id, field ] ) );
 	const labels = Object.keys( edits ).map( ( id ) => {
 		const field = byId.get( id );
@@ -110,7 +123,7 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 	const job = startSaveJob( [ item.id ], 'save', { quiet: true } );
 
 	try {
-		result = await saveEdits( [ item ], edits, fields, { applyToVariations: false, source: 'quick', saveJob: job } );
+		result = await saveEdits( [ item ], edits, fields, { applyToVariations: false, source: 'quick', saveJob: job, takeOver } );
 	} catch ( caught ) {
 		const message = caught instanceof Error ? caught.message : String( ( caught as { message?: unknown } | null )?.message ?? caught );
 
@@ -124,7 +137,24 @@ export async function saveRow( item: ProductListItem, edits: Record< string, unk
 	const error = result.errors.find( ( entry ) => entry.id === item.id ) ?? result.errors[ 0 ];
 
 	if ( error ) {
-		notify.error( sprintf( /* translators: 1: product name, 2: error */ __( '%1$s was not saved: %2$s', 'wp-woocommerce-products-list' ), name, error.message ), { id: INLINE_SAVED_NOTICE_ID } );
+		const takeOverAction =
+			error.code === EDITING_ERROR && onTakeOver
+				? {
+						// Stays until answered: the choice is the user's.
+						explicitDismiss: true,
+						actions: [
+							{
+								label: __( 'Take over', 'wp-woocommerce-products-list' ),
+								onClick: () => {
+									notify.remove( INLINE_SAVED_NOTICE_ID );
+									onTakeOver();
+								},
+							},
+						],
+				  }
+				: {};
+
+		notify.error( sprintf( /* translators: 1: product name, 2: error */ __( '%1$s was not saved: %2$s', 'wp-woocommerce-products-list' ), name, error.message ), { id: INLINE_SAVED_NOTICE_ID, ...takeOverAction } );
 
 		return { ok: false, message: error.message, code: error.code };
 	}

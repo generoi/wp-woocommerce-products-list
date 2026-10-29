@@ -253,7 +253,7 @@ function stillSent( now: CellDraft | undefined, sent: CellDraft | undefined ): b
  * typed meanwhile; a row whose drafts do not validate is not saved, its cells
  * say why.
  */
-export async function commitRow( item: ProductListItem, context: InlineEditValue ): Promise< void > {
+export async function commitRow( item: ProductListItem, context: InlineEditValue, takeOver = false ): Promise< void > {
 	if ( ! rowDrafts( item.id ).size || isRowSaving( item.id ) ) {
 		return;
 	}
@@ -294,7 +294,11 @@ export async function commitRow( item: ProductListItem, context: InlineEditValue
 	setRowSaving( item.id, true );
 
 	try {
-		const outcome = await saveRow( item, edits, context.fields );
+		const outcome = await saveRow( item, edits, context.fields, true, {
+			takeOver,
+			// Refused because the product is open in the product editor: "Take over" saves the row's drafts past its lock.
+			onTakeOver: () => void commitRow( findCachedRow( item.id ) ?? item, context, true ),
+		} );
 		// Drafts typed while it saved stay (and save next); the ones sent are done or flagged.
 		const settled = Array.from( sent.keys() ).filter( ( id ) => stillSent( getDraft( item.id, id ), sent.get( id ) ) );
 

@@ -52,6 +52,9 @@ import { isPlainObject } from './field-value';
 /** The per-item request key. */
 export const EXPECT_KEY = '_wcpl_expect';
 
+/** The per-item key that takes over the product editor's post lock (docs/contracts.md §3.6 item 5). */
+export const TAKE_OVER_KEY = '_wcpl_take_over';
+
 /** wc/v3 keys whose list value is the stored form (scalars as wc/v3 returns them; term lists by id). */
 const SCALAR_KEYS: ReadonlySet< string > = new Set( [
 	'name',
@@ -335,9 +338,12 @@ export function expectedValues( item: ProductListItem, payload: Record< string, 
 	return Object.keys( expect ).length ? expect : null;
 }
 
-/** A write's request item: id, payload and (when known) the expected values. */
-export function writeItem( item: ProductListItem, payload: Record< string, unknown > ): { id: number } & Record< string, unknown > {
+/**
+ * A write's request item: id, payload and (when known) the expected values; `takeOver` saves past the product
+ * editor's post lock, taking it (the user chose "Take over").
+ */
+export function writeItem( item: ProductListItem, payload: Record< string, unknown >, takeOver = false ): { id: number } & Record< string, unknown > {
 	const expect = expectedValues( item, payload );
 
-	return { id: item.id, ...payload, ...( expect ? { [ EXPECT_KEY ]: expect } : {} ) };
+	return { id: item.id, ...payload, ...( expect ? { [ EXPECT_KEY ]: expect } : {} ), ...( takeOver ? { [ TAKE_OVER_KEY ]: true } : {} ) };
 }

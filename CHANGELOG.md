@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 - 2026-10-29
+
+- A save from the table refused because the product is open in the product editor (or was, and its lock has not lapsed: up to 2½ minutes after the editor is left) offers **Take over** in its snackbar, which stays until answered; the images popover offers it beside its error. Taking over saves the change and takes WordPress's post lock, as core's own "Take over" does: another user's editor then shows core's "taken over" dialog instead of letting its Update put the form back. The lock taken over is no clash for the next saves and their Undo, until an editor of the user's own refreshes it (`_wcpl_take_over` per item, `_wcpl_taken_lock` post meta, docs/contracts.md §3.6).
+
 ## 0.5.1 - 2026-10-29
 
 Nothing moves when the table is edited; a larger images popover.

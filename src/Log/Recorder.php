@@ -39,7 +39,7 @@ final class Recorder
     public const INVENTORY_DELTA = 'inventory_delta';
 
     /** Request keys that are addressing, not data. */
-    public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id', '_wcpl_expect'];
+    public const IGNORED_KEYS = ['id', 'product_id', 'context', '_fields', '_locale', '_method', '_envelope', 'force', 'parent_id', '_wcpl_expect', '_wcpl_take_over'];
 
     /**
      * Fields WooCommerce changes on its own when one of the keys is

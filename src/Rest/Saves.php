@@ -622,7 +622,8 @@ final class Saves
      * a write to a trashed row or one deleted meanwhile (404
      * `wc_products_list_deleted`, logged as skipped with reason
      * `deleted`), refuse an item another user has open in the product
-     * editor (409 `wc_products_list_editing`, reason `editing`), and
+     * editor (409 `wc_products_list_editing`, reason `editing`) unless
+     * the item asks to take the editor's lock over (`_wcpl_take_over`), and
      * refuse the item when a field it
      * changes no longer has the value the editor based the change on.
      *
@@ -642,10 +643,15 @@ final class Saves
             return Concurrency::deletedError($id);
         }
 
-        $editing = Concurrency::editingUser($id, $product->is_type('variation') ? (int) $product->get_parent_id() : 0);
+        $parentId = $product->is_type('variation') ? (int) $product->get_parent_id() : 0;
+        $editing = Concurrency::editingUser($id, $parentId);
 
         if ($editing > 0) {
-            return Concurrency::editingError($id, $editing);
+            if (rest_sanitize_boolean($request->get_param(Concurrency::TAKE_OVER_KEY)) !== true) {
+                return Concurrency::editingError($id, $editing);
+            }
+
+            Concurrency::takeOver($id, $parentId);
         }
 
         if (Concurrency::trashed($product) && $request->get_param('status') === null) {

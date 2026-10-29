@@ -23,7 +23,7 @@ import type { ProductListItem, RawImage } from '../../types';
 import { Button, Spinner } from '../../ui';
 import { InlineEditContext } from './mode';
 import { forgetImagesRows, loadImagesRow } from './gallery-cache';
-import { saveRow } from './save-row';
+import { EDITING_ERROR, saveRow } from './save-row';
 import type { RowSaveOutcome } from './save-row';
 
 function sameImages( a: RawImage[], b: RawImage[] ): boolean {
@@ -145,9 +145,9 @@ function ImageButton( { item }: { item: ProductListItem } ) {
 					item={ item }
 					name={ name }
 					onClose={ close }
-					onSave={ async ( base, images ) => {
+					onSave={ async ( base, images, takeOver ) => {
 						// The popover stays (Save busy) until the save is in: a refused one keeps the images as arranged.
-						const outcome = await saveRow( base, { images }, context.fields, false );
+						const outcome = await saveRow( base, { images }, context.fields, false, { takeOver } );
 
 						forgetImagesRows();
 
@@ -169,7 +169,8 @@ interface ImagesPopoverProps {
 	item: ProductListItem;
 	name: string;
 	onClose: ( focus?: boolean ) => void;
-	onSave: ( base: ProductListItem, images: RawImage[] ) => Promise< RowSaveOutcome >;
+	/** `takeOver`: save past the product editor's post lock (the user chose "Take over" after a refusal). */
+	onSave: ( base: ProductListItem, images: RawImage[], takeOver?: boolean ) => Promise< RowSaveOutcome >;
 }
 
 function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverProps ) {
@@ -178,6 +179,8 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 	// shows its parent's image when it has none of its own (hydrate.ts reads it in the edit context).
 	const [ base, setBase ] = useState< ProductListItem | null >( null );
 	const [ error, setError ] = useState< string | null >( null );
+	// The last save was refused because the product is open in the product editor: "Take over" is offered.
+	const [ lockedOut, setLockedOut ] = useState( false );
 	const [ images, setImages ] = useState< RawImage[] >( [] );
 	const [ busy, setBusy ] = useState( false );
 	const [ saving, setSaving ] = useState( false );
@@ -207,19 +210,21 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 			return row;
 		} );
 
-	const save = async () => {
+	const save = async ( takeOver = false ) => {
 		if ( ! base ) {
 			return;
 		}
 
 		setSaving( true );
 		setError( null );
+		setLockedOut( false );
 
-		const outcome = await onSave( base, images );
+		const outcome = await onSave( base, images, takeOver );
 
 		if ( ! outcome.ok ) {
 			setSaving( false );
 			setError( outcome.message ?? __( 'The images were not saved.', 'wp-woocommerce-products-list' ) );
+			setLockedOut( outcome.code === EDITING_ERROR );
 
 			// Someone else saved the product meanwhile: its images now are the base, what was arranged here stays.
 			if ( outcome.code === 'wc_products_list_conflict' ) {
@@ -314,7 +319,12 @@ function ImagesPopover( { anchor, item, name, onClose, onSave }: ImagesPopoverPr
 				</div>
 				{ error && (
 					<p className="wc-pl-images__error" role="alert">
-						{ error }
+						{ error }{ ' ' }
+						{ lockedOut && (
+							<Button variant="link" onClick={ () => void save( true ) }>
+								{ __( 'Take over', 'wp-woocommerce-products-list' ) }
+							</Button>
+						) }
 					</p>
 				) }
 				{ ! base && ! error ? (
